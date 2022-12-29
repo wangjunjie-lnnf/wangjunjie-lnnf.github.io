@@ -1,3 +1,11 @@
+---
+layout: post
+title:  "Setup Jekyll!"
+date:   2022-12-29 14:32:07 +0800
+categories: jekyll
+tags: jekyll
+---
+
 ### setup jekyll
 1. open http://github.io and read the doc
 2. open https://jekyllrb.com/docs/ and read the doc
