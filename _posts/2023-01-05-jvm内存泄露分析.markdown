@@ -5,7 +5,7 @@
 
 ## 起因
 
-> 自从上线了数据源连通性校验的新功能后，频繁收到生产环节内存使用率超过95%的告警通知，重启之后隔3天又会出现，怀疑是出现了内存泄露
+自从上线了数据源连通性校验的新功能后，频繁收到生产环节内存使用率超过95%的告警通知，重启之后隔3天又会出现，怀疑是出现了内存泄露
 
 ---
 
@@ -30,11 +30,11 @@ java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue.take()Ljava/ut
 ScheduledThreadPoolExecutor.java:1093
 ```
 
-> 从报告中可以看出，发生泄露的线程名称是`commons-pool-evictor-thread`, 经查，这是`commons-pool2`的线程，用于定时清除连接池中无效的连接
+从报告中可以看出，发生泄露的线程名称是`commons-pool-evictor-thread`, 经查，这是`commons-pool2`的线程，用于定时清除连接池中无效的连接
 
 ### 2. 查看`commons-pool2`的源码，定位问题
 
-> 最终定位发生泄露的地方在类`org.apache.commons.pool2.impl.EvictionTimer`，项目中间接依赖的是2.5.0版本的`commons-pool2`，2.4.x向2.5.x过渡时，定时任务调度机制从`Timer`改成了`ScheduledThreadPoolExecutor`，导致关闭连接池时`cancel`定时任务失败。项目中有一个功能是验证用户自己注册的`redis`数据源是否能连通，需要频繁的跟`redis`建立短链接。时间久了就会导致上述分析报告中描述的问题，无界队列一直在增加定时任务，最终导致内存耗尽。
+最终定位发生泄露的地方在类`org.apache.commons.pool2.impl.EvictionTimer`，项目中间接依赖的是2.5.0版本的`commons-pool2`，2.4.x向2.5.x过渡时，定时任务调度机制从`Timer`改成了`ScheduledThreadPoolExecutor`，导致关闭连接池时`cancel`定时任务失败。项目中有一个功能是验证用户自己注册的`redis`数据源是否能连通，需要频繁的跟`redis`建立短链接。时间久了就会导致上述分析报告中描述的问题，无界队列一直在增加定时任务，最终导致内存耗尽。
 
 ---
 
@@ -132,7 +132,8 @@ static synchronized void cancel(
 
 ### `2.5.0`版本为什么`cancel`失败
 
-分析`ScheduledThreadPoolExecutor`提交任务的代码，提交到任务队列的任务是在参数`command`的基础上又封装了一层，封装层实现定时调度逻辑。`cancel`也需要通过封装层来实现。
+分析`ScheduledThreadPoolExecutor`提交任务的代码，提交到任务队列的任务是在参数`command`的基础上又封装了一层，封装层实现定时调度逻辑。`cancel`也需要通过封装层来实现。  
+
 ```java
 public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
                                                 long initialDelay,
@@ -157,20 +158,20 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
 
 ---
 
-### `eclipse` `mat`分析内存泄露的处理逻辑 
+### `eclipse mat`分析内存泄露的处理逻辑 
 
 1. 构造`支配树(Dominator Tree)`
 `https://help.eclipse.org/latest/index.jsp?topic=%2Forg.eclipse.mat.ui.help%2Fconcepts%2Fdominatortree.html`
 
-> Memory Analyzer provides a dominator tree of the object graph. The transformation of the object reference graph into a dominator tree allows you to easily identify the biggest chunks of retained memory and the keep-alive dependencies among objects. Bellow is an informal definition of the terms.
+Memory Analyzer provides a dominator tree of the object graph. The transformation of the object reference graph into a dominator tree allows you to easily identify the biggest chunks of retained memory and the keep-alive dependencies among objects. Bellow is an informal definition of the terms.
 
-> An object x dominates an object y if every path in the object graph from the start (or the root) node to y must go through x.
+An object x dominates an object y if every path in the object graph from the start (or the root) node to y must go through x.
 
-> The immediate dominator x of some object y is the dominator closest to the object y.
+The immediate dominator x of some object y is the dominator closest to the object y.
 
-> A dominator tree is built out of the object graph. In the dominator tree each object is the immediate dominator of its children, so dependencies between the objects are easily identified.
+A dominator tree is built out of the object graph. In the dominator tree each object is the immediate dominator of its children, so dependencies between the objects are easily identified.
 
-> The dominator tree has the following important properties:
+The dominator tree has the following important properties:
 
 * The objects belonging to the sub-tree of x (i.e. the objects dominated by x ) represent the retained set of x .
 * If x is the immediate dominator of y , then the immediate dominator of x also dominates y , and so on.
@@ -178,39 +179,39 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
 
 ![dominator-tree](/assets/images/2023-01-05/dominator-tree.png)
 
-> 总结:  
-> 根据dump文件中的对象图构造支配树供后续分析过程使用
+总结:  
+根据dump文件中的对象图构造支配树供后续分析过程使用
 
 ---
 
 2. 泄露分析策略
 `https://help.eclipse.org/latest/index.jsp?topic=%2Forg.eclipse.mat.ui.help%2Ftasks%2Frunningleaksuspectreport.html&cp%3D52_3_2`
 
-> The standard leak suspects report operates just using the heap dump data, which is a snapshot from a particular moment. It does not use any time information as to when objects were allocated.
+The standard leak suspects report operates just using the heap dump data, which is a snapshot from a particular moment. It does not use any time information as to when objects were allocated.
 
-> The starting point is the dominator tree . <font color=red size=4>The biggest items at the top level of the dominator tree are analyzed, and if an item retains a significant amount of memory (default is **10%**) then that item could be the cause of the memory leak</font> because if it were no longer referenced then all that memory could be freed.
+The starting point is the dominator tree . <font color=red size=4>The biggest items at the top level of the dominator tree are analyzed, and if an item retains a significant amount of memory (default is **10%**) then that item could be the cause of the memory leak</font> because if it were no longer referenced then all that memory could be freed.
 
-> It could be that single objects do not retain a significant amount of memory but many objects all of one type do. This is a second class of leak suspect. This type is found using the dominator tree, <font color=red size=4>grouped by class</font>.
+It could be that single objects do not retain a significant amount of memory but many objects all of one type do. This is a second class of leak suspect. This type is found using the dominator tree, <font color=red size=4>grouped by class</font>.
 
-> Further analysis is then done on each leak suspect. For a single object leak suspect the retained objects are analyzed in the dominator tree to see if there is an accumulation point . <font color=red size=4>An accumulation point is an object with a big difference between the retained size of itself and the largest retained size of a child object</font>. These are places where the memory of many small objects is accumulated under one object. If the leak suspect is a thread then thread related information such as the call stack is shown, together with interesting stack frames which have local variables referring to objects on the path to the accumulation point. If the leak suspect is a class loader then this is mentioned as being an interesting component of the application. If the leak suspect is a class then its class loader is mentioned as being an interesting component of the application.
+Further analysis is then done on each leak suspect. For a single object leak suspect the retained objects are analyzed in the dominator tree to see if there is an accumulation point . <font color=red size=4>An accumulation point is an object with a big difference between the retained size of itself and the largest retained size of a child object</font>. These are places where the memory of many small objects is accumulated under one object. If the leak suspect is a thread then thread related information such as the call stack is shown, together with interesting stack frames which have local variables referring to objects on the path to the accumulation point. If the leak suspect is a class loader then this is mentioned as being an interesting component of the application. If the leak suspect is a class then its class loader is mentioned as being an interesting component of the application.
 
-> The Shortest Paths To the Accumulation Point shows a path from a garbage collection root to the accumulation point. There will be other paths, otherwise an object on the path would retain the leak suspect, so itself would be considered a leak suspect. If the root is a thread object then thread related information is also shown.
+The Shortest Paths To the Accumulation Point shows a path from a garbage collection root to the accumulation point. There will be other paths, otherwise an object on the path would retain the leak suspect, so itself would be considered a leak suspect. If the root is a thread object then thread related information is also shown.
 
-> The Accumulated Objects in Dominator Tree shows the dominator tree from the leak suspect to the accumulation point and also the objects that the accumulation point retains. This helps understand the context of the leak, and what is being accumulated. The Accumulated Objects by Class in Dominator Tree shows just the children in the dominator tree of the accumulation point, grouped by class. This is useful if there are many objects, as there will be fewer types. All Accumulated Objects by Class shows all the objects retained by the accumulation point, including the accumulation point, but grouped by class so it easier to see what is taking up the heap space.
+The Accumulated Objects in Dominator Tree shows the dominator tree from the leak suspect to the accumulation point and also the objects that the accumulation point retains. This helps understand the context of the leak, and what is being accumulated. The Accumulated Objects by Class in Dominator Tree shows just the children in the dominator tree of the accumulation point, grouped by class. This is useful if there are many objects, as there will be fewer types. All Accumulated Objects by Class shows all the objects retained by the accumulation point, including the accumulation point, but grouped by class so it easier to see what is taking up the heap space.
 
-> If the leak suspect is a group of objects then the biggest few objects are shown by Biggest Instances . If there are many objects and none uses more than 1% of the leak then this is omitted.
+If the leak suspect is a group of objects then the biggest few objects are shown by Biggest Instances . If there are many objects and none uses more than 1% of the leak then this is omitted.
 
-> <font color=red size=4>If the leak suspect is a group of objects then the query attempts to find an interesting (not a standard Java class) object which indirectly refers to all of those objects. This is also called an accumulation point but is below the leak suspects in the dominator tree, rather than above the leak suspect object in the single object case</font>. Common Path To the Accumulation Point shows a shortest path from a GC root to the accumulation point, giving a guide as to what in the application refers to the accumulation point. If the root of this path is a thread then some interesting thread related information is also extracted.
+<font color=red size=4>If the leak suspect is a group of objects then the query attempts to find an interesting (not a standard Java class) object which indirectly refers to all of those objects. This is also called an accumulation point but is below the leak suspects in the dominator tree, rather than above the leak suspect object in the single object case</font>. Common Path To the Accumulation Point shows a shortest path from a GC root to the accumulation point, giving a guide as to what in the application refers to the accumulation point. If the root of this path is a thread then some interesting thread related information is also extracted.
 
-> Learn more in this blog posting: [Automated Heap Dump Analysis: Finding Memory Leaks with One Click](https://memoryanalyzer.blogspot.com/2008/05/automated-heap-dump-analysis-finding.html) .
+Learn more in this blog posting: [Automated Heap Dump Analysis: Finding Memory Leaks with One Click](https://memoryanalyzer.blogspot.com/2008/05/automated-heap-dump-analysis-finding.html) .
 
 ![accumulation-point](/assets/images/2023-01-05/accumulation-point.gif)
 
-> 总结:  
+总结:  
 * 沿着支配树从上往下查找占用内存超过10%的对象，如果此对象的size跟它最大的child的size差别很大，说明此处是一个累加点。    
 * 另外一种情况是没有大对象，此时按class分类，查找其实例占用内存最多的class（大量的小对象没被gc又没有累加点，可能是发生了递归调用，这些小对象都被各自的栈帧引用）。  
 
-> Examples of summaries of leak suspects:  
+Examples of summaries of leak suspects:  
 
 * Problem Suspect 1: 累加点  
 ```
