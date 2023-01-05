@@ -214,7 +214,7 @@ Learn more in this blog posting: [Automated Heap Dump Analysis: Finding Memory L
 Examples of summaries of leak suspects:  
 
 * Problem Suspect 1: 累加点  
-```
+
 One instance of "org.eclipse.mat.ui.compare.CompareBasketView$ComparePolicy"
 loaded by "org.eclipse.mat.ui" occupies 487,234,584 (28.60%) bytes.
 The memory is accumulated in one instance of "java.lang.Object[]",
@@ -224,10 +224,11 @@ Keywords
 org.eclipse.mat.ui.compare.CompareBasketView$ComparePolicy
 org.eclipse.mat.ui
 java.lang.Object[]
-```
+
 
 * Problem Suspect 2: 累加点  
-```
+
+
 The thread java.lang.Thread @ 0xe0c2ac98 main keeps local variables with total size 5,394,048 (68.41%) bytes.
 The memory is accumulated in one instance of "org.eclipse.mat.tests.CreateCollectionDump", loaded by "jdk.internal.loader.ClassLoaders$AppClassLoader @ 0xe0c137a0", which occupies 5,393,416 (68.40%) bytes.
 The stacktrace of this Thread is available. See stacktrace. See stacktrace with involved local variables.
@@ -237,10 +238,10 @@ org.eclipse.mat.tests.CreateCollectionDump
 jdk.internal.loader.ClassLoaders$AppClassLoader @ 0xe0c137a0
 org.eclipse.mat.tests.CreateCollectionDump.main([Ljava/lang/String;)V
 CreateCollectionDump.java:174
-```
+
 
 * Problem Suspect 5: 累加点  
-```
+
 19,414,929 instances of "int[]",
 loaded by "<system class loader>" occupy 716,412,176 (42.05%) bytes.
 These instances are referenced from one instance of "java.lang.Object[]",
@@ -249,10 +250,9 @@ loaded by "<system class loader>", which occupies 77,659,616 (42.56%) bytes.
 Keywords
 int[]
 java.lang.Object[]
-```
 
 * Problem Suspect 6: group by class  
-```
+
 2 instances of "org.eclipse.mat.parser.internal.SnapshotImpl",
 loaded by "org.eclipse.mat.parser" occupy 261,910,656 (15.37%) bytes.
 
@@ -267,10 +267,9 @@ org.eclipse.mat.parser.internal.SnapshotImpl
 org.eclipse.mat.parser
 org.eclipse.swt.widgets.Display
 org.eclipse.swt
-```
 
 * Problem Suspect 7: class loader  
-```
+
 1,868 instances of "java.lang.Class",
 loaded by "<system class loader>" occupy 1,000,176 (12.68%) bytes.
 
@@ -279,10 +278,9 @@ class sun.util.calendar.ZoneInfoFile @ 0xffe065a0 - 151,368 (1.92%) bytes.
 
 Keywords
 java.lang.Class
-```
 
 * Problem Suspect 8: 累加点  
-```
+
 One instance of "java.util.concurrent.ForkJoinTask[]" loaded by "<system class loader>" occupies 279.27 MB (40.12%) bytes. The instance is referenced by java.util.concurrent.ForkJoinWorkerThread @ 0xd53a1bf0 ForkJoinPool.commonPool-worker-0 , loaded by "<system class loader>".
 
 The thread java.util.concurrent.ForkJoinWorkerThread @ 0xd53a1bf0 ForkJoinPool.commonPool-worker-0 keeps local variables with total size 120.71 KB (0.02%) bytes.
@@ -293,4 +291,3 @@ Keywords
 java.util.concurrent.ForkJoinTask[]
 java.util.concurrent.ForkJoinPool$WorkQueue.execLocalTasks()V
 ForkJoinPool.java:1040
-```
