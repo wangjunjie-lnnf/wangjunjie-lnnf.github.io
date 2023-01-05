@@ -11,7 +11,7 @@
 
 ## 分析过程
 
-### 1. 首先使用`eclipse` `mat`分析可能的泄漏点
+### 1. 首先使用`eclipse mat`分析可能的泄漏点
 
 `eclipse mat内存泄露分析报告`
 ```
@@ -38,7 +38,8 @@ ScheduledThreadPoolExecutor.java:1093
 
 ---
 
-* `commons-pool2:2.4.1`的定时任务调度是使用的`Timer`，可以正常`cancel`
+* `commons-pool2:2.4.1`的定时任务调度是使用的`Timer`，可以正常`cancel`  
+
 ```java
 
 static synchronized void schedule(TimerTask task, long delay, long period) {
@@ -61,7 +62,7 @@ static synchronized void cancel(TimerTask task) {
 
 ```
 
-* `commons-pool2:2.5.0`的定时任务调度开始使用`ScheduledThreadPoolExecutor`，但是提交任务后没有保存返回的`ScheduledFuture`，导致后续`cancel`失败
+* `commons-pool2:2.5.0`的定时任务调度开始使用`ScheduledThreadPoolExecutor`，但是提交任务后没有保存返回的`ScheduledFuture`，导致后续`cancel`失败  
 
 ```java
 
@@ -91,7 +92,7 @@ static synchronized void cancel(final TimerTask task, final long timeout, final 
 
 ```
 
-* `commons-pool2:2.6.0`修复了`2.5.0`无法`cancel`的bug
+* `commons-pool2:2.6.0`修复了`2.5.0`无法`cancel`的bug  
 
 ```java
 
@@ -211,7 +212,7 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
 
 > Examples of summaries of leak suspects:
 
-* Problem Suspect 1: 累加点
+* Problem Suspect 1: 累加点  
 ```
 One instance of "org.eclipse.mat.ui.compare.CompareBasketView$ComparePolicy"
 loaded by "org.eclipse.mat.ui" occupies 487,234,584 (28.60%) bytes.
@@ -224,7 +225,7 @@ org.eclipse.mat.ui
 java.lang.Object[]
 ```
 
-* Problem Suspect 2: 累加点
+* Problem Suspect 2: 累加点  
 ```
 The thread java.lang.Thread @ 0xe0c2ac98 main keeps local variables with total size 5,394,048 (68.41%) bytes.
 The memory is accumulated in one instance of "org.eclipse.mat.tests.CreateCollectionDump", loaded by "jdk.internal.loader.ClassLoaders$AppClassLoader @ 0xe0c137a0", which occupies 5,393,416 (68.40%) bytes.
@@ -237,7 +238,7 @@ org.eclipse.mat.tests.CreateCollectionDump.main([Ljava/lang/String;)V
 CreateCollectionDump.java:174
 ```
 
-* Problem Suspect 5: 累加点
+* Problem Suspect 5: 累加点  
 ```
 19,414,929 instances of "int[]",
 loaded by "<system class loader>" occupy 716,412,176 (42.05%) bytes.
@@ -249,7 +250,7 @@ int[]
 java.lang.Object[]
 ```
 
-* Problem Suspect 6: group by class
+* Problem Suspect 6: group by class  
 ```
 2 instances of "org.eclipse.mat.parser.internal.SnapshotImpl",
 loaded by "org.eclipse.mat.parser" occupy 261,910,656 (15.37%) bytes.
@@ -267,7 +268,7 @@ org.eclipse.swt.widgets.Display
 org.eclipse.swt
 ```
 
-* Problem Suspect 7: class loader
+* Problem Suspect 7: class loader  
 ```
 1,868 instances of "java.lang.Class",
 loaded by "<system class loader>" occupy 1,000,176 (12.68%) bytes.
@@ -279,7 +280,7 @@ Keywords
 java.lang.Class
 ```
 
-* Problem Suspect 8: 累加点
+* Problem Suspect 8: 累加点  
 ```
 One instance of "java.util.concurrent.ForkJoinTask[]" loaded by "<system class loader>" occupies 279.27 MB (40.12%) bytes. The instance is referenced by java.util.concurrent.ForkJoinWorkerThread @ 0xd53a1bf0 ForkJoinPool.commonPool-worker-0 , loaded by "<system class loader>".
 
