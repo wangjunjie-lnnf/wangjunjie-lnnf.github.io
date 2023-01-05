@@ -9,7 +9,7 @@ tags: jekyll
 ### setup jekyll
 1. open http://github.io and read the doc
 2. open https://jekyllrb.com/docs/ and read the doc
-3. add posts in `_posts` dir and run `jekyll serve` to update 
+3. add posts in `_posts` dir and run `bundle install & bundle exec jekyll serve` to update 
 4. run `git add .` and `git commit -m 'xxx'` and `git push`
 
 ### install protobuf error on mac m1

@@ -1,0 +1,294 @@
+
+# jvm内存泄露分析案例
+
+---
+
+## 起因
+
+> 自从上线了数据源连通性校验的新功能后，频繁收到生产环节内存使用率超过95%的告警通知，重启之后隔3天又会出现，怀疑是出现了内存泄露
+
+---
+
+## 分析过程
+
+### 1. 首先使用`eclipse` `mat`分析可能的泄漏点
+
+`eclipse mat内存泄露分析报告`
+```
+One instance of java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue loaded by `system class loader` occupies 715,083,872 (56.59%) bytes. The instance is referenced by java.lang.Thread @ 0x6cc474e08 commons-pool-evictor-thread , loaded by `system class loader`.
+
+The thread java.lang.Thread @ 0x6cc474e08 commons-pool-evictor-thread keeps local variables with total size 760 (0.00%) bytes.
+
+The memory is accumulated in one instance of java.util.concurrent.RunnableScheduledFuture[], loaded by `system class loader`, which occupies 715,083,840 (56.59%) bytes.
+The stacktrace of this Thread is available. See stacktrace. See stacktrace with involved local variables.
+
+Keywords
+
+java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue
+java.util.concurrent.RunnableScheduledFuture[]
+java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue.take()Ljava/util/concurrent/RunnableScheduledFuture;
+ScheduledThreadPoolExecutor.java:1093
+```
+
+> 从报告中可以看出，发生泄露的线程名称是`commons-pool-evictor-thread`, 经查，这是`commons-pool2`的线程，用于定时清除连接池中无效的连接
+
+### 2. 查看`commons-pool2`的源码，定位问题
+
+> 最终定位发生泄露的地方在类`org.apache.commons.pool2.impl.EvictionTimer`，项目中间接依赖的是2.5.0版本的`commons-pool2`，2.4.x向2.5.x过渡时，定时任务调度机制从`Timer`改成了`ScheduledThreadPoolExecutor`，导致关闭连接池时`cancel`定时任务失败。项目中有一个功能是验证用户自己注册的`redis`数据源是否能连通，需要频繁的跟`redis`建立短链接。时间久了就会导致上述分析报告中描述的问题，无界队列一直在增加定时任务，最终导致内存耗尽。
+
+---
+
+* `commons-pool2:2.4.1`的定时任务调度是使用的`Timer`，可以正常`cancel`
+```java
+
+static synchronized void schedule(TimerTask task, long delay, long period) {
+    if (null == _timer) {
+        _timer = new XxxTimer();
+    }
+    _usageCount++;
+    _timer.schedule(task, delay, period);
+}
+
+static synchronized void cancel(TimerTask task) {
+    // 可以正常cancel
+    task.cancel();
+    _usageCount--;
+    if (_usageCount == 0) {
+        _timer.cancel();
+        _timer = null;
+    }
+}
+
+```
+
+* `commons-pool2:2.5.0`的定时任务调度开始使用`ScheduledThreadPoolExecutor`，但是提交任务后没有保存返回的`ScheduledFuture`，导致后续`cancel`失败
+
+```java
+
+static synchronized void schedule(final Runnable task, final long delay, final long period) {
+    if (null == executor) {
+        executor = new ScheduledThreadPoolExecutor(1, new EvictorThreadFactory());
+    }
+    usageCount++;
+    // 此处未保存返回的ScheduledFuture
+    executor.scheduleWithFixedDelay(task, delay, period, TimeUnit.MILLISECONDS);
+}
+
+static synchronized void cancel(final TimerTask task, final long timeout, final TimeUnit unit) {
+    // cancel失败
+    task.cancel();
+    usageCount--;
+    if (usageCount == 0) {
+        executor.shutdown();
+        try {
+            executor.awaitTermination(timeout, unit);
+        } catch (final InterruptedException e) {
+        }
+        executor.setCorePoolSize(0);
+        executor = null;
+    }
+}
+
+```
+
+* `commons-pool2:2.6.0`修复了`2.5.0`无法`cancel`的bug
+
+```java
+
+static synchronized void schedule(
+            final BaseGenericObjectPool<?>.Evictor task, final long delay, final long period) {
+    if (null == executor) {
+        executor = new ScheduledThreadPoolExecutor(1, new EvictorThreadFactory());
+        executor.setRemoveOnCancelPolicy(true);
+    }
+    final ScheduledFuture<?> scheduledFuture =
+            executor.scheduleWithFixedDelay(task, delay, period, TimeUnit.MILLISECONDS);
+    // 保存返回的ScheduledFuture用于cancel
+    task.setScheduledFuture(scheduledFuture);
+}
+
+static synchronized void cancel(
+        final BaseGenericObjectPool<?>.Evictor task, final long timeout, final TimeUnit unit) {
+    // 可以正常cancel
+    task.cancel();
+    if (executor.getQueue().size() == 0) {
+        executor.shutdown();
+        try {
+            executor.awaitTermination(timeout, unit);
+        } catch (final InterruptedException e) {
+        }
+        executor.setCorePoolSize(0);
+        executor = null;
+    }
+}
+
+```
+---
+
+## 拓展
+
+---
+
+### `2.5.0`版本为什么`cancel`失败
+
+分析`ScheduledThreadPoolExecutor`提交任务的代码，提交到任务队列的任务是在参数`command`的基础上又封装了一层，封装层实现定时调度逻辑。`cancel`也需要通过封装层来实现。
+```java
+public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
+                                                long initialDelay,
+                                                long delay,
+                                                TimeUnit unit) {
+    if (command == null || unit == null)
+        throw new NullPointerException();
+    if (delay <= 0)
+        throw new IllegalArgumentException();
+    // 这才是提交到任务队列的任务，而不是原始的command
+    ScheduledFutureTask<Void> sft =
+        new ScheduledFutureTask<Void>(command,
+                                        null,
+                                        triggerTime(initialDelay, unit),
+                                        unit.toNanos(-delay));
+    RunnableScheduledFuture<Void> t = decorateTask(command, sft);
+    sft.outerTask = t;
+    delayedExecute(t);
+    return t;
+}
+```
+
+---
+
+### `eclipse` `mat`分析内存泄露的处理逻辑 
+
+1. 构造`支配树(Dominator Tree)`
+`https://help.eclipse.org/latest/index.jsp?topic=%2Forg.eclipse.mat.ui.help%2Fconcepts%2Fdominatortree.html`
+
+> Memory Analyzer provides a dominator tree of the object graph. The transformation of the object reference graph into a dominator tree allows you to easily identify the biggest chunks of retained memory and the keep-alive dependencies among objects. Bellow is an informal definition of the terms.
+
+> An object x dominates an object y if every path in the object graph from the start (or the root) node to y must go through x.
+
+> The immediate dominator x of some object y is the dominator closest to the object y.
+
+> A dominator tree is built out of the object graph. In the dominator tree each object is the immediate dominator of its children, so dependencies between the objects are easily identified.
+
+> The dominator tree has the following important properties:
+
+* The objects belonging to the sub-tree of x (i.e. the objects dominated by x ) represent the retained set of x .
+* If x is the immediate dominator of y , then the immediate dominator of x also dominates y , and so on.
+* The edges in the dominator tree do not directly correspond to object references from the object graph.
+
+![dominator-tree](/assets/images/2023-01-05/dominator-tree.png)
+
+> 总结:  
+> 根据dump文件中的对象图构造支配树供后续分析过程使用
+
+---
+
+2. 泄露分析策略
+`https://help.eclipse.org/latest/index.jsp?topic=%2Forg.eclipse.mat.ui.help%2Ftasks%2Frunningleaksuspectreport.html&cp%3D52_3_2`
+
+> The standard leak suspects report operates just using the heap dump data, which is a snapshot from a particular moment. It does not use any time information as to when objects were allocated.
+
+> The starting point is the dominator tree . <font color=red size=4>The biggest items at the top level of the dominator tree are analyzed, and if an item retains a significant amount of memory (default is **10%**) then that item could be the cause of the memory leak</font> because if it were no longer referenced then all that memory could be freed.
+
+> It could be that single objects do not retain a significant amount of memory but many objects all of one type do. This is a second class of leak suspect. This type is found using the dominator tree, <font color=red size=4>grouped by class</font>.
+
+> Further analysis is then done on each leak suspect. For a single object leak suspect the retained objects are analyzed in the dominator tree to see if there is an accumulation point . <font color=red size=4>An accumulation point is an object with a big difference between the retained size of itself and the largest retained size of a child object</font>. These are places where the memory of many small objects is accumulated under one object. If the leak suspect is a thread then thread related information such as the call stack is shown, together with interesting stack frames which have local variables referring to objects on the path to the accumulation point. If the leak suspect is a class loader then this is mentioned as being an interesting component of the application. If the leak suspect is a class then its class loader is mentioned as being an interesting component of the application.
+
+> The Shortest Paths To the Accumulation Point shows a path from a garbage collection root to the accumulation point. There will be other paths, otherwise an object on the path would retain the leak suspect, so itself would be considered a leak suspect. If the root is a thread object then thread related information is also shown.
+
+> The Accumulated Objects in Dominator Tree shows the dominator tree from the leak suspect to the accumulation point and also the objects that the accumulation point retains. This helps understand the context of the leak, and what is being accumulated. The Accumulated Objects by Class in Dominator Tree shows just the children in the dominator tree of the accumulation point, grouped by class. This is useful if there are many objects, as there will be fewer types. All Accumulated Objects by Class shows all the objects retained by the accumulation point, including the accumulation point, but grouped by class so it easier to see what is taking up the heap space.
+
+> If the leak suspect is a group of objects then the biggest few objects are shown by Biggest Instances . If there are many objects and none uses more than 1% of the leak then this is omitted.
+
+> If the leak suspect is a group of objects then the query attempts to find an interesting (not a standard Java class) object which indirectly refers to all of those objects. This is also called an accumulation point but is below the leak suspects in the dominator tree, rather than above the leak suspect object in the single object case. Common Path To the Accumulation Point shows a shortest path from a GC root to the accumulation point, giving a guide as to what in the application refers to the accumulation point. If the root of this path is a thread then some interesting thread related information is also extracted.
+
+> Learn more in this blog posting: [Automated Heap Dump Analysis: Finding Memory Leaks with One Click](https://memoryanalyzer.blogspot.com/2008/05/automated-heap-dump-analysis-finding.html) .
+
+![accumulation-point](/assets/images/2023-01-05/accumulation-point.gif)
+
+> 总结:  
+* 沿着支配树从上往下查找占用内存超过10%的对象，如果此对象的size跟它最大的child的size差别很大，说明此处是一个累加点。  
+* 另外一种情况是没有大对象，此时按class分类，查找其实例占用内存最多的class（大量的小对象没被gc又没有累加点，可能是发生了递归调用，这些小对象都被各自的栈帧引用）。
+
+> Examples of summaries of leak suspects:
+
+* Problem Suspect 1: 累加点
+```
+One instance of "org.eclipse.mat.ui.compare.CompareBasketView$ComparePolicy"
+loaded by "org.eclipse.mat.ui" occupies 487,234,584 (28.60%) bytes.
+The memory is accumulated in one instance of "java.lang.Object[]",
+loaded by "<system class loader>", which occupies 487,234,328 (28.60%) bytes.
+
+Keywords
+org.eclipse.mat.ui.compare.CompareBasketView$ComparePolicy
+org.eclipse.mat.ui
+java.lang.Object[]
+```
+
+* Problem Suspect 2: 累加点
+```
+The thread java.lang.Thread @ 0xe0c2ac98 main keeps local variables with total size 5,394,048 (68.41%) bytes.
+The memory is accumulated in one instance of "org.eclipse.mat.tests.CreateCollectionDump", loaded by "jdk.internal.loader.ClassLoaders$AppClassLoader @ 0xe0c137a0", which occupies 5,393,416 (68.40%) bytes.
+The stacktrace of this Thread is available. See stacktrace. See stacktrace with involved local variables.
+
+Keywords
+org.eclipse.mat.tests.CreateCollectionDump
+jdk.internal.loader.ClassLoaders$AppClassLoader @ 0xe0c137a0
+org.eclipse.mat.tests.CreateCollectionDump.main([Ljava/lang/String;)V
+CreateCollectionDump.java:174
+```
+
+* Problem Suspect 5: 累加点
+```
+19,414,929 instances of "int[]",
+loaded by "<system class loader>" occupy 716,412,176 (42.05%) bytes.
+These instances are referenced from one instance of "java.lang.Object[]",
+loaded by "<system class loader>", which occupies 77,659,616 (42.56%) bytes.
+
+Keywords
+int[]
+java.lang.Object[]
+```
+
+* Problem Suspect 6: group by class
+```
+2 instances of "org.eclipse.mat.parser.internal.SnapshotImpl",
+loaded by "org.eclipse.mat.parser" occupy 261,910,656 (15.37%) bytes.
+
+Biggest instances:
+  org.eclipse.mat.parser.internal.SnapshotImpl @ 0x6ff5af620 - 136,622,272 (8.02%) bytes.
+  org.eclipse.mat.parser.internal.SnapshotImpl @ 0x6c2f6ce38 - 125,288,384 (7.35%) bytes.
+These instances are referenced from one instance of "org.eclipse.swt.widgets.Display",
+loaded by "org.eclipse.swt", which occupies 20,104 (0.00%) bytes.
+
+Keywords
+org.eclipse.mat.parser.internal.SnapshotImpl
+org.eclipse.mat.parser
+org.eclipse.swt.widgets.Display
+org.eclipse.swt
+```
+
+* Problem Suspect 7: class loader
+```
+1,868 instances of "java.lang.Class",
+loaded by "<system class loader>" occupy 1,000,176 (12.68%) bytes.
+
+Biggest instances:
+class sun.util.calendar.ZoneInfoFile @ 0xffe065a0 - 151,368 (1.92%) bytes.
+
+Keywords
+java.lang.Class
+```
+
+* Problem Suspect 8: 累加点
+```
+One instance of "java.util.concurrent.ForkJoinTask[]" loaded by "<system class loader>" occupies 279.27 MB (40.12%) bytes. The instance is referenced by java.util.concurrent.ForkJoinWorkerThread @ 0xd53a1bf0 ForkJoinPool.commonPool-worker-0 , loaded by "<system class loader>".
+
+The thread java.util.concurrent.ForkJoinWorkerThread @ 0xd53a1bf0 ForkJoinPool.commonPool-worker-0 keeps local variables with total size 120.71 KB (0.02%) bytes.
+The memory is accumulated in one instance of "java.util.concurrent.ForkJoinTask[]", loaded by "<system class loader>", which occupies 279.27 MB (40.12%) bytes.
+The stacktrace of this Thread is available. See stacktrace. See stacktrace with involved local variables.
+
+Keywords
+java.util.concurrent.ForkJoinTask[]
+java.util.concurrent.ForkJoinPool$WorkQueue.execLocalTasks()V
+ForkJoinPool.java:1040
+```
