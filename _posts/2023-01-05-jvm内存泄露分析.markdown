@@ -200,17 +200,17 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
 
 > If the leak suspect is a group of objects then the biggest few objects are shown by Biggest Instances . If there are many objects and none uses more than 1% of the leak then this is omitted.
 
-> If the leak suspect is a group of objects then the query attempts to find an interesting (not a standard Java class) object which indirectly refers to all of those objects. This is also called an accumulation point but is below the leak suspects in the dominator tree, rather than above the leak suspect object in the single object case. Common Path To the Accumulation Point shows a shortest path from a GC root to the accumulation point, giving a guide as to what in the application refers to the accumulation point. If the root of this path is a thread then some interesting thread related information is also extracted.
+> <font color=red size=4>If the leak suspect is a group of objects then the query attempts to find an interesting (not a standard Java class) object which indirectly refers to all of those objects. This is also called an accumulation point but is below the leak suspects in the dominator tree, rather than above the leak suspect object in the single object case</font>. Common Path To the Accumulation Point shows a shortest path from a GC root to the accumulation point, giving a guide as to what in the application refers to the accumulation point. If the root of this path is a thread then some interesting thread related information is also extracted.
 
 > Learn more in this blog posting: [Automated Heap Dump Analysis: Finding Memory Leaks with One Click](https://memoryanalyzer.blogspot.com/2008/05/automated-heap-dump-analysis-finding.html) .
 
 ![accumulation-point](/assets/images/2023-01-05/accumulation-point.gif)
 
 > 总结:  
-* 沿着支配树从上往下查找占用内存超过10%的对象，如果此对象的size跟它最大的child的size差别很大，说明此处是一个累加点。  
-* 另外一种情况是没有大对象，此时按class分类，查找其实例占用内存最多的class（大量的小对象没被gc又没有累加点，可能是发生了递归调用，这些小对象都被各自的栈帧引用）。
+* 沿着支配树从上往下查找占用内存超过10%的对象，如果此对象的size跟它最大的child的size差别很大，说明此处是一个累加点。    
+* 另外一种情况是没有大对象，此时按class分类，查找其实例占用内存最多的class（大量的小对象没被gc又没有累加点，可能是发生了递归调用，这些小对象都被各自的栈帧引用）。  
 
-> Examples of summaries of leak suspects:
+> Examples of summaries of leak suspects:  
 
 * Problem Suspect 1: 累加点  
 ```
