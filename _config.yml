@@ -21,9 +21,9 @@
 title: 码海泛舟
 email: wangjunjie_lnnf@qq.com
 description: >- # this means to ignore newlines until "baseurl:"
-  Write an awesome description for your new site here.
+  知其然，知其所以然
 baseurl: "/" # the subpath of your site, e.g. /blog
-url: "http://wangjunjie-lnnf.github.io" # the base hostname & protocol for your site, e.g. http://example.com
+url: "http://xxxxxx.github.io" # the base hostname & protocol for your site, e.g. http://example.com
 twitter_username: empty
 github_username:  wangjunjie-lnnf
 
