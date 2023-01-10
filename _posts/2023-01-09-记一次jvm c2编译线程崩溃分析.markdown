@@ -1,0 +1,459 @@
+---
+layout: post
+title:  "记一次jvm c2编译线程崩溃分析"
+date:   2023-01-09 10:22:07 +0800
+categories: jekyll
+tags: jvm c2编译
+---
+
+# jvm崩溃分析
+
+## 起因
+
+生产环境告警，某个实例java进程挂了，查找`catalina.log`文件发现以下log
+
+```
+
+#
+# A fatal error has been detected by the Java Runtime Environment:
+#
+#  SIGSEGV (0xb) at pc=0x00007f4c37344325, pid=124241, tid=139964844857088
+#
+# JRE version: Java(TM) SE Runtime Environment (8.0_20-b26) (build 1.8.0_20-b26)
+# Java VM: Java HotSpot(TM) 64-Bit Server VM (25.20-b23 mixed mode linux-amd64 compressed oops)
+# Problematic frame:
+# V  [libjvm.so+0x858325]  LoadKlassNode::make(PhaseGVN&, Node*, Node*, TypePtr const*, TypeKlassPtr const*)+0x45
+#
+# Core dump written. Default location: /xxx/bin/core or core.124241
+#
+# An error report file with more information is saved as:
+# /xxx/bin/hs_err_pid124241.log
+#
+# Compiler replay data is saved as:
+# /xxx/bin/replay_pid124241.log
+#
+# If you would like to submit a bug report, please visit:
+#   http://bugreport.sun.com/bugreport/crash.jsp
+#
+
+```
+
+## 问题处理
+
+### 查看hs_err_pidxxx.log文件
+
+先分析一下`hs_err_pid124241.log`文件
+
+```
+
+#
+# A fatal error has been detected by the Java Runtime Environment:
+#
+#  SIGSEGV (0xb) at pc=0x00007f4c37344325, pid=124241, tid=139964844857088
+#
+# JRE version: Java(TM) SE Runtime Environment (8.0_20-b26) (build 1.8.0_20-b26)
+# Java VM: Java HotSpot(TM) 64-Bit Server VM (25.20-b23 mixed mode linux-amd64 compressed oops)
+# Problematic frame:
+# V  [libjvm.so+0x858325]  LoadKlassNode::make(PhaseGVN&, Node*, Node*, TypePtr const*, TypeKlassPtr const*)+0x45
+#
+# Core dump written. Default location: /xxx/bin/core or core.124241
+#
+# If you would like to submit a bug report, please visit:
+#   http://bugreport.sun.com/bugreport/crash.jsp
+#
+
+---------------  T H R E A D  ---------------
+
+Current thread (0x00007f4c30255000):  JavaThread "C2 CompilerThread2" daemon [_thread_in_native, id=124327, stack(0x00007f4c1acbd000,0x00007f4c1adbe000)]
+
+siginfo: si_signo: 11 (SIGSEGV), si_code: 1 (SEGV_MAPERR), si_addr: 0x0000000000000010
+
+Registers:
+RAX=0x00007f4be0011a50, RBX=0x00007f4be00144f0, RCX=0x0000000000000000, RDX=0x00000000fffffff4
+RSP=0x00007f4c1adbac40, RBP=0x00007f4c1adbac80, RSI=0x00007f4be45ec030, RDI=0x00007f4be44f34f0
+R8 =0x00007f4be00144f0, R9 =0x00007f4be0011a50, R10=0x00007f4bd8712e00, R11=0x00007f4c37416560
+R12=0x00007f4c1adbbd00, R13=0x00007f4be44f34f0, R14=0x00007f4c1adbb100, R15=0x00007f4c1adbaee0
+RIP=0x00007f4c37344325, EFLAGS=0x0000000000010296, CSGSFS=0x0000000000000033, ERR=0x0000000000000004
+  TRAPNO=0x000000000000000e
+
+...
+
+Stack: [0x00007f4c1acbd000,0x00007f4c1adbe000],  sp=0x00007f4c1adbac40,  free space=1015k
+Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)
+V  [libjvm.so+0x858325]  LoadKlassNode::make(PhaseGVN&, Node*, Node*, TypePtr const*, TypeKlassPtr const*)+0x45
+V  [libjvm.so+0x551cb6]  Parse::catch_inline_exceptions(SafePointNode*)+0x946
+V  [libjvm.so+0x908b0a]  Parse::do_exceptions()+0xba
+V  [libjvm.so+0x90b6f0]  Parse::do_one_block()+0x180
+V  [libjvm.so+0x90b967]  Parse::do_all_blocks()+0x127
+V  [libjvm.so+0x90fd58]  Parse::Parse(JVMState*, ciMethod*, float, Parse*)+0x7b8
+V  [libjvm.so+0x3e7d09]  ParseGenerator::generate(JVMState*, Parse*)+0x99
+V  [libjvm.so+0x4931cc]  Compile::Compile(ciEnv*, C2Compiler*, ciMethod*, int, bool, bool, bool)+0x126c
+V  [libjvm.so+0x3e67e8]  C2Compiler::compile_method(ciEnv*, ciMethod*, int)+0x198
+V  [libjvm.so+0x49ba4a]  CompileBroker::invoke_compiler_on_method(CompileTask*)+0xc8a
+V  [libjvm.so+0x49e420]  CompileBroker::compiler_thread_loop()+0x620
+V  [libjvm.so+0xa2990f]  JavaThread::thread_main_inner()+0xdf
+V  [libjvm.so+0xa29a3c]  JavaThread::run()+0x11c
+V  [libjvm.so+0x8e75f8]  java_start(Thread*)+0x108
+C  [libpthread.so.0+0x79d1]  start_thread+0xd1
+
+
+Current CompileTask:
+C2:154715544 32535   !   4       com.mysql.jdbc.ConnectionImpl::execSQL (439 bytes)
+
+```
+
+从`hs_err_pid124241.log`文件看出导致问题的地方是`C2 CompilerThread2`的方法`LoadKlassNode::make(...)`
+
+### 分析Core dump文件
+
+下一步是找到`Core dump`文件，然后使用`gdb` `debug`一下分析具体原因。
+
+先执行命令`cat /proc/sys/kernel/core_pattern`查找`Core dump`文件。
+
+使用gdb分析core文件
+
+```sh
+
+# 加载core文件
+gdb /path/to/java /path/to/core_java.pid
+
+# 查看栈帧
+bt
+...
+#7  0x00007f4c37344325 in LoadKlassNode::make(PhaseGVN&, Node*, Node*, TypePtr const*, TypeKlassPtr const*) () from /home/export/servers/jdk1.8.0_20/jre/lib/amd64/server/libjvm.so
+...
+
+# 选择问题栈帧
+f 7
+
+# 查看变量
+info locals
+...
+No symbol table info available.
+...
+
+# 查看寄存器
+info registers
+...
+rax            0x7f4be0011a50	139963857443408
+rbx            0x7f4be00144f0	139963857454320
+rcx            0x0	0
+rdx            0xfffffff4	4294967284
+rsi            0x7f4be45ec030	139963930689584
+rdi            0x7f4be44f34f0	139963929670896
+rbp            0x7f4c1adbac80	0x7f4c1adbac80
+rsp            0x7f4c1adbac40	0x7f4c1adbac40
+r8             0x7f4be00144f0	139963857454320
+r9             0x7f4be0011a50	139963857443408
+r10            0x7f4bd8712e00	139963730570752
+r11            0x7f4c37416560	139965321274720
+r12            0x7f4c1adbbd00	139964844850432
+r13            0x7f4be44f34f0	139963929670896
+r14            0x7f4c1adbb100	139964844847360
+r15            0x7f4c1adbaee0	139964844846816
+rip            0x7f4c37344325	0x7f4c37344325 <LoadKlassNode::make(PhaseGVN&, Node*, Node*, TypePtr const*, TypeKlassPtr const*)+69>
+eflags         0x202	[ IF ]
+cs             0x33	51
+ss             0x2b	43
+ds             0x0	0
+es             0x0	0
+fs             0x0	0
+gs             0x0	0
+...
+
+# rcx = 0 ！！！
+```
+
+通过gdb发现rcx的值是0，查询`x86_64`的函数调用参数传递规则
+
+> 前6个参数通过寄存器传递，依次是`rdi, rsi, rdx, rcx, r8, r9`  
+> 剩余参数通过stack传递: 按参数顺序反转，第一个出栈的是第7个参数
+
+由此发现问题栈帧第4个参数发生空指针
+
+查看出问题的代码
+
+```c++
+
+// memnode.cpp
+// 第4个参数adr空指针
+Node* LoadKlassNode::make(PhaseGVN& gvn, Node* ctl, Node *mem, Node *adr, const TypePtr* at, const TypeKlassPtr *tk) {
+  Compile* C = gvn.C;
+  // sanity check the alias category against the created node type
+  const TypePtr *adr_type = adr->bottom_type()->isa_ptr();
+  assert(adr_type != NULL, "expecting TypeKlassPtr");
+#ifdef _LP64
+  if (adr_type->is_ptr_to_narrowklass()) {
+    assert(UseCompressedClassPointers, "no compressed klasses");
+    Node* load_klass = gvn.transform(new (C) LoadNKlassNode(ctl, mem, adr, at, tk->make_narrowklass(), MemNode::unordered));
+    return new (C) DecodeNKlassNode(load_klass, load_klass->bottom_type()->make_ptr());
+  }
+#endif
+  assert(!adr_type->is_ptr_to_narrowklass() && !adr_type->is_ptr_to_narrowoop(), "should have got back a narrow oop");
+  return new (C) LoadKlassNode(ctl, mem, adr, at, tk, MemNode::unordered);
+}
+
+```
+
+### google类似问题
+
+1. [JDK-8072991 JVM crash at LoadKlassNode::make](https://bugs.openjdk.org/browse/JDK-8072991)
+2. [JDK-8207319 C2 crashes in LoadKlassNode::make()+0x45](https://bugs.openjdk.org/browse/JDK-8207319)
+
+这俩bug并没有给出具体原因，只是说了升级jdk到8u40之后没有再复现，看来只能自己动手了
+
+---
+
+## jit
+
+上面的分析已经定位到了问题点在`c2`编译线程，想解决此问题，需要先搞清楚`jit`的流程
+
+### 解释执行
+
+### 编译环境初始化
+
+`hotspot`初始化过程中会调用`compilationPolicy_init`选择编译策略
+
+```c++
+
+void compilationPolicy_init() {
+  // 在jvm启动过程中不会开始编译
+  CompilationPolicy::set_in_vm_startup(DelayCompilationDuringStartup);
+
+  // #jit#1.1 默认3 -> AdvancedThresholdPolicy
+  switch(CompilationPolicyChoice) {
+  case 0:
+    CompilationPolicy::set_policy(new SimpleCompPolicy());
+    break;
+
+  case 1:
+#ifdef COMPILER2
+    CompilationPolicy::set_policy(new StackWalkCompPolicy());
+#else
+    Unimplemented();
+#endif
+    break;
+  case 2:
+#ifdef TIERED
+    CompilationPolicy::set_policy(new SimpleThresholdPolicy());
+#else
+    Unimplemented();
+#endif
+    break;
+  case 3:
+#ifdef TIERED
+    CompilationPolicy::set_policy(new AdvancedThresholdPolicy());
+#else
+    Unimplemented();
+#endif
+    break;
+  default:
+    fatal("CompilationPolicyChoice must be in the range: [0-3]");
+  }
+  CompilationPolicy::policy()->initialize();
+}
+
+```
+
+`hotspot`初始化完成之前会调用`CompileBroker::compilation_init()`初始化编译器
+
+```c++
+
+// 选择编译策略并初始化
+void CompileBroker::compilation_init() {
+  _last_method_compiled[0] = '\0';
+
+  // No need to initialize compilation system if we do not use it.
+  if (!UseCompiler) {
+    return;
+  }
+
+  // Set the interface to the current compiler(s).
+  // 默认编译线程数等于cpu核数，1/3为C1编译线程
+  int c1_count = CompilationPolicy::policy()->compiler_count(CompLevel_simple);
+  int c2_count = CompilationPolicy::policy()->compiler_count(CompLevel_full_optimization);
+
+#ifdef COMPILER1
+  if (c1_count > 0) {
+    _compilers[0] = new Compiler();
+  }
+#endif // COMPILER1
+
+#ifdef COMPILER2
+  if (c2_count > 0) {
+    _compilers[1] = new C2Compiler();
+  }
+#endif // COMPILER2
+
+  // Start the CompilerThreads
+  init_compiler_threads(c1_count, c2_count);
+
+  _initialized = true;
+}
+
+// 创建任务队列，创建并启动C1、C2编译线程
+void CompileBroker::init_compiler_threads(int c1_compiler_count, int c2_compiler_count) {
+  EXCEPTION_MARK;
+
+  // Initialize the compilation queue
+  if (c2_compiler_count > 0) {
+    _c2_compile_queue  = new CompileQueue("C2 CompileQueue",  MethodCompileQueue_lock);
+    _compilers[1]->set_num_compiler_threads(c2_compiler_count);
+  }
+  if (c1_compiler_count > 0) {
+    _c1_compile_queue  = new CompileQueue("C1 CompileQueue",  MethodCompileQueue_lock);
+    _compilers[0]->set_num_compiler_threads(c1_compiler_count);
+  }
+
+  int compiler_count = c1_compiler_count + c2_compiler_count;
+
+  _compiler_threads = new (ResourceObj::C_HEAP, mtCompiler) GrowableArray<CompilerThread*>(compiler_count, true);
+
+  char name_buffer[256];
+  for (int i = 0; i < c2_compiler_count; i++) {
+    // Create a name for our thread.
+    sprintf(name_buffer, "C2 CompilerThread%d", i);
+    ...
+    // Shark and C2
+    // 创建并启动C2编译线程
+    CompilerThread* new_thread = make_compiler_thread(name_buffer, _c2_compile_queue, counters, _compilers[1], CHECK);
+    _compiler_threads->append(new_thread);
+  }
+
+  for (int i = c2_compiler_count; i < compiler_count; i++) {
+    // Create a name for our thread.
+    sprintf(name_buffer, "C1 CompilerThread%d", i);
+    ...
+    // 创建并启动C1编译线程
+    CompilerThread* new_thread = make_compiler_thread(name_buffer, _c1_compile_queue, counters, _compilers[0], CHECK);
+    _compiler_threads->append(new_thread);
+  }
+
+  ...
+
+}
+
+// The main loop run by a CompilerThread.
+void CompileBroker::compiler_thread_loop() {
+  CompilerThread* thread = CompilerThread::current();
+  CompileQueue* queue = thread->queue();
+
+  ...
+
+  CompileLog* log = thread->log();
+  if (log != NULL) {
+    log->begin_elem("start_compile_thread name='%s' thread='" UINTX_FORMAT "' process='%d'",
+                    thread->name(),
+                    os::current_thread_id(),
+                    os::current_process_id());
+    log->stamp();
+    log->end_elem();
+  }
+
+  // Compiler::initialize()
+  if (!init_compiler_runtime()) {
+    return;
+  }
+
+  // Poll for new compilation tasks as long as the JVM runs. 
+  while (!is_compilation_disabled_forever()) {
+
+    // heap可用内存小于500k时暂停编译并清理code缓存
+    if (CodeCache::unallocated_capacity() < CodeCacheMinimumFreeSpace) {
+      // the code cache is really full
+      handle_full_code_cache();
+    }
+
+    CompileTask* task = queue->get();
+    if (task == NULL) {
+      continue;
+    }
+
+    ...
+
+    methodHandle method(thread, task->method());
+
+    // Never compile a method if breakpoints are present in it
+    if (method()->number_of_breakpoints() == 0) {
+      // Compile the method.
+      if ((UseCompiler || AlwaysCompileLoopMethods) && CompileBroker::should_compile_new_jobs()) {
+        // 编译方法
+        invoke_compiler_on_method(task);
+      } else {
+        // After compilation is disabled, remove remaining methods from queue
+        method->clear_queued_for_compilation();
+        task->set_failure_reason("compilation is disabled");
+      }
+    }
+  }
+
+  ...
+
+}
+
+// 根据任务的编译等级选择编译器进行编译
+void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
+  ...
+
+  int task_level = task->comp_level();
+
+  ciMethod* target = ci_env.get_method_from_handle(target_handle);
+  
+  AbstractCompiler *comp = compiler(task_level);
+
+  comp->compile_method(&ci_env, target, osr_bci);
+  
+  ...
+}
+
+```
+
+提交`jit`编译方法的入口: `CompileBroker::compile_method()`
+
+```c++
+
+nmethod* CompileBroker::compile_method(methodHandle method, int osr_bci,
+                                       int comp_level,
+                                       methodHandle hot_method, int hot_count,
+                                       const char* comment, Thread* THREAD) {
+
+  CompileQueue* queue  = compile_queue(comp_level);
+
+  {
+    MutexLocker locker(queue->lock(), thread);
+
+    ...
+
+    blocking = is_compile_blocking();
+
+    CompileTask* task = CompileTask::allocate();
+    task->initialize(compile_id, method, osr_bci, comp_level,
+                         hot_method, hot_count, comment, blocking);
+    queue->add(task);
+  }
+
+  if (blocking) {
+    wait_for_completion(task);
+  }
+
+}
+
+```
+
+### c1编译器
+
+### c2编译器
+
+## 复现问题
+
+解决问题的第一步是如何复现问题！
+
+
+
+
+
+
+
+
+
+
