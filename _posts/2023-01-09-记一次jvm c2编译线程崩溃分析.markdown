@@ -200,7 +200,7 @@ Node* LoadKlassNode::make(PhaseGVN& gvn, Node* ctl, Node *mem, Node *adr, const 
 1. [JDK-8072991 JVM crash at LoadKlassNode::make](https://bugs.openjdk.org/browse/JDK-8072991)
 2. [JDK-8207319 C2 crashes in LoadKlassNode::make()+0x45](https://bugs.openjdk.org/browse/JDK-8207319)
 
-这俩bug并没有给出具体原因，只是说了升级jdk到8u40之后没有再复现，看来只能自己动手了
+这俩bug并没有给出具体原因，只是说了升级jdk到8u40之后没有再复现
 
 ---
 
@@ -208,7 +208,11 @@ Node* LoadKlassNode::make(PhaseGVN& gvn, Node* ctl, Node *mem, Node *adr, const 
 
 上面的分析已经定位到了问题点在`c2`编译线程，想解决此问题，需要先搞清楚`jit`的流程
 
+![jit](/assets/images/2023-01-09/jit.png)
+
 ### 解释执行
+
+每个字节码都对应一段汇编代码，挨个执行每个字节码对应的汇编代码
 
 ### 编译环境初始化
 
@@ -442,11 +446,23 @@ nmethod* CompileBroker::compile_method(methodHandle method, int osr_bci,
 
 ### c1编译器
 
+1. bytecode -> hir
+2. hir -> lir 
+3. lir -> assembly
+4. install code
+
 ### c2编译器
+
+1. parse
+2. optimize
+3. generate code
+4. register method
 
 ## 复现问题
 
 解决问题的第一步是如何复现问题！
+
+生产环境是`x86_64`，本地是`apple m1`，暂时没法搞。
 
 
 
