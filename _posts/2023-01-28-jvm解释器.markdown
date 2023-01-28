@@ -1,0 +1,368 @@
+---
+layout: post
+title:  "jvm解释器"
+date:   2023-01-28 10:22:07 +0800
+categories: jekyll
+tags: jvm interpreter
+---
+
+# jvm解释器
+
+此处只分析`-Xint`模式下`main`方法的解释执行过程
+
+## 执行main方法
+
+### `jvm`在初始化完成之后会调用`main`类的`main`方法
+
+```c++
+
+int JavaMain(void * _args) {
+    ...
+    jclass mainClass = LoadMainClass(env, mode, what);
+    jmethodID mainID = (*env)->GetStaticMethodID(env, mainClass, "main", "([Ljava/lang/String;)V");
+    jobjectArray mainArgs = CreateApplicationArgs(env, argv, argc);
+
+    // 执行main方法
+    (*env)->CallStaticVoidMethod(env, mainClass, mainID, mainArgs);
+
+    // 处理异常
+    int ret = (*env)->ExceptionOccurred(env) == NULL ? 0 : 1;
+
+    (*vm)->DestroyJavaVM(vm);
+    return ret;
+}
+
+```
+
+### CallStaticVoidMethod
+
+静态方法的执行过程
+
+```c++
+
+static void jni_invoke_static(JNIEnv *env, JavaValue* result, jobject receiver, JNICallType call_type, 
+                              jmethodID method_id, JNI_ArgumentPusher *args, TRAPS) {
+    methodHandle method(THREAD, Method::resolve_jmethod_id(method_id));
+
+    ... 
+
+    // 准备方法参数
+    int number_of_parameters = method->size_of_parameters();
+    JavaCallArguments java_args(number_of_parameters);
+    args->set_java_argument_object(&java_args);
+    args->iterate( Fingerprinter(method).fingerprint() );
+
+    // 准备返回的oop
+    result->set_type(args->get_ret_type());
+
+    // Invoke the method. Result is returned as oop.
+    JavaCalls::call(result, method, &java_args, CHECK);
+
+    ...
+}
+
+void JavaCalls::call(JavaValue* result, methodHandle method, JavaCallArguments* args, TRAPS) {
+
+    ...
+
+    // 动态生成的解释器模板汇编代码入口
+    address entry_point = method->from_interpreted_entry();
+
+    // 执行方法执行的准备和清理工作
+    JavaCallWrapper link(method, receiver, result, CHECK);
+
+    // 动态生成的stub模板汇编代码
+    StubRoutines::call_stub()(
+        (address)&link,
+        result_val_address,
+        result_type,
+        method(),
+        entry_point,
+        args->parameters(),
+        args->size_of_parameters(),
+        CHECK
+    );
+
+    result = link.result();
+
+    ...
+
+}
+
+```
+
+### call_stub
+
+`call_stub`是一段动态生成的汇编代码，用于准备`main`方法的执行环境
+
+```c++
+
+/*
+ * [c_arg0, c_arg7]对应上文调用call_stub时的8个参数
+ */ 
+address generate_call_stub(address& return_address) {
+
+    ...
+
+    address aarch64_entry = __ pc();
+
+    // set up frame and move sp to end of save area
+    __ enter();
+    {
+        // 向下扩展stack保存帧指针(x29/fp)和返回地址(x30/lr)
+        stp(rfp, lr, Address(pre(sp, -2 * wordSize)));
+        // 设置帧指针指向当前的sp
+        mov(rfp, sp);
+    }
+    // 扩展26个slot
+    __ sub(sp, rfp, -sp_after_call_off * wordSize);
+
+    // 入栈8个参数
+    __ str(c_rarg7,  thread);
+    __ strw(c_rarg6, parameter_size);
+    __ stp(c_rarg4, c_rarg5,  entry_point);
+    __ stp(c_rarg2, c_rarg3,  result_type);
+    __ stp(c_rarg0, c_rarg1,  call_wrapper);
+
+    // 入栈callee-save registers
+    __ stp(r20, r19,   r20_save);
+    __ stp(r22, r21,   r22_save);
+    __ stp(r24, r23,   r24_save);
+    __ stp(r26, r25,   r26_save);
+    __ stp(r28, r27,   r28_save);
+
+    __ stpd(v9,  v8,   d9_save);
+    __ stpd(v11, v10,  d11_save);
+    __ stpd(v13, v12,  d13_save);
+    __ stpd(v15, v14,  d15_save);
+
+    // rthread = thread
+    __ mov(rthread, c_rarg7);
+    // rmethod = method
+    __ mov(rmethod, c_rarg3);
+
+    // esp/r20表示java栈指针
+    __ mov(esp, sp);
+    // 在栈上为参数分配内存
+    __ sub(rscratch1, sp, c_rarg6, ext::uxtw, LogBytesPerWord);
+    // 16字节对齐
+    __ andr(sp, rscratch1, -2 * wordSize);
+
+    // 参数入栈
+    Label parameters_done;
+    __ cbzw(c_rarg6, parameters_done);
+    address loop = __ pc();
+    // c_rarg5指向第一个参数
+    __ ldr(rscratch1, Address(__ post(c_rarg5, wordSize)));
+    __ subsw(c_rarg6, c_rarg6, 1);
+    __ push(rscratch1);
+    {
+        str(src, Address(pre(esp, -1 * wordSize)));
+    }
+    __ br(Assembler::GT, loop);
+    __ BIND(parameters_done);
+
+    // 保存sp到r13，调用entry_point
+    __ mov(r13, sp);
+    __ blr(c_rarg4);
+
+    // 保存返回值
+    return_address = __ pc();
+    __ ldr(j_rarg2, result);
+    __ str(r0, Address(j_rarg2, 0));
+
+    // restore callee-save registers
+    __ ldpd(v15, v14,  d15_save);
+    __ ldpd(v13, v12,  d13_save);
+    __ ldpd(v11, v10,  d11_save);
+    __ ldpd(v9,  v8,   d9_save);
+
+    __ ldp(r28, r27,   r28_save);
+    __ ldp(r26, r25,   r26_save);
+    __ ldp(r24, r23,   r24_save);
+    __ ldp(r22, r21,   r22_save);
+    __ ldp(r20, r19,   r20_save);
+
+    // 恢复[x0, x7]中的参数值
+    __ ldp(c_rarg0, c_rarg1,  call_wrapper);
+    __ ldrw(c_rarg2, result_type);
+    __ ldr(c_rarg3,  method);
+    __ ldp(c_rarg4, c_rarg5,  entry_point);
+    __ ldp(c_rarg6, c_rarg7,  parameter_size);
+
+    // 恢复fp/sp/lr
+    __ leave();
+    {
+        mov(sp, rfp);
+        ldp(rfp, lr, Address(post(sp, 2 * wordSize)));
+    }
+    // 跳转到返回地址
+    __ ret(lr);
+
+    ...
+
+}
+
+```
+
+调用entry-point之前的状态
+![调用entry-point之前的状态](/assets/images/2023-01-28/stub.png)
+
+### 解释器模板
+
+```c++
+
+address InterpreterGenerator::generate_normal_entry(bool synchronized) {
+
+    address entry_point = __ pc();
+
+    const Address constMethod(rmethod, Method::const_offset());
+    const Address access_flags(rmethod, Method::access_flags_offset());
+    const Address size_of_parameters(r3, ConstMethod::size_of_parameters_offset());
+    const Address size_of_locals(r3, ConstMethod::size_of_locals_offset());
+
+    __ ldr(r3, constMethod);
+    // r2表示参数的size
+    __ load_unsigned_short(r2, size_of_parameters);
+    __ load_unsigned_short(r3, size_of_locals); 
+    // r3表示参数之外的本地变量的size
+    __ sub(r3, r3, r2);
+
+    // rlocals指向方法参数
+    __ add(rlocals, esp, r2, ext::uxtx, 3);
+    __ sub(rlocals, rlocals, wordSize);
+
+    // 在栈上为本地变量分配内存
+    __ sub(rscratch1, esp, r3, ext::uxtx, 3);
+    __ andr(sp, rscratch1, -16);
+
+    // 本地变量初始化为0
+
+    // 字节码表: 每个字节码对应一个汇编片段
+    __ get_dispatch();
+    {
+        unsigned long offset;
+        adrp(rdispatch, ExternalAddress((address)Interpreter::dispatch_table()), offset);
+        lea(rdispatch, Address(rdispatch, offset));
+    }
+
+    generate_fixed_frame(false);
+    {
+        // 在栈上分配10个slot，存储esp/rbcp/rlocals/rcpool/zr/rmethod/zr/r13/fp/lr
+        __ sub(esp, sp, 10 *  wordSize);
+        __ ldr(rscratch1, Address(rmethod, Method::const_offset()));
+        // rbcp指向字节码
+        __ add(rbcp, rscratch1, in_bytes(ConstMethod::codes_offset()));
+        __ stp(esp, rbcp, Address(__ pre(sp, -10 * wordSize)));
+
+        __ stp(zr, rmethod, Address(sp, 4 * wordSize));
+
+        __ ldr(rcpool, Address(rmethod, Method::const_offset()));
+        __ ldr(rcpool, Address(rcpool, ConstMethod::constants_offset()));
+        __ ldr(rcpool, Address(rcpool, ConstantPool::cache_offset_in_bytes()));
+        __ stp(rlocals, rcpool, Address(sp, 2 * wordSize));
+
+        __ stp(rfp, lr, Address(sp, 8 * wordSize));
+        __ lea(rfp, Address(sp, 8 * wordSize));
+
+        __ stp(zr, r13, Address(sp, 6 * wordSize));
+
+        // 栈上存储BasicObjectLock
+        __ ldr(rscratch1, Address(rmethod, Method::const_offset()));
+        __ ldrh(rscratch1, Address(rscratch1, ConstMethod::max_stack_offset()));
+        __ add(rscratch1, rscratch1, frame::interpreter_frame_monitor_size() + (EnableInvokeDynamic ? 2 : 0));
+        __ sub(rscratch1, sp, rscratch1, ext::uxtw, 3);
+        __ andr(sp, rscratch1, -16);
+    }
+
+    // 在栈上为monitor分配内存，调用monitorenter()
+    if (synchronized) {
+        lock_method();
+    }
+
+    __ notify_method_entry();
+    {
+        // 通知jvmti post_method_entry事件
+        if (JvmtiExport::can_post_interpreter_events()) {
+            call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::post_method_entry));
+        }
+
+        // dtrace_method_entry
+        {
+            SkipIfEqual skip(this, &DTraceMethodProbes, false);
+            get_method(c_rarg1);
+            call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry), rthread, c_rarg1);
+        }
+    }
+
+    // 开始解释执行字节码
+    __ dispatch_next(vtos);
+    {
+        // rbcp指向字节码
+        ldrb(rscratch1, Address(pre(rbcp, step)));
+        dispatch_base(state, Interpreter::dispatch_table(state));
+        {
+            // rscratch2 = rdispatch[state][rscratch1]
+            addw(rscratch2, rscratch1, Interpreter::distance_from_dispatch_table(state));
+            ldr(rscratch2, Address(rdispatch, rscratch2, Address::uxtw(3)));
+            // 跳转到指定字节码对应的汇编片段
+            br(rscratch2);
+        }
+    }
+
+}
+
+```
+
+开始解释字节码之前的状态
+![开始解释字节码之前的状态](/assets/images/2023-01-28/call.png)
+
+### 字节码模板表
+
+```c++
+
+void TemplateTable::initialize() {
+
+    ...
+
+    def(Bytecodes::_invokevirtual       , ubcp|disp|clvm|____, vtos, vtos, invokevirtual       , f2_byte      );
+    def(Bytecodes::_invokespecial       , ubcp|disp|clvm|____, vtos, vtos, invokespecial       , f1_byte      );
+    def(Bytecodes::_invokestatic        , ubcp|disp|clvm|____, vtos, vtos, invokestatic        , f1_byte      );
+    def(Bytecodes::_invokeinterface     , ubcp|disp|clvm|____, vtos, vtos, invokeinterface     , f1_byte      );
+    def(Bytecodes::_invokedynamic       , ubcp|disp|clvm|____, vtos, vtos, invokedynamic       , f1_byte      );
+    def(Bytecodes::_new                 , ubcp|____|clvm|____, vtos, atos, _new                ,  _           );
+    def(Bytecodes::_newarray            , ubcp|____|clvm|____, itos, atos, newarray            ,  _           );
+
+    ...
+
+}
+
+```
+
+以`invokestatic`为例
+
+```c++
+
+void TemplateTable::invokestatic(int byte_no)
+{
+    // 不影响top of stack
+    transition(vtos, vtos);
+
+    // 根据字节码从常量池中加载method到rmethod
+    prepare_invoke(byte_no, rmethod);
+
+    __ jump_from_interpreted(rmethod, r0);
+    {
+        mov(r13, sp);
+        str(esp, Address(rfp, frame::interpreter_frame_last_sp_offset * wordSize));
+        // 计算指定方法的解释器入口的地址
+        ldr(rscratch1, Address(rmethod, Method::from_interpreted_offset()));
+        br(rscratch1);
+    }
+}
+
+```
+
+
+
+
