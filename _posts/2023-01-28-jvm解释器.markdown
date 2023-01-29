@@ -93,7 +93,7 @@ void JavaCalls::call(JavaValue* result, methodHandle method, JavaCallArguments* 
 
 ### call_stub
 
-`call_stub`是一段动态生成的汇编代码，用于准备`main`方法的执行环境
+`call_stub`是一段动态生成的汇编代码，用于准备`main`方法的执行环境，此处需要遵守函数调用约定，保存现场和恢复现场
 
 ```c++
 
@@ -208,6 +208,31 @@ address generate_call_stub(address& return_address) {
 调用entry-point之前的状态
 ![调用entry-point之前的状态](/assets/images/2023-01-28/stub.png)
 
+加断点到`StubRoutines::call_stub()(`这一行可以查看stub的地址，然后给stub的第一条指令加断点
+
+```sh
+
+# 查看stub地址
+-exec p /x StubRoutines::call_stub()
+$1 = 0xffffe80755ec
+
+# 加断点到stub的第一条指令
+-exec b *0xffffe80755ec
+Breakpoint 4 at 0xffffe80755ec
+
+# 查看解释器入口地址
+-exec p /x entry_point
+$2 = 0xffffe808b700
+
+# 给解释器入口加断点
+-exec b *0xffffe808b700
+Breakpoint 5 at 0xffffe808b700
+
+```
+
+可以跟反汇编之后的stub代码做个对比
+![反汇编之后的stub代码](/assets/images/2023-01-28/stub-assembly.png)
+
 ### 解释器模板
 
 ```c++
@@ -317,7 +342,12 @@ address InterpreterGenerator::generate_normal_entry(bool synchronized) {
 开始解释字节码之前的状态
 ![开始解释字节码之前的状态](/assets/images/2023-01-28/call.png)
 
+可以跟反汇编之后的entry代码做个对比
+![反汇编之后的entry代码](/assets/images/2023-01-28/entry-assembly.png)
+
 ### 字节码模板表
+
+每个字节码对应一块汇编代码
 
 ```c++
 
@@ -362,6 +392,8 @@ void TemplateTable::invokestatic(int byte_no)
 }
 
 ```
+
+解释器的任务就是挨个执行每个字节码的汇编片段，所有的状态信息都在栈上
 
 
 
