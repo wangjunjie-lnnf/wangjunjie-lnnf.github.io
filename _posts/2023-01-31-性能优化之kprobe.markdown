@@ -1,9 +1,9 @@
 ---
 layout: post
-title:  "jvm解释器"
+title:  "性能优化之kprobe"
 date:   2023-01-29 10:22:07 +0800
 categories: jekyll
-tags: perf usdt
+tags: perf kprobe
 ---
 
 # usdt
