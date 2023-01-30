@@ -1,7 +1,7 @@
 ---
 layout: post
 title:  "Setup Jekyll!"
-date:   2022-12-29 14:32:07 +0800
+date:   2022-12-29 14:32:07 +0000
 categories: jekyll
 tags: jekyll
 ---
