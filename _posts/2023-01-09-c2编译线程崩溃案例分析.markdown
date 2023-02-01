@@ -212,7 +212,7 @@ Node* LoadKlassNode::make(PhaseGVN& gvn, Node* ctl, Node *mem, Node *adr, const 
 
 ### 解释执行
 
-每个字节码都对应一段汇编代码，挨个执行每个字节码对应的汇编代码
+[jvm解释器](/jekyll/2023/01/28/jvm解释器.html)
 
 ### 编译环境初始化
 
