@@ -1,0 +1,351 @@
+---
+layout: post
+title:  "系统中断和异常之aarch64"
+date:   2023-02-01 21:22:07 +0000
+categories: jekyll
+tags: kernel interrupt
+---
+
+# AArch64 Exception and Interrupt Handling
+
+## 中断和异常
+
+An exception is described as synchronous if it is generated because of execution or attempted execution of the instruction stream, and where the return address provides details of the instruction that caused it.
+Otherwise, an exception is described as asynchronous.
+Sources of asynchronous exceptions are IRQ, FIQ, or SError (System Error). System errors have several possible causes, the most common being asynchronous Data Aborts (for example, an abort that is triggered by write-back of dirty data from a cache line to external memory).
+
+异常和中断都会改变程序的正常流程
+异常是同步的，由于执行了一些特殊指令引起的，例如断点异常、系统调用等。
+中断是异步的，程序的执行不会直接导致中断，一般由cpu之外的硬件导致，例如网卡在收到packet之后会通过中断通知系统去处理。
+
+![basic_exception_handling](/assets/images/2023-02-01/basic_exception_handling.png)
+
+FIQ is higher priority than IRQ. Both of these interrupts are typically associated with individual input pins for each core. External hardware asserts an interrupt request line and the corresponding exception type is raised when the current instruction finishes executing (although some instructions, those that can load multiple values, can be interrupted), assuming that the interrupt is not disabled.
+
+FIQ比IRQ优先级更高。
+
+On almost all systems, various interrupt sources are connected using an interrupt controller. The interrupt controller arbitrates and prioritizes interrupts, and in turn, provides a serialized single signal that is then connected to the FIQ or IRQ signal of the core.
+
+一般中断由中断控制器管理，中断控制器与cpu相连。
+
+### Exception handling
+
+An exception causes a change of program flow. Execution restarts in the Exception level to which the Exception is taken, from the exception vector that corresponds to the exception taken. That is, the exception vector holds the first instruction of the exception handler.
+
+When an event that causes an exception occurs, the processor hardware automatically performs several actions:
+
+The SPSR_ELn is updated (where n is the Exception level where the exception is taken), to store the PSTATE information that is required to correctly return at the end of the exception.
+PSTATE is updated to reflect the new processor status (and this can mean that the Exception level is raised, or it can stay the same).
+The address to return to at the end of the exception is stored in ELR_ELn.
+
+![handle_exception](/assets/images/2023-02-01/handle_exception.png)
+
+The processor branches to a vector table which contains entries for each exception type. The vector table contains a dispatch code, which typically identifies the cause of the exception, and selects and calls the relevant function to handle it.
+
+![vector_table_branch](/assets/images/2023-02-01/vector_table_branch.png)
+
+When the handler code completes execution it returns to the high-level handler, which then executes the ERET instruction to return to the application.
+
+异常或中断发生时，SPSR_ELn存储异常发生时的PSTATE，ELR_ELn存储返回地址，cpu到向量表中查找对应的handler并执行。
+
+## 实现
+
+### 中断控制器
+
+中断控制器作为注册表管理中断
+
+`arch/arm64/kernel/irq.c`
+
+```c
+
+extern struct of_device_id __irqchip_of_table[];
+
+void __init init_IRQ(void)
+{
+    // 枚举__irqchip_of_table中的中断控制器
+    irqchip_init();
+    {
+        of_irq_init(__irqchip_of_table);
+        {
+            // 初始化中断控制器
+            ret = desc->irq_init_cb(desc->dev, desc->interrupt_parent);
+        }
+    }
+}
+
+```
+
+`drivers/irqchip/irq-gic.c`
+
+```c
+
+// irq_domain全局队列
+static LIST_HEAD(irq_domain_list);
+
+static struct gic_chip_data gic_data[CONFIG_ARM_GIC_MAX_NR] __read_mostly;
+
+// 添加支持的中断控制器到__irqchip_of_table
+IRQCHIP_DECLARE(gic_400, "arm,gic-400", gic_of_init);
+
+int __init gic_of_init(struct device_node *node, struct device_node *parent)
+{
+    gic = &gic_data[0];
+    ret = __gic_init_bases(gic, &node->fwnode);
+    {
+        // 设置中断处理函数
+        set_handle_irq(gic_handle_irq);
+        {
+            handle_arch_irq = handle_irq;
+        }
+
+        ret = gic_init_bases(gic, handle);
+        {
+            gic->domain = irq_domain_create_linear(...);
+            {
+                __irq_domain_add(...);
+                {
+                    // 分配内存
+                    domain = kzalloc_node(...);
+                    // 初始化注册表和锁
+                    INIT_RADIX_TREE(&domain->revmap_tree, GFP_KERNEL);
+	                mutex_init(&domain->revmap_mutex);
+                    // 加入全局队列
+                    list_add(&domain->link, &irq_domain_list);
+                }
+            }
+        }
+    }
+}
+
+```
+
+### 中断向量表
+
+`arch/arm64/kernel/entry.S`
+
+```c
+
+// 汇编代码生成中断向量表entry
+.macro kernel_ventry, el:req, ht:req, regsize:req, label:req
+    ...
+    #ifdef CONFIG_VMAP_STACK
+        ...
+        /* 跳转到el[01][ht]_64_xxx */
+	    b	el\el\ht\()_\regsize\()_\label
+        ...
+    #endif
+    /* 跳转到el[01][ht]_64_xxx */
+	b	el\el\ht\()_\regsize\()_\label
+    ...
+.endm
+
+// 中断向量表
+SYM_CODE_START(vectors)
+	kernel_ventry	1, t, 64, sync		// Synchronous EL1t
+	kernel_ventry	1, t, 64, irq		// IRQ EL1t
+	kernel_ventry	1, t, 64, fiq		// FIQ EL1h
+	kernel_ventry	1, t, 64, error		// Error EL1t
+
+	kernel_ventry	1, h, 64, sync		// Synchronous EL1h
+	kernel_ventry	1, h, 64, irq		// IRQ EL1h
+	kernel_ventry	1, h, 64, fiq		// FIQ EL1h
+	kernel_ventry	1, h, 64, error		// Error EL1h
+
+	kernel_ventry	0, t, 64, sync		// Synchronous 64-bit EL0
+	kernel_ventry	0, t, 64, irq		// IRQ 64-bit EL0
+	kernel_ventry	0, t, 64, fiq		// FIQ 64-bit EL0
+	kernel_ventry	0, t, 64, error		// Error 64-bit EL0
+
+	kernel_ventry	0, t, 32, sync		// Synchronous 32-bit EL0
+	kernel_ventry	0, t, 32, irq		// IRQ 32-bit EL0
+	kernel_ventry	0, t, 32, fiq		// FIQ 32-bit EL0
+	kernel_ventry	0, t, 32, error		// Error 32-bit EL0
+SYM_CODE_END(vectors)
+
+// 汇编代码生成符号
+.macro entry_handler el:req, ht:req, regsize:req, label:req
+/* 生成`el[01][ht]_64_xxx` */
+SYM_CODE_START_LOCAL(el\el\ht\()_\regsize\()_\label)
+	kernel_entry \el, \regsize
+	mov	x0, sp
+	/* 跳转到`el[01][ht]_64_xxx_handler` */
+	bl	el\el\ht\()_\regsize\()_\label\()_handler
+	.if \el == 0
+	b	ret_to_user
+	.else
+	b	ret_to_kernel
+	.endif
+SYM_CODE_END(el\el\ht\()_\regsize\()_\label)
+.endm
+
+entry_handler	1, t, 64, sync
+entry_handler	1, t, 64, irq
+entry_handler	1, t, 64, fiq
+entry_handler	1, t, 64, error
+
+/* sys中断 */
+entry_handler	1, h, 64, sync
+entry_handler	1, h, 64, irq
+entry_handler	1, h, 64, fiq
+entry_handler	1, h, 64, error
+
+/* user中断 */
+entry_handler	0, t, 64, sync
+entry_handler	0, t, 64, irq
+entry_handler	0, t, 64, fiq
+entry_handler	0, t, 64, error
+
+entry_handler	0, t, 32, sync
+entry_handler	0, t, 32, irq
+entry_handler	0, t, 32, fiq
+entry_handler	0, t, 32, error
+
+```
+
+`arch/arm64/kernel/entry-common.c`
+
+```c
+
+// el0中断
+asmlinkage void noinstr el0t_64_irq_handler(struct pt_regs *regs)
+{
+	__el0_irq_handler_common(regs);
+    {
+        // handle_arch_irq在初始化中断控制器时设置
+        el0_interrupt(regs, handle_arch_irq);
+        {
+            enter_from_user_mode(regs);
+
+            do_interrupt_handler(regs, handler);
+            {
+                if (on_thread_stack())
+                    call_on_irq_stack(regs, handler);
+                else
+                    handler(regs);
+            }
+
+	        exit_to_user_mode(regs);
+        }
+    }
+}
+
+// el0异常
+asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
+{
+    ...
+}
+
+// el1中断
+asmlinkage void noinstr el1h_64_irq_handler(struct pt_regs *regs)
+{
+    // handle_arch_irq在初始化中断控制器时设置
+	el1_interrupt(regs, handle_arch_irq);
+    {
+        do_interrupt_handler(regs, handler);
+        {
+            if (on_thread_stack())
+                call_on_irq_stack(regs, handler);
+            else
+                handler(regs);
+        }
+    }
+}
+
+// el1异常
+asmlinkage void noinstr el1h_64_sync_handler(struct pt_regs *regs)
+{
+    ...
+}
+
+```
+
+### gic_handle_irq:处理中断
+
+`drivers/irqchip/irq-gic.c`
+
+```c
+
+static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
+{
+    struct gic_chip_data *gic = &gic_data[0];
+    handle_domain_irq(gic->domain, irqnr, regs);
+    {
+        irq_enter();
+
+        // 根据中断号在注册表中查找中断描述符
+        desc = irq_resolve_mapping(domain, hwirq);
+        if (likely(desc))
+            handle_irq_desc(desc);
+            {
+                generic_handle_irq_desc(desc);
+                {
+                    desc->handle_irq(desc);
+                }
+            }
+        else
+            ret = -EINVAL;
+
+        irq_exit();
+    }
+}
+
+```
+
+### 创建中断描述符
+
+```c
+
+// irq位图和锁
+static DEFINE_MUTEX(sparse_irq_lock);
+static DECLARE_BITMAP(allocated_irqs, IRQ_BITMAP_BITS);
+
+// 由pci_bus的驱动调用分配irq_desc
+// 然后pci_bus在probe到pci设备时再分配给pci设备
+int __ref __irq_alloc_descs(int irq, unsigned int from, unsigned int cnt, int node,
+		                    struct module *owner, const struct irq_affinity_desc *affinity)
+{
+    start = bitmap_find_next_zero_area(allocated_irqs, IRQ_BITMAP_BITS, from, cnt, 0);
+    ret = alloc_descs(start, cnt, node, affinity, owner);
+    {
+        for (i = 0; i < cnt; i++) {
+            desc = alloc_desc(start + i, node, flags, mask, owner);
+            // 插入中断控制器的注册表
+            irq_insert_desc(start + i, desc);
+            ...
+        }
+        // 标记位图
+        bitmap_set(allocated_irqs, start, cnt);
+    }
+}
+
+```
+
+### 注册中断
+
+```c
+
+// 驱动程序根据分配给设备的irq调用request_irq注册中断handler
+static inline int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags, const char *name, void *dev)
+{
+	return request_threaded_irq(irq, handler, NULL, flags, name, dev);
+    {
+        。。。
+        desc = irq_to_desc(irq);
+        。。。
+        action->handler = handler;
+        action->thread_fn = thread_fn;
+        action->flags = irqflags;
+        action->name = devname;
+        action->dev_id = dev_id;
+        。。。
+        retval = __setup_irq(irq, desc, action);
+    }
+}
+
+```
+
+### 总结
+
+上述几个角色的关系
+
+![interupt-relation](/assets/images/2023-02-01/interupt-relation.png)
