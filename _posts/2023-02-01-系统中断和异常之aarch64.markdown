@@ -108,7 +108,7 @@ int __init gic_of_init(struct device_node *node, struct device_node *parent)
                     domain = kzalloc_node(...);
                     // 初始化注册表和锁
                     INIT_RADIX_TREE(&domain->revmap_tree, GFP_KERNEL);
-	                mutex_init(&domain->revmap_mutex);
+                    mutex_init(&domain->revmap_mutex);
                     // 加入全局队列
                     list_add(&domain->link, &irq_domain_list);
                 }
@@ -131,74 +131,74 @@ int __init gic_of_init(struct device_node *node, struct device_node *parent)
     #ifdef CONFIG_VMAP_STACK
         ...
         /* 跳转到el[01][ht]_64_xxx */
-	    b	el\el\ht\()_\regsize\()_\label
+        b    el\el\ht\()_\regsize\()_\label
         ...
     #endif
     /* 跳转到el[01][ht]_64_xxx */
-	b	el\el\ht\()_\regsize\()_\label
+    b    el\el\ht\()_\regsize\()_\label
     ...
 .endm
 
 // 中断向量表
 SYM_CODE_START(vectors)
-	kernel_ventry	1, t, 64, sync		// Synchronous EL1t
-	kernel_ventry	1, t, 64, irq		// IRQ EL1t
-	kernel_ventry	1, t, 64, fiq		// FIQ EL1h
-	kernel_ventry	1, t, 64, error		// Error EL1t
+    kernel_ventry    1, t, 64, sync        // Synchronous EL1t
+    kernel_ventry    1, t, 64, irq        // IRQ EL1t
+    kernel_ventry    1, t, 64, fiq        // FIQ EL1h
+    kernel_ventry    1, t, 64, error        // Error EL1t
 
-	kernel_ventry	1, h, 64, sync		// Synchronous EL1h
-	kernel_ventry	1, h, 64, irq		// IRQ EL1h
-	kernel_ventry	1, h, 64, fiq		// FIQ EL1h
-	kernel_ventry	1, h, 64, error		// Error EL1h
+    kernel_ventry    1, h, 64, sync        // Synchronous EL1h
+    kernel_ventry    1, h, 64, irq        // IRQ EL1h
+    kernel_ventry    1, h, 64, fiq        // FIQ EL1h
+    kernel_ventry    1, h, 64, error        // Error EL1h
 
-	kernel_ventry	0, t, 64, sync		// Synchronous 64-bit EL0
-	kernel_ventry	0, t, 64, irq		// IRQ 64-bit EL0
-	kernel_ventry	0, t, 64, fiq		// FIQ 64-bit EL0
-	kernel_ventry	0, t, 64, error		// Error 64-bit EL0
+    kernel_ventry    0, t, 64, sync        // Synchronous 64-bit EL0
+    kernel_ventry    0, t, 64, irq        // IRQ 64-bit EL0
+    kernel_ventry    0, t, 64, fiq        // FIQ 64-bit EL0
+    kernel_ventry    0, t, 64, error        // Error 64-bit EL0
 
-	kernel_ventry	0, t, 32, sync		// Synchronous 32-bit EL0
-	kernel_ventry	0, t, 32, irq		// IRQ 32-bit EL0
-	kernel_ventry	0, t, 32, fiq		// FIQ 32-bit EL0
-	kernel_ventry	0, t, 32, error		// Error 32-bit EL0
+    kernel_ventry    0, t, 32, sync        // Synchronous 32-bit EL0
+    kernel_ventry    0, t, 32, irq        // IRQ 32-bit EL0
+    kernel_ventry    0, t, 32, fiq        // FIQ 32-bit EL0
+    kernel_ventry    0, t, 32, error        // Error 32-bit EL0
 SYM_CODE_END(vectors)
 
 // 汇编代码生成符号
 .macro entry_handler el:req, ht:req, regsize:req, label:req
 /* 生成`el[01][ht]_64_xxx` */
 SYM_CODE_START_LOCAL(el\el\ht\()_\regsize\()_\label)
-	kernel_entry \el, \regsize
-	mov	x0, sp
-	/* 跳转到`el[01][ht]_64_xxx_handler` */
-	bl	el\el\ht\()_\regsize\()_\label\()_handler
-	.if \el == 0
-	b	ret_to_user
-	.else
-	b	ret_to_kernel
-	.endif
+    kernel_entry \el, \regsize
+    mov    x0, sp
+    /* 跳转到`el[01][ht]_64_xxx_handler` */
+    bl    el\el\ht\()_\regsize\()_\label\()_handler
+    .if \el == 0
+    b    ret_to_user
+    .else
+    b    ret_to_kernel
+    .endif
 SYM_CODE_END(el\el\ht\()_\regsize\()_\label)
 .endm
 
-entry_handler	1, t, 64, sync
-entry_handler	1, t, 64, irq
-entry_handler	1, t, 64, fiq
-entry_handler	1, t, 64, error
+entry_handler    1, t, 64, sync
+entry_handler    1, t, 64, irq
+entry_handler    1, t, 64, fiq
+entry_handler    1, t, 64, error
 
 /* sys中断 */
-entry_handler	1, h, 64, sync
-entry_handler	1, h, 64, irq
-entry_handler	1, h, 64, fiq
-entry_handler	1, h, 64, error
+entry_handler    1, h, 64, sync
+entry_handler    1, h, 64, irq
+entry_handler    1, h, 64, fiq
+entry_handler    1, h, 64, error
 
 /* user中断 */
-entry_handler	0, t, 64, sync
-entry_handler	0, t, 64, irq
-entry_handler	0, t, 64, fiq
-entry_handler	0, t, 64, error
+entry_handler    0, t, 64, sync
+entry_handler    0, t, 64, irq
+entry_handler    0, t, 64, fiq
+entry_handler    0, t, 64, error
 
-entry_handler	0, t, 32, sync
-entry_handler	0, t, 32, irq
-entry_handler	0, t, 32, fiq
-entry_handler	0, t, 32, error
+entry_handler    0, t, 32, sync
+entry_handler    0, t, 32, irq
+entry_handler    0, t, 32, fiq
+entry_handler    0, t, 32, error
 
 ```
 
@@ -209,7 +209,7 @@ entry_handler	0, t, 32, error
 // el0中断
 asmlinkage void noinstr el0t_64_irq_handler(struct pt_regs *regs)
 {
-	__el0_irq_handler_common(regs);
+    __el0_irq_handler_common(regs);
     {
         // handle_arch_irq在初始化中断控制器时设置
         el0_interrupt(regs, handle_arch_irq);
@@ -224,7 +224,7 @@ asmlinkage void noinstr el0t_64_irq_handler(struct pt_regs *regs)
                     handler(regs);
             }
 
-	        exit_to_user_mode(regs);
+            exit_to_user_mode(regs);
         }
     }
 }
@@ -239,7 +239,7 @@ asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
 asmlinkage void noinstr el1h_64_irq_handler(struct pt_regs *regs)
 {
     // handle_arch_irq在初始化中断控制器时设置
-	el1_interrupt(regs, handle_arch_irq);
+    el1_interrupt(regs, handle_arch_irq);
     {
         do_interrupt_handler(regs, handler);
         {
@@ -302,14 +302,14 @@ static DECLARE_BITMAP(allocated_irqs, IRQ_BITMAP_BITS);
 // 从设备树中解析设备的hwirq
 unsigned int irq_of_parse_and_map(struct device_node *dev, int index)
 {
-	struct of_phandle_args oirq;
+    struct of_phandle_args oirq;
 
-	/* 解析设备节点中断信息 */
-	if (of_irq_parse_one(dev, index, &oirq))
-		return 0;
+    /* 解析设备节点中断信息 */
+    if (of_irq_parse_one(dev, index, &oirq))
+        return 0;
 
     // 解析并映射hwirq到virq
-	return irq_create_of_mapping(&oirq);
+    return irq_create_of_mapping(&oirq);
     {
         。。。
         // 获取hwirq
@@ -353,7 +353,7 @@ unsigned int irq_of_parse_and_map(struct device_node *dev, int index)
 // 驱动程序根据分配给设备的irq调用request_irq注册中断handler
 static inline int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags, const char *name, void *dev)
 {
-	return request_threaded_irq(irq, handler, NULL, flags, name, dev);
+    return request_threaded_irq(irq, handler, NULL, flags, name, dev);
     {
         。。。
         desc = irq_to_desc(irq);
