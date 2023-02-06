@@ -272,7 +272,7 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
     {
         irq_enter();
 
-        // 根据中断号在注册表中查找中断描述符
+        // 根据硬件中断号在注册表中查找中断描述符
         desc = irq_resolve_mapping(domain, hwirq);
         if (likely(desc))
             handle_irq_desc(desc);
@@ -291,30 +291,56 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 
 ```
 
-### 创建中断描述符
+### 映射中断描述符
 
 ```c
 
-// irq位图和锁
+// virq位图和锁
 static DEFINE_MUTEX(sparse_irq_lock);
 static DECLARE_BITMAP(allocated_irqs, IRQ_BITMAP_BITS);
 
-// 由pci_bus的驱动调用分配irq_desc
-// 然后pci_bus在probe到pci设备时再分配给pci设备
-int __ref __irq_alloc_descs(int irq, unsigned int from, unsigned int cnt, int node,
-		                    struct module *owner, const struct irq_affinity_desc *affinity)
+// 从设备树中解析设备的hwirq
+unsigned int irq_of_parse_and_map(struct device_node *dev, int index)
 {
-    start = bitmap_find_next_zero_area(allocated_irqs, IRQ_BITMAP_BITS, from, cnt, 0);
-    ret = alloc_descs(start, cnt, node, affinity, owner);
+	struct of_phandle_args oirq;
+
+	/* 解析设备节点中断信息 */
+	if (of_irq_parse_one(dev, index, &oirq))
+		return 0;
+
+    // 解析并映射hwirq到virq
+	return irq_create_of_mapping(&oirq);
     {
-        for (i = 0; i < cnt; i++) {
-            desc = alloc_desc(start + i, node, flags, mask, owner);
-            // 插入中断控制器的注册表
-            irq_insert_desc(start + i, desc);
-            ...
+        。。。
+        // 获取hwirq
+        irq_domain_translate(domain, fwspec, &hwirq, &type);
+
+        // 创建映射
+        virq = irq_create_mapping(domain, hwirq);
+        {
+            virq = irq_domain_alloc_descs(-1, 1, hwirq, of_node_to_nid(of_node), affinity);
+            {
+                start = bitmap_find_next_zero_area(allocated_irqs, IRQ_BITMAP_BITS, from, cnt, 0);
+                // 分配desc
+                ret = alloc_descs(start, cnt, node, affinity, owner);
+                {
+                    for (i = 0; i < cnt; i++) {
+                        desc = alloc_desc(start + i, node, flags, mask, owner);
+                    }
+                    // 标记位图
+                    bitmap_set(allocated_irqs, start, cnt);
+                }
+            }
+            irq_domain_associate(domain, virq, hwirq);
+            {
+                // 在domain中建立映射
+                if (hwirq < domain->revmap_size)
+                    rcu_assign_pointer(domain->revmap[hwirq], irq_data);
+                else
+                    radix_tree_insert(&domain->revmap_tree, hwirq, irq_data);
+            }
         }
-        // 标记位图
-        bitmap_set(allocated_irqs, start, cnt);
+        。。。
     }
 }
 
