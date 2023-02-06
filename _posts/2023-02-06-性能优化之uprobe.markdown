@@ -1,0 +1,304 @@
+---
+layout: post
+title:  "性能优化之uprobe"
+date:   2023-02-06 19:50:07 +0000
+categories: jekyll
+tags: perf uprobe
+---
+
+# uprobe
+
+uprobe提供用户空间的动态织入能力
+
+## 实现机制
+
+`uprobe`的实现原理是在用户地址空间动态打断点
+
+### 设置断点
+
+```c
+
+// uprobe注册表
+static struct rb_root uprobes_tree = RB_ROOT;
+
+/**
+ * inode 断点所在的elf文件
+ * offset 断点偏移量，相对于inode
+ * uc handler和ret_handler
+ */
+int uprobe_register(struct inode *inode, loff_t offset, struct uprobe_consumer *uc)
+{
+	return __uprobe_register(inode, offset, 0, uc);
+    {
+        uprobe = alloc_uprobe(inode, offset, ref_ctr_offset);
+        {
+            // 按inode:offset排序, 重复注册则替换
+            node = rb_find_add(&uprobe->rb_node, &uprobes_tree, __uprobe_cmp);
+            ret = register_for_each_vma(uprobe, uc);
+            {
+                // 提供handler则注册断点，否则删除断点
+                bool is_register = !!uc;
+
+                info = build_map_info(uprobe->inode->i_mapping, uprobe->offset, is_register);
+                while (info) {
+                    if (is_register) {
+                        // 调用uprobe_consumer->filter判断是否满足条件
+                        if (consumer_filter(uc, UPROBE_FILTER_REGISTER, mm))
+                            err = install_breakpoint(uprobe, mm, vma, info->vaddr);
+                            {
+                                ret = prepare_uprobe(uprobe, vma->vm_file, mm, vaddr);
+                                {
+                                    // 复制指令
+                                    ret = copy_insn(uprobe, file);
+                                    set_bit(UPROBE_COPY_INSN, &uprobe->flags);
+                                }
+                                ret = set_swbp(&uprobe->arch, mm, vaddr);
+                                {
+                                    // 写入brk断点指令
+                                    uprobe_write_opcode(auprobe, mm, vaddr, UPROBE_SWBP_INSN);
+                                }
+                            }
+                    } else if (test_bit(MMF_HAS_UPROBES, &mm->flags)) {
+                        if (!filter_chain(uprobe, UPROBE_FILTER_UNREGISTER, mm))
+                            err |= remove_breakpoint(uprobe, mm, info->vaddr);
+                            {
+                                // 还原被断点替换的指令
+                                uprobe_write_opcode(auprobe, mm, vaddr, *(uprobe_opcode_t *)&auprobe->insn);
+                            }
+                    }
+                }
+            }
+        }
+    }
+}
+
+```
+
+### 断点异常
+
+参考[系统中断和异常之aarch64](/jekyll/2023/02/01/系统中断和异常之aarch64.html)
+
+```c
+
+void __init debug_traps_init(void)
+{
+    // 注册单步调试异常的handler
+	hook_debug_fault_code(DBG_ESR_EVT_HWSS, single_step_handler, SIGTRAP,
+			      TRAP_TRACE, "single-step handler");
+    // 注册断点异常的handler
+	hook_debug_fault_code(DBG_ESR_EVT_BRK, brk_handler, SIGTRAP,
+			      TRAP_BRKPT, "BRK handler");
+}
+
+// hook注册表
+static LIST_HEAD(user_break_hook);
+
+// 注册hook
+static int __init arch_init_uprobes(void)
+{
+	register_user_break_hook(&uprobes_break_hook);
+	register_user_step_hook(&uprobes_step_hook);
+
+	return 0;
+}
+
+// 断点异常
+asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
+{
+    unsigned long esr = read_sysreg(esr_el1);
+
+	switch (ESR_ELx_EC(esr)) {
+        ...
+    case ESR_ELx_EC_BREAKPT_LOW:
+	case ESR_ELx_EC_SOFTSTP_LOW:
+	case ESR_ELx_EC_WATCHPT_LOW:
+	case ESR_ELx_EC_BRK64:
+		el0_dbg(regs, esr);
+        {
+            enter_from_user_mode(regs);
+            do_debug_exception(far, esr, regs);
+            {
+                // 根据异常类型查找handler
+                const struct fault_info *inf = esr_to_debug_fault_info(esr);
+	            unsigned long pc = instruction_pointer(regs);
+                inf->fn(addr_if_watchpoint, esr, regs);
+            }
+            local_daif_restore(DAIF_PROCCTX);
+            exit_to_user_mode(regs);
+        }
+		break;
+        ...
+    }
+}
+
+// 断点handler
+static int brk_handler(unsigned long unused, unsigned int esr, struct pt_regs *regs)
+{
+	call_break_hook(regs, esr);
+    {
+        list = user_mode(regs) ? &user_break_hook : &kernel_break_hook;
+        // 查找注册的hook
+        list_for_each_entry_rcu(hook, list, node) {
+		    unsigned int comment = esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
+            if ((comment & ~hook->mask) == hook->imm)
+                fn = hook->fn;
+        }
+
+        return fn ? fn(regs, esr) : DBG_HOOK_ERROR;
+    }
+    ...
+}
+
+static struct break_hook uprobes_break_hook = {
+	.imm = UPROBES_BRK_IMM,
+	.fn = uprobe_breakpoint_handler,
+};
+
+static int uprobe_breakpoint_handler(struct pt_regs *regs, unsigned int esr)
+{
+    // 设置TIF_UPROBE
+    set_thread_flag(TIF_UPROBE);
+}
+
+```
+
+### 切换到用户空间时
+
+```c
+
+static __always_inline void exit_to_user_mode(struct pt_regs *regs)
+{
+	prepare_exit_to_user_mode(regs);
+	{
+        flags = READ_ONCE(current_thread_info()->flags);
+        if (unlikely(flags & _TIF_WORK_MASK)) {
+            do_notify_resume(regs, flags);
+            {
+                do {
+                    
+                    // uprobe_breakpoint_handler中设置flag
+                    if (thread_flags & _TIF_UPROBE) {
+                        uprobe_notify_resume(regs);
+                        {
+                            clear_thread_flag(TIF_UPROBE);
+
+                            utask = current->utask;
+                            if (utask && utask->active_uprobe)
+                                // cpu单步执行完被替换的指令回到这里
+                                handle_singlestep(utask, regs);
+                                {
+                                    if (utask->state == UTASK_SSTEP_ACK)
+                                        err = arch_uprobe_post_xol(&uprobe->arch, regs);
+                                        {
+                                            // pc执行断点的下一条指令
+                                            instruction_pointer_set(regs, utask->vaddr + 4);
+                                            // 禁用单步调试，程序恢复正常运行
+                                            user_disable_single_step(current);
+                                        }
+                                }
+                            else
+                                handle_swbp(regs);
+                                {
+                                    // 断点地址
+                                    bp_vaddr = uprobe_get_swbp_addr(regs);
+
+                                    // ret到断点指令
+                                    if (bp_vaddr == get_trampoline_vaddr())
+		                                return handle_trampoline(regs);
+                                        {
+                                            // pc指向原始的返回地址
+                                            instruction_pointer_set(regs, ri->orig_ret_vaddr);
+                                            handle_uretprobe_chain(ri, regs);
+                                            {
+                                                for (uc = uprobe->consumers; uc; uc = uc->next) {
+                                                    if (uc->ret_handler)
+                                                        uc->ret_handler(uc, ri->func, regs);
+                                                }
+                                            }
+                                        }
+
+                                    uprobe = find_active_uprobe(bp_vaddr, &is_swbp);
+                                    {
+                                        // 根据断点地址查找vma以及vma对应的inode
+                                        uprobe = find_uprobe(inode, offset);
+                                    }
+
+                                    handler_chain(uprobe, regs);
+                                    {
+                                        for (uc = uprobe->consumers; uc; uc = uc->next) {
+                                            int rc = 0;
+
+                                            if (uc->handler) {
+                                                rc = uc->handler(uc, regs);
+                                            }
+
+                                            // 拦截ret指令
+                                            if (uc->ret_handler)
+                                                need_prep = true;
+                                        }
+
+                                        if (need_prep && !remove)
+		                                    prepare_uretprobe(uprobe, regs);
+                                            {
+                                                // area->pages[0]的开头有一个brk断点指令
+                                                if (!mm->uprobes_state.xol_area)
+		                                            __create_xol_area(0);
+                                                
+                                                // area->pages[0]映射到trampoline_vaddr
+                                                trampoline_vaddr = get_trampoline_vaddr();
+	                                            // 替换r30中的ret地址为trampoline_vaddr
+	                                            orig_ret_vaddr = arch_uretprobe_hijack_return_addr(trampoline_vaddr, regs);
+                                                // 备份原始返回地址
+                                                current->utask->return_instances->orig_ret_vaddr = orig_ret_vaddr;
+                                            }
+                                    }
+
+                                    pre_ssout(uprobe, regs, bp_vaddr);
+                                    {
+                                        // 复制被替换的指令到pages[0]的空闲区域
+                                        xol_vaddr = xol_get_insn_slot(uprobe);
+                                        err = arch_uprobe_pre_xol(&uprobe->arch, regs);
+                                        {
+                                            // pc指向被替换的指令
+                                            instruction_pointer_set(regs, utask->xol_vaddr);
+                                            // 设置cpu为单步调试状态
+                                            user_enable_single_step(current);
+                                        }
+                                        utask->state = UTASK_SSTEP;
+                                    }
+                                }
+                        }
+                    }     
+
+                } while (thread_flags & _TIF_WORK_MASK);
+            }
+        }   
+    }
+}
+
+// cpu执行那条被替换的指令后又会触发单步调试异常
+static int single_step_handler(unsigned long unused, unsigned int esr, struct pt_regs *regs)
+{
+    call_step_hook(regs, esr);
+}
+
+static struct step_hook uprobes_step_hook = {
+	.fn = uprobe_single_step_handler,
+};
+
+static int uprobe_single_step_handler(struct pt_regs *regs, unsigned int esr)
+{
+	struct uprobe_task *utask = current->utask;
+
+	uprobe_post_sstep_notifier(regs);
+    {
+        utask->state = UTASK_SSTEP_ACK;
+        // 再次设置TIF_UPROBE
+	    set_thread_flag(TIF_UPROBE);
+    }
+}
+
+```
+
+uprobe时序图
+![uprobe](/assets/images/2023-02-06/uprobe.png)

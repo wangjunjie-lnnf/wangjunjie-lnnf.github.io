@@ -558,7 +558,7 @@ static void probe_6232(struct context *__restrict__ c) {
 
 ```
 
-dtrace会把位点和参数信息写入elf文件的.note段
+[dtrace](/jekyll/2023/02/06/性能优化之usdt.html)会把位点和参数信息写入elf文件的.note段
 
 `readelf -n /path/to/libjvm.so`
 

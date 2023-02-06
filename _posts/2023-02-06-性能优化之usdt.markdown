@@ -1,0 +1,109 @@
+---
+layout: post
+title:  "性能优化之usdt"
+date:   2023-02-06 21:22:07 +0000
+categories: jekyll
+tags: perf usdt
+---
+
+# usdt
+
+`usdt`基于[uprobe](/jekyll/2023/02/06/性能优化之uprobe.html)，以jvm为例说明其实现原理
+
+## 定义usdt
+
+```c++
+
+// 添加-XX:+ExtendedDTraceProbes参数后每个java方法执行之前都会调用dtrace_method_entry
+JRT_LEAF(int, SharedRuntime::dtrace_method_entry(
+    JavaThread* thread, Method* method))
+  assert(DTraceMethodProbes, "wrong call");
+  Symbol* kname = method->klass_name();
+  Symbol* name = method->name();
+  Symbol* sig = method->signature();
+
+  // 编译jvm之前需要先安装systemtap-dev
+  HS_DTRACE_PROBE7(hotspot, method__entry, get_java_tid(thread),
+      kname->bytes(), kname->utf8_length(),
+      name->bytes(), name->utf8_length(),
+      sig->bytes(), sig->utf8_length());
+
+  return 0;
+JRT_END
+
+// HS_DTRACE_PROBE7最终对应一段汇编代码
+#define _SDT_ASM_BODY(provider, name, pack_args, args)			      \
+  _SDT_DEF_MACROS							      \
+  _SDT_ASM_1(990:	_SDT_NOP)					      \
+  _SDT_ASM_3(		.pushsection .note.stapsdt,_SDT_ASM_AUTOGROUP,"note") \
+  _SDT_ASM_1(		.balign 4)					      \
+  _SDT_ASM_3(		.4byte 992f-991f, 994f-993f, _SDT_NOTE_TYPE)	      \
+  _SDT_ASM_1(991:	.asciz _SDT_NOTE_NAME)				      \
+  _SDT_ASM_1(992:	.balign 4)					      \
+  _SDT_ASM_1(993:	_SDT_ASM_ADDR 990b)				      \
+  _SDT_ASM_1(		_SDT_ASM_ADDR _.stapsdt.base)			      \
+  _SDT_SEMAPHORE(provider,name)						      \
+  _SDT_ASM_STRING(provider)						      \
+  _SDT_ASM_STRING(name)							      \
+  pack_args args							      \
+  _SDT_ASM_SUBSTR(\x00)							      \
+  _SDT_UNDEF_MACROS							      \
+  _SDT_ASM_1(994:	.balign 4)					      \
+  _SDT_ASM_1(		.popsection)
+
+```
+
+编译之后，usdt的信息会写入elf文件的note段  
+`readelf -n /path/to/libjvm.so`可以查看note段信息
+
+```
+
+stapsdt              0x0000005b       NT_STAPSDT (SystemTap probe descriptors)
+    Provider: hotspot
+    Name: method__entry
+    Location: 0x0000000000ba1f60, Base: 0x0000000001094368, Semaphore: 0x0000000000000000
+    Arguments: -8@x19 8@x20 -4@x21 8@x22 -4@x23 8@x24 -4@x0
+
+```
+
+Location对应上文的`_SDT_ASM_1(990:	_SDT_NOP)`，此处默认是一条nop指令
+![usdt-nop](/assets/images/2023-02-06/usdt-nop.png)
+
+当利用[systemtap](/jekyll/2023/01/29/性能优化之systemtap.html)或bpftrace注册此probe时，nop被替换为断点指令
+![usdt-brk](/assets/images/2023-02-06/usdt-brk.png)
+
+当uprobe事件发生时，可以从指定的位置获取预定义的上下文信息  
+`Arguments: -8@x19 8@x20 -4@x21 8@x22 -4@x23 8@x24 -4@x0`说明了uprobe事件发生时7个参数的位置
+
+
+```c
+
+// systemtap根据用户脚本中的uprobe自动生成的代码
+static void probe_6232(struct context *__restrict__ c) {
+    ...
+    // 解析class，class字符串的地址和长度保存在寄存器x20和x21
+    (void)({
+      ({
+        l->__tmp2 = (((int64_t)(/* unprivileged */ /* pure */ ((int64_t)(uint64_t)((u_fetch_register(20)))))));
+        l->__tmp3 = (((int64_t)(/* unprivileged */ /* pure */ ((int64_t)(int32_t)((u_fetch_register(21)))))));
+        c->locals[c->nesting + 1].function___global_user_string_n__overload_0.l_addr = l->__tmp2;
+        c->locals[c->nesting + 1].function___global_user_string_n__overload_0.l_n = l->__tmp3;
+        c->locals[c->nesting + 1].function___global_user_string_n__overload_0.__retvalue = &l->__tmp0[0];
+        c->last_stmt = "identifier 'user_string_n' at docs/examples/jvm/jvm.stp:18:11";
+        function___global_user_string_n__overload_0(c);
+        if (unlikely(c->last_error || c->aborted))
+          goto out;
+        (void)0;
+      });
+      strlcpy(l->l_class, l->__tmp0, MAXSTRINGLEN);
+      l->__tmp0;
+    });
+    ...
+}
+
+```
+
+## 总结
+
+`usdt`相比`uprobe`优点是稳定，不受api变化的影响，缺点是需要预定义
+
