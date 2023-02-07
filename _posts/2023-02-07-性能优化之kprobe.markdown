@@ -1,0 +1,304 @@
+---
+layout: post
+title:  "性能优化之kprobe"
+date:   2023-02-07 13:22:07 +0000
+categories: jekyll
+tags: perf kprobe
+---
+
+# kprobe
+
+`kprobe`提供系统空间动态织入能力，类似[uprobe](/jekyll/2023/02/06/性能优化之uprobe.html)
+
+## 实现机制
+
+`kprobe`的实现原理是在系统地址空间动态打断点
+
+### 设置断点
+
+```c
+
+// 不允许kprobe织入的符号
+static LIST_HEAD(kprobe_blacklist);
+
+// kprobe注册表
+static struct hlist_head kprobe_table[KPROBE_TABLE_SIZE];
+
+struct kprobe {
+    /* location of the probe point */
+	kprobe_opcode_t *addr;
+
+	/* Allow user to indicate symbol name of the probe point */
+	const char *symbol_name;
+
+	/* Offset into the symbol */
+	unsigned int offset;
+
+	/* Called before addr is executed. */
+	kprobe_pre_handler_t pre_handler;
+
+	/* Called after addr is executed, unless... */
+	kprobe_post_handler_t post_handler;
+
+	/* Saved opcode (which has been replaced with breakpoint) */
+	kprobe_opcode_t opcode;
+};
+
+int register_kprobe(struct kprobe *p)
+{
+    // 检查指定地址是否在黑名单
+    ret = check_kprobe_address_safe(p, &probed_mod);
+
+    // 指定地址已注册过kprobe，直接链接起来
+    old_p = get_kprobe(p->addr);
+	if (old_p) {
+		ret = register_aggr_kprobe(old_p, p);
+		goto out;
+	}
+
+    ret = prepare_kprobe(p);
+    {
+        // 备份指定地址的指令
+        arm_kprobe_decode_insn(p->addr, &p->ainsn);
+        arch_prepare_ss_slot(p);
+        {
+            kprobe_opcode_t *addr = p->ainsn.api.insn;
+            void *addrs[] = {addr, addr + 1};
+            u32 insns[] = {p->opcode, BRK64_OPCODE_KPROBES_SS};
+            // 被替换的指令后面添加单步调试指令
+            aarch64_insn_patch_text(addrs, insns, 2);
+
+            // 保存断点的下一条指令的地址
+            p->ainsn.api.restore = (unsigned long) p->addr + sizeof(kprobe_opcode_t);
+        }
+    }
+
+    ret = arm_kprobe(p);
+    {
+        __arm_kprobe(kp);
+        {
+            void *addr = p->addr;
+            u32 insn = BRK64_OPCODE_KPROBES;
+            // 替换为断点指令
+            aarch64_insn_patch_text(&addr, &insn, 1);
+        }
+    }
+}
+
+```
+
+### 断点异常
+
+参考[系统中断和异常之aarch64](/jekyll/2023/02/01/系统中断和异常之aarch64.html)
+
+```c
+
+void __init debug_traps_init(void)
+{
+    // 注册单步调试异常的handler
+	hook_debug_fault_code(DBG_ESR_EVT_HWSS, single_step_handler, SIGTRAP,
+			      TRAP_TRACE, "single-step handler");
+    // 注册断点异常的handler
+	hook_debug_fault_code(DBG_ESR_EVT_BRK, brk_handler, SIGTRAP,
+			      TRAP_BRKPT, "BRK handler");
+}
+
+// hook注册表
+static LIST_HEAD(kernel_break_hook);
+
+int __init arch_init_kprobes(void)
+{
+	register_kernel_break_hook(&kprobes_break_hook);
+	register_kernel_break_hook(&kprobes_break_ss_hook);
+
+	return 0;
+}
+
+// 断点异常
+asmlinkage void noinstr el1h_64_sync_handler(struct pt_regs *regs)
+{
+    unsigned long esr = read_sysreg(esr_el1);
+
+	switch (ESR_ELx_EC(esr)) {
+
+        case ESR_ELx_EC_BREAKPT_CUR:
+        case ESR_ELx_EC_SOFTSTP_CUR:
+        case ESR_ELx_EC_WATCHPT_CUR:
+        case ESR_ELx_EC_BRK64:
+            el1_dbg(regs, esr);
+            {
+                arm64_enter_el1_dbg(regs);
+                do_debug_exception(far, esr, regs);
+                {
+                    // 根据异常类型查找handler
+                    const struct fault_info *inf = esr_to_debug_fault_info(esr);
+                    unsigned long pc = instruction_pointer(regs);
+
+                    debug_exception_enter(regs);
+
+                    // 执行handler
+                    inf->fn(addr_if_watchpoint, esr, regs);
+
+                    debug_exception_exit(regs);
+                }
+                arm64_exit_el1_dbg(regs);
+            }
+            break;
+
+    }
+}
+
+// 断点handler
+static int brk_handler(unsigned long unused, unsigned int esr, struct pt_regs *regs)
+{
+	call_break_hook(regs, esr);
+    {
+        list = user_mode(regs) ? &user_break_hook : &kernel_break_hook;
+        // 查找注册的hook
+        list_for_each_entry_rcu(hook, list, node) {
+		    unsigned int comment = esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
+            if ((comment & ~hook->mask) == hook->imm)
+                fn = hook->fn;
+        }
+
+        return fn ? fn(regs, esr) : DBG_HOOK_ERROR;
+    }
+    ...
+}
+
+static struct break_hook kprobes_break_hook = {
+	.imm = KPROBES_BRK_IMM,
+	.fn = kprobe_breakpoint_handler,
+};
+
+static int __kprobes kprobe_breakpoint_handler(struct pt_regs *regs, unsigned int esr)
+{
+	/* #kprobe#4 kprobe_handler */
+	kprobe_handler(regs);
+    {
+        // 根据断点位置查找注册的kprobe
+        unsigned long addr = instruction_pointer(regs);
+        p = get_kprobe((kprobe_opcode_t *) addr);
+
+        // 执行pre_handler
+        if (!p->pre_handler || !p->pre_handler(p, regs)) {
+            setup_singlestep(p, regs, kcb, 0);
+            {
+                // pc指向被替换的指令，之后会触发单步调试异常
+                slot = (unsigned long)p->ainsn.api.insn;
+		        instruction_pointer_set(regs, slot);
+            }
+        }
+    }
+	return DBG_HOOK_HANDLED;
+}
+
+```
+
+### 单步调试异常
+
+```c
+
+static struct break_hook kprobes_break_ss_hook = {
+	.imm = KPROBES_BRK_SS_IMM,
+	.fn = kprobe_breakpoint_ss_handler,
+};
+
+static int __kprobes kprobe_breakpoint_ss_handler(struct pt_regs *regs, unsigned int esr)
+{
+    unsigned long addr = instruction_pointer(regs);
+	struct kprobe *cur = kprobe_running();
+    post_kprobe_handler(cur, kcb, regs);
+    {
+        if (cur->ainsn.api.restore != 0)
+            // pc指向断点之后的下一条指令，恢复正常执行
+		    instruction_pointer_set(regs, cur->ainsn.api.restore);
+        // 执行post_handler
+        if (cur->post_handler)
+		    cur->post_handler(cur, regs, 0);
+    }
+}
+
+```
+
+# kretprobe
+
+`kretprobe`基于`kprobe`，用于获取函数返回值
+
+## 实现机制
+
+`kretprobe`基于`kprobe`，用于获取函数返回值
+
+
+### 注册
+
+```c
+
+struct kretprobe {
+	struct kprobe kp;
+	kretprobe_handler_t handler;
+	kretprobe_handler_t entry_handler;
+	int maxactive;
+	int nmissed;
+};
+
+int register_kretprobe(struct kretprobe *rp)
+{
+    // 设置特定的pre_handler
+    rp->kp.pre_handler = pre_handler_kretprobe;
+	rp->kp.post_handler = NULL;
+
+    // 注册kprobe
+    ret = register_kprobe(&rp->kp);
+}
+
+static int pre_handler_kretprobe(struct kprobe *p, struct pt_regs *regs)
+{
+    struct kretprobe *rp = container_of(p, struct kretprobe, kp);
+    // 执行entry_handler
+    rp->entry_handler(ri, regs);
+
+    arch_prepare_kretprobe(ri, regs);
+    {
+        // 备份返回地址
+        ri->ret_addr = (kprobe_opcode_t *)regs->regs[30];
+        ri->fp = (void *)kernel_stack_pointer(regs);
+
+        // 返回地址替换为跳板地址
+        regs->regs[30] = (long)&kretprobe_trampoline;
+    }
+}
+
+// 跳板地址
+SYM_CODE_START(kretprobe_trampoline)
+	sub sp, sp, #PT_REGS_SIZE
+
+	save_all_base_regs
+
+	/* x0作为trampoline_probe_handler的参数指向stack上刚保存的寄存器 */
+	mov x0, sp
+	bl trampoline_probe_handler
+
+	/* x0存储了trampoline_probe_handler返回的原始地址，ret之后跳转到lr */
+	mov lr, x0
+
+	restore_all_base_regs
+
+	add sp, sp, #PT_REGS_SIZE
+	ret
+
+SYM_CODE_END(kretprobe_trampoline)
+
+void __kprobes __used *trampoline_probe_handler(struct pt_regs *regs)
+{
+	return (void *)kretprobe_trampoline_handler(regs, &kretprobe_trampoline, (void *)kernel_stack_pointer(regs));
+    {
+        // 执行handler
+        rp->handler(ri, regs);
+
+        return (unsigned long)correct_ret_addr;
+    }
+}
+
+```
+
