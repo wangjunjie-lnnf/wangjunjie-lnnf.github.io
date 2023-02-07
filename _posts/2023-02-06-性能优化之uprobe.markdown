@@ -28,7 +28,7 @@ static struct rb_root uprobes_tree = RB_ROOT;
  */
 int uprobe_register(struct inode *inode, loff_t offset, struct uprobe_consumer *uc)
 {
-	return __uprobe_register(inode, offset, 0, uc);
+    return __uprobe_register(inode, offset, 0, uc);
     {
         uprobe = alloc_uprobe(inode, offset, ref_ctr_offset);
         {
@@ -83,11 +83,11 @@ int uprobe_register(struct inode *inode, loff_t offset, struct uprobe_consumer *
 void __init debug_traps_init(void)
 {
     // 注册单步调试异常的handler
-	hook_debug_fault_code(DBG_ESR_EVT_HWSS, single_step_handler, SIGTRAP,
-			      TRAP_TRACE, "single-step handler");
+    hook_debug_fault_code(DBG_ESR_EVT_HWSS, single_step_handler, SIGTRAP,
+                  TRAP_TRACE, "single-step handler");
     // 注册断点异常的handler
-	hook_debug_fault_code(DBG_ESR_EVT_BRK, brk_handler, SIGTRAP,
-			      TRAP_BRKPT, "BRK handler");
+    hook_debug_fault_code(DBG_ESR_EVT_BRK, brk_handler, SIGTRAP,
+                  TRAP_BRKPT, "BRK handler");
 }
 
 // hook注册表
@@ -96,10 +96,10 @@ static LIST_HEAD(user_break_hook);
 // 注册hook
 static int __init arch_init_uprobes(void)
 {
-	register_user_break_hook(&uprobes_break_hook);
-	register_user_step_hook(&uprobes_step_hook);
+    register_user_break_hook(&uprobes_break_hook);
+    register_user_step_hook(&uprobes_step_hook);
 
-	return 0;
+    return 0;
 }
 
 // 断点异常
@@ -107,26 +107,26 @@ asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
 {
     unsigned long esr = read_sysreg(esr_el1);
 
-	switch (ESR_ELx_EC(esr)) {
+    switch (ESR_ELx_EC(esr)) {
         ...
     case ESR_ELx_EC_BREAKPT_LOW:
-	case ESR_ELx_EC_SOFTSTP_LOW:
-	case ESR_ELx_EC_WATCHPT_LOW:
-	case ESR_ELx_EC_BRK64:
-		el0_dbg(regs, esr);
+    case ESR_ELx_EC_SOFTSTP_LOW:
+    case ESR_ELx_EC_WATCHPT_LOW:
+    case ESR_ELx_EC_BRK64:
+        el0_dbg(regs, esr);
         {
             enter_from_user_mode(regs);
             do_debug_exception(far, esr, regs);
             {
                 // 根据异常类型查找handler
                 const struct fault_info *inf = esr_to_debug_fault_info(esr);
-	            unsigned long pc = instruction_pointer(regs);
+                unsigned long pc = instruction_pointer(regs);
                 inf->fn(addr_if_watchpoint, esr, regs);
             }
             local_daif_restore(DAIF_PROCCTX);
             exit_to_user_mode(regs);
         }
-		break;
+        break;
         ...
     }
 }
@@ -134,12 +134,12 @@ asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
 // 断点handler
 static int brk_handler(unsigned long unused, unsigned int esr, struct pt_regs *regs)
 {
-	call_break_hook(regs, esr);
+    call_break_hook(regs, esr);
     {
         list = user_mode(regs) ? &user_break_hook : &kernel_break_hook;
         // 查找注册的hook
         list_for_each_entry_rcu(hook, list, node) {
-		    unsigned int comment = esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
+            unsigned int comment = esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
             if ((comment & ~hook->mask) == hook->imm)
                 fn = hook->fn;
         }
@@ -150,8 +150,8 @@ static int brk_handler(unsigned long unused, unsigned int esr, struct pt_regs *r
 }
 
 static struct break_hook uprobes_break_hook = {
-	.imm = UPROBES_BRK_IMM,
-	.fn = uprobe_breakpoint_handler,
+    .imm = UPROBES_BRK_IMM,
+    .fn = uprobe_breakpoint_handler,
 };
 
 static int uprobe_breakpoint_handler(struct pt_regs *regs, unsigned int esr)
@@ -168,8 +168,8 @@ static int uprobe_breakpoint_handler(struct pt_regs *regs, unsigned int esr)
 
 static __always_inline void exit_to_user_mode(struct pt_regs *regs)
 {
-	prepare_exit_to_user_mode(regs);
-	{
+    prepare_exit_to_user_mode(regs);
+    {
         flags = READ_ONCE(current_thread_info()->flags);
         if (unlikely(flags & _TIF_WORK_MASK)) {
             do_notify_resume(regs, flags);
@@ -204,7 +204,7 @@ static __always_inline void exit_to_user_mode(struct pt_regs *regs)
 
                                     // ret到断点指令
                                     if (bp_vaddr == get_trampoline_vaddr())
-		                                return handle_trampoline(regs);
+                                        return handle_trampoline(regs);
                                         {
                                             // pc指向原始的返回地址
                                             instruction_pointer_set(regs, ri->orig_ret_vaddr);
@@ -238,16 +238,16 @@ static __always_inline void exit_to_user_mode(struct pt_regs *regs)
                                         }
 
                                         if (need_prep && !remove)
-		                                    prepare_uretprobe(uprobe, regs);
+                                            prepare_uretprobe(uprobe, regs);
                                             {
                                                 // area->pages[0]的开头有一个brk断点指令
                                                 if (!mm->uprobes_state.xol_area)
-		                                            __create_xol_area(0);
+                                                    __create_xol_area(0);
                                                 
                                                 // area->pages[0]映射到trampoline_vaddr
                                                 trampoline_vaddr = get_trampoline_vaddr();
-	                                            // 替换r30中的ret地址为trampoline_vaddr
-	                                            orig_ret_vaddr = arch_uretprobe_hijack_return_addr(trampoline_vaddr, regs);
+                                                // 替换r30中的ret地址为trampoline_vaddr
+                                                orig_ret_vaddr = arch_uretprobe_hijack_return_addr(trampoline_vaddr, regs);
                                                 // 备份原始返回地址
                                                 current->utask->return_instances->orig_ret_vaddr = orig_ret_vaddr;
                                             }
@@ -283,18 +283,18 @@ static int single_step_handler(unsigned long unused, unsigned int esr, struct pt
 }
 
 static struct step_hook uprobes_step_hook = {
-	.fn = uprobe_single_step_handler,
+    .fn = uprobe_single_step_handler,
 };
 
 static int uprobe_single_step_handler(struct pt_regs *regs, unsigned int esr)
 {
-	struct uprobe_task *utask = current->utask;
+    struct uprobe_task *utask = current->utask;
 
-	uprobe_post_sstep_notifier(regs);
+    uprobe_post_sstep_notifier(regs);
     {
         utask->state = UTASK_SSTEP_ACK;
         // 再次设置TIF_UPROBE
-	    set_thread_flag(TIF_UPROBE);
+        set_thread_flag(TIF_UPROBE);
     }
 }
 

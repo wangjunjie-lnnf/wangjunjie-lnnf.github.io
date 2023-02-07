@@ -568,8 +568,8 @@ public interface ClassFileTransformer {
 
 | 方式 | 区别 |
 | - | - |
-| ClassLoader.defineClass	| 初始字节码来源于class文件 |
-| Instrumentation.redefineClasses	| 初始字节码由调用方直接提供 |
+| ClassLoader.defineClass | 初始字节码来源于class文件 |
+| Instrumentation.redefineClasses | 初始字节码由调用方直接提供 |
 | Instrumentation.retransformClasses | 初始字节码从内存获取 |
 
 

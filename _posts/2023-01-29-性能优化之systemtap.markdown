@@ -159,10 +159,10 @@ function print_probe_point() %{
   
   // 根据uregs和jvm栈结构遍历栈帧
   struct pt_regs *regs;
-	if (CONTEXT->sregs)
-	  regs = CONTEXT->sregs;
-	else
-	  regs = (CONTEXT->user_mode_p ? CONTEXT->uregs : CONTEXT->kregs);
+    if (CONTEXT->sregs)
+      regs = CONTEXT->sregs;
+    else
+      regs = (CONTEXT->user_mode_p ? CONTEXT->uregs : CONTEXT->kregs);
 
   memcpy(value, ((char *)regs), 264);
   _stp_printf("x0 = 0x%llx\n", value[0]);
@@ -328,20 +328,20 @@ function echo_bytemanrule()
     echo "HELPER org.systemtap.byteman.helper.HelperSDT"
     case "$arg_probetype" in
         entry)
-	    echo "AT ENTRY"
-	    ;;
+        echo "AT ENTRY"
+        ;;
         exi*)
-	    echo "AT RETURN"
-	    ;;
+        echo "AT RETURN"
+        ;;
         *)
-	    echo "AT LINE $arg_probetype"
-	    ;;
+        echo "AT LINE $arg_probetype"
+        ;;
     esac
     echo "IF TRUE"
     if [ "$arg_backtrace" == "1" ]; then
-	echo 'DO STAP_BACKTRACE("'$arg_rulename'");'
+    echo 'DO STAP_BACKTRACE("'$arg_rulename'");'
     else
-	echo -n 'DO '
+    echo -n 'DO '
     fi
     case "$arg_argcount" in
         # For PR21010, we invoke another java<->stap ABI
@@ -355,14 +355,14 @@ function echo_bytemanrule()
         7) echo -n 'METHOD_STAP'$stap'_PROBE7("'$arg_rulename'", $1, $2, $3, $4, $5, $6, $7)' ;;
         8) echo -n 'METHOD_STAP'$stap'_PROBE8("'$arg_rulename'", $1, $2, $3, $4, $5, $6, $7, $8)' ;;
         9) echo -n 'METHOD_STAP'$stap'_PROBE9("'$arg_rulename'", $1, $2, $3, $4, $5, $6, $7, $8, $9)' ;;
-	10) echo -n 'METHOD_STAP'$stap'_PROBE10("'$arg_rulename'", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)' ;;
+    10) echo -n 'METHOD_STAP'$stap'_PROBE10("'$arg_rulename'", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)' ;;
         *) echo 'bad arg-count'; exit 1 ;;
     esac
     if [ "$arg_backtrace" == "1" ]; then
-	echo ';'
-	echo 'METHOD_BT_DELETE("'$arg_rulename'")'
+    echo ';'
+    echo 'METHOD_BT_DELETE("'$arg_rulename'")'
     else
-	echo ''
+    echo ''
     fi
     echo "ENDRULE"
 }
@@ -446,22 +446,22 @@ static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, siz
     // 获取命令类型
     u32 type;
     if (get_user(type, (u32 __user *)buf))
-		return -EFAULT;
+        return -EFAULT;
     ...
 
     switch (type)
-	{
-	case STP_START:
-	{
+    {
+    case STP_START:
+    {
         // start命令由stapio程序发起，参数包含pid
-		static struct _stp_msg_start st;
-		if (copy_from_user(&st, buf, sizeof(st)))
-		{
-			rc = -EFAULT;
-			goto out;
-		}
-		
-		_stp_handle_start(&st);
+        static struct _stp_msg_start st;
+        if (copy_from_user(&st, buf, sizeof(st)))
+        {
+            rc = -EFAULT;
+            goto out;
+        }
+        
+        _stp_handle_start(&st);
         {
             ...
             // systemtap_module_init定义在生成的c文件里
@@ -492,7 +492,7 @@ static ssize_t _stp_ctl_write_cmd(struct file *file, const char __user *buf, siz
             }
             ...
         }
-	}
+    }
     ...
     }
     ...
