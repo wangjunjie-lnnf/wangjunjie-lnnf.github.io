@@ -501,6 +501,43 @@ At a minimum, there are two doublewrite files. The maximum number of doublewrite
 
 Doublewrite file names have the following format: `#ib_page_size_file_number.dblwr`.
 
+```c++
+
+// double write buffer初始化
+void recv_sys_init() {
+    recv_sys->dblwr = ut::new_withkey<dblwr::recv::DBLWR>(...);
+}
+
+// 系统表空间初始化时读取double write buffer
+dberr_t SysTablespace::open_or_create(...) {
+    read_lsn_and_check_flags(flush_lsn);
+    {
+        recv_sys->dblwr->load();
+        {
+            dblwr_file_open(dblwr::dir, i, file, OS_DATA_FILE);
+            Double_write::load(file, pages);
+        }
+    }
+}
+
+// 恢复过程中遇到损坏的数据从double write buffer恢复
+dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
+    if (checkpoint_lsn != flush_lsn) {
+        recv_init_crash_recovery();
+        {
+            recv_sys->dblwr->recover();
+            {
+                auto ptr = page->m_buffer.begin();
+                auto page_no = page_get_page_no(ptr);
+                auto space_id = page_get_space_id(ptr);
+                dblwr_recover_page(page->m_no, space, page_no, page->m_buffer.begin());
+            }
+        }
+    }
+}
+
+```
+
 ### Redo Log
 
 Redo log files reside in the `#innodb_redo directory` in the data directory unless a different directory was specified by the `innodb_log_group_home_dir` variable. If innodb_log_group_home_dir was defined, the redo log files reside in the #innodb_redo directory in that directory. There are two types of redo log files, `ordinary` and `spare`. Ordinary redo log files are those being used. Spare redo log files are those waiting to be used. InnoDB tries to maintain 32 redo log files in total, with each file equal in size to `1/32` * `innodb_redo_log_capacity`.
