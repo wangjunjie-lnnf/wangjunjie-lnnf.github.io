@@ -1,0 +1,384 @@
+---
+layout: post
+title:  "kernel之ext4文件系统"
+date:   2023-03-09 14:22:07 +0000
+categories: jekyll
+tags: kernel fs ext4
+---
+
+# page_cache
+
+## buffer_head
+
+`buffer_head`表示`page_cache`中一个`block`的信息，同一个`page`的多个`buffer_head`构成环形链表
+
+```c
+enum bh_state_bits {
+	BH_Uptodate,	    /* Contains valid data */
+	BH_Dirty,	        /* Is dirty */
+	BH_Lock,	        /* Is locked */
+	BH_Req,		        /* Has been submitted for I/O */
+
+	BH_Mapped,	        /* Has a disk mapping */
+	BH_New,		        /* Disk mapping was newly created by get_block */
+	BH_Async_Read,	    /* Is under end_buffer_async_read I/O */
+	BH_Async_Write,	    /* Is under end_buffer_async_write I/O */
+	BH_Delay,	        /* Buffer is not yet allocated on disk */
+	BH_Boundary,	    /* Block is followed by a discontiguity */
+	BH_Write_EIO,	    /* I/O error on write */
+	BH_Unwritten,	    /* Buffer is allocated on disk but not written */
+	BH_Quiet,	        /* Buffer Error Prinks to be quiet */
+	BH_Meta,	        /* Buffer contains metadata */
+	BH_Prio,	        /* Buffer should be submitted with REQ_PRIO */
+	BH_Defer_Completion, /* Defer AIO completion to workqueue */
+
+	BH_PrivateStart,    /* not a state bit, but the first bit available
+			 		     * for private allocation by other entities */
+};
+
+struct buffer_head {
+	unsigned long b_state;		        /* buffer state bitmap (see above) */
+	struct buffer_head *b_this_page;    /* circular list of page's buffers */
+	struct page *b_page;		        /* the page this bh is mapped to */
+
+	sector_t b_blocknr;		            /* start block number */
+	size_t b_size;			            /* size of mapping */
+	char *b_data;			            /* pointer to data within the page */
+
+	struct block_device *b_bdev;
+	bh_end_io_t *b_end_io;		        /* I/O completion */
+ 	void *b_private;		            /* reserved for b_end_io */
+	struct list_head b_assoc_buffers;   /* associated with another mapping */
+	struct address_space *b_assoc_map;	/* mapping this buffer is associated with */
+	atomic_t b_count;		            /* users using this buffer_head */
+	spinlock_t b_uptodate_lock;	        /* Used by the first bh in a page, to
+					 			         * serialise IO completion of other buffers in the page */
+};
+
+// 查找或创建buffer_head
+struct buffer_head *
+__getblk_gfp(struct block_device *bdev, sector_t block, unsigned size, gfp_t gfp)
+{
+    // 查找block是否已缓存在page_cache
+	struct buffer_head *bh = __find_get_block(bdev, block, size);
+    {
+        // 查找当前cpu的lru队列
+	    struct buffer_head *bh = lookup_bh_lru(bdev, block, size);
+        {
+            if (bh == NULL) {
+                bh = __find_get_block_slow(bdev, block);
+                {
+                    // inode来自bdev文件系统
+                    struct inode *bd_inode = bdev->bd_inode;
+	                struct address_space *bd_mapping = bd_inode->i_mapping;
+                    // block转page：块设备的逻辑视图是一个块数组
+                    pgoff_t index = block >> (PAGE_SHIFT - bd_inode->i_blkbits);
+                    // 查找稀疏数组xarray
+                    struct page *page = find_get_page_flags(bd_mapping, index, FGP_ACCESSED);
+                    // 一个page可以缓存多个block，head表示此page的第一个block
+                    struct buffer_head *head = page_buffers(page);
+
+                    struct buffer_head *bh = head;
+                    do {
+                        if (bh->b_blocknr == block) {
+                            return bh;
+                        }
+                        // 同一个page的多个buffer_head构成循环链表
+                        bh = bh->b_this_page;
+                    } while (bh != head);
+                }
+                if (bh)
+                    bh_lru_install(bh);     // 插入lru
+            }
+        }
+    }
+
+    if (bh == NULL)
+        // 创建buffer_head
+		bh = __getblk_slow(bdev, block, size, gfp);
+        {
+            grow_buffers(bdev, block, size, gfp);
+            {
+                // 计算block对应的page
+                int sizebits = PAGE_SHIFT - __ffs(size);
+	            pgoff_t index = block >> sizebits;
+                return grow_dev_page(bdev, block, index, size, sizebits, gfp);
+                {
+                    struct page *page = find_or_create_page(inode->i_mapping, index, gfp_mask);
+                    {
+                        return pagecache_get_page(mapping, index, ...);
+                        {
+                            struct page *page = mapping_get_entry(mapping, index);
+                            {
+                                // 查找xarray
+                                XA_STATE(xas, &mapping->i_pages, index);
+                                xas_reset(&xas);
+	                            struct page *page = xas_load(&xas);
+                                if (! page && (fgp_flags & FGP_CREAT)) {
+                                    // 从buddy系统分配page
+                                    page = __page_cache_alloc(gfp_mask);
+                                    // 插入xarray
+                                    add_to_page_cache_lru(page, mapping, index, gfp_mask);
+                                }
+                                return page;
+                            }
+                        }
+                    }
+
+                    struct buffer_head *bh = alloc_page_buffers(page, size, true);
+                    {
+                        struct buffer_head *bh, *head;
+                        long offset = PAGE_SIZE;
+
+                        // 倒着创建buffer_head，此时还只是单链表结构
+                        while ((offset -= size) >= 0) {
+                            // 从slab创建buffer_head
+                            bh = alloc_buffer_head(gfp);
+                            bh->b_this_page = head;
+                            bh->b_blocknr = -1;
+                            head = bh;
+
+                            bh->b_size = size;
+
+                            bh->b_page = page;
+                            bh->b_data = page_address(page) + offset;
+                        }
+                        return head;
+                    }
+                    // 单链表的buffer_head首尾相连转环形
+                    link_dev_buffers(page, bh);
+                    // 设置每个buffer_head的块号b_blocknr
+                    init_page_buffers(page, bdev, (sector_t)index << sizebits, size);
+                }
+            }
+        }
+    
+	return bh;
+}
+```
+
+# Doc
+
+`https://www.kernel.org/doc/html/v5.15/filesystems/ext4/index.html`
+
+## High Level Design
+
+An `ext4` file system is split into a series of `block groups`. To reduce performance difficulties due to fragmentation, the block allocator tries very hard to keep each file’s blocks within the same group, thereby reducing seek times. The size of a block group is specified in `sb.s_blocks_per_group` blocks, though it can also calculated as `8 * block_size_in_bytes`. With the default block size of 4KiB, each group will contain 32,768 blocks, for a length of 128MiB.
+
+All fields in ext4 are written to disk in `little-endian` order. HOWEVER, all fields in jbd2 (the journal) are written to disk in `big-endian` order.
+
+### Blocks
+
+`ext4` allocates storage space in units of `blocks`. A block is a group of `sectors` between `1KiB` and `64KiB`, and the number of sectors must be an integral power of 2. Blocks are in turn grouped into larger units called `block groups`. Block size is specified at `mkfs` time and typically is `4KiB`. You may experience mounting problems if block size is greater than page size (i.e. 64KiB blocks on a i386 which only has 4KiB memory pages). By default a filesystem can contain `2^32` blocks; if the `64bit` feature is enabled, then a filesystem can have `2^64` blocks. `The location of structures is stored in terms of the block number the structure lives in and not the absolute offset on disk`.
+
+For 32-bit filesystems, limits are as follows:
+
+[32-bit](/assets/images/2023-03-09/32-bit.png)
+
+For 64-bit filesystems, limits are as follows:
+
+[64-bit](/assets/images/2023-03-09/64-bit.png)
+
+### Layout
+
+The layout of a standard block group is approximately as follows
+
+[layout](/assets/images/2023-03-09/layout.png)
+
+For the special case of block group 0, the first 1024 bytes are unused, to allow for the installation of x86 boot sectors and other oddities. The superblock will start at offset 1024 bytes, whichever block that happens to be (usually 0). However, if for some reason the block size = 1024, then block 0 is marked in use and the superblock goes in block 1. For all other block groups, there is no padding.
+
+The ext4 driver primarily works with the superblock and the group descriptors that are found in block group 0. Redundant copies of the superblock and group descriptors are written to some of the block groups across the disk in case the beginning of the disk gets trashed, though not all block groups necessarily host a redundant copy. If the group does not have a redundant copy, the block group begins with the data block bitmap. Note also that when the filesystem is freshly formatted, mkfs will allocate “reserve GDT block” space after the block group descriptors and before the start of the block bitmaps to allow for future expansion of the filesystem. By default, a filesystem is allowed to increase in size by a factor of 1024x over the original filesystem size.
+
+The location of the inode table is given by `grp.bg_inode_table_*`. It is continuous range of blocks large enough to contain `sb.s_inodes_per_group` * `sb.s_inode_size bytes`.
+
+As for the ordering of items in a block group, it is generally established that the super block and the group descriptor table, if present, will be at the beginning of the block group. The bitmaps and the inode table can be anywhere, and it is quite possible for the bitmaps to come after the inode table, or for both to be in different groups (flex_bg). Leftover space is used for file data blocks, indirect block maps, extent tree blocks, and extended attributes.
+
+# Code
+
+## 注册文件系统
+
+```c
+static struct file_system_type ext3_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "ext3",
+	.mount		= ext4_mount,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
+
+static struct file_system_type ext4_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "ext4",
+	.mount		= ext4_mount,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
+};
+
+static int __init ext4_init_fs(void)
+{
+    register_as_ext3();
+	register_filesystem(&ext4_fs_type);
+}
+
+module_init(ext4_init_fs)
+```
+
+## mount
+
+`ext4`没有提供`init_fs_context`函数，默认使用`legacy_init_fs_context`
+
+```c
+const struct fs_context_operations legacy_fs_context_ops = {
+	.parse_param		= legacy_parse_param,
+	.get_tree		= legacy_get_tree,
+	.reconfigure		= legacy_reconfigure,
+};
+
+static int legacy_init_fs_context(struct fs_context *fc)
+{
+	fc->fs_private = kzalloc(sizeof(struct legacy_fs_context), GFP_KERNEL_ACCOUNT);
+	fc->ops = &legacy_fs_context_ops;
+	return 0;
+}
+
+static int legacy_get_tree(struct fs_context *fc)
+{
+	struct legacy_fs_context *ctx = fc->fs_private;
+	struct dentry *root = fc->fs_type->mount(fc->fs_type, fc->sb_flags, fc->source, ctx->legacy_data);
+	
+	fc->root = root;
+	return 0;
+}
+
+struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
+		       const char *dev_name, void *data)
+{
+	return mount_bdev(fs_type, flags, dev_name, data, ext4_fill_super);
+    {
+        // 根据name查找dev
+        struct block_device *bdev = blkdev_get_by_path(dev_name, mode, fs_type);
+
+        // 创建super_block, 设置s->s_bdev=bdev
+	    s = sget(fs_type, test_bdev_super, set_bdev_super, flags | SB_NOSEC, bdev);
+        sb_set_blocksize(s, block_size(bdev));
+        fill_super(s, data, flags & SB_SILENT ? 1 : 0);
+        {
+            struct ext4_sb_info *sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
+            // super_block所在block(按1k计算)，默认1，参数sb=x,可以指定
+	        ext4_fsblk_t sb_block = get_sb_block(&data);
+            sb->s_fs_info = sbi;
+	        sbi->s_sb = sb;
+            sbi->s_sb_block = sb_block;
+
+            // 读取super_block所在的block到page_cache
+            struct buffer_head *bh = ext4_sb_bread_unmovable(sb, logical_sb_block);
+            struct ext4_super_block *es = (struct ext4_super_block *) (bh->b_data + offset);
+            sbi->s_es = es;
+            
+            // ext4格式化时选择的blocksize
+	        blocksize = EXT4_MIN_BLOCK_SIZE << le32_to_cpu(es->s_log_block_size);
+
+            /* size of inode structure */
+            sbi->s_inode_size = le16_to_cpu(es->s_inode_size);
+		    sbi->s_first_ino = le32_to_cpu(es->s_first_ino);
+
+            if (sb->s_blocksize != blocksize) {
+                sb_set_blocksize(sb, blocksize);
+            }
+
+            has_huge_files = ext4_has_feature_huge_file(sb);
+            /* max bytes for bitmap files */
+            sbi->s_bitmap_maxbytes = ext4_max_bitmap_size(sb->s_blocksize_bits, has_huge_files);
+            /* Max file size */
+            sb->s_maxbytes = ext4_max_size(sb->s_blocksize_bits, has_huge_files);
+            /* Size of a group descriptor in bytes */
+            sbi->s_desc_size = le16_to_cpu(es->s_desc_size);
+
+            sbi->s_blocks_per_group = le32_to_cpu(es->s_blocks_per_group);
+	        sbi->s_inodes_per_group = le32_to_cpu(es->s_inodes_per_group);
+            sbi->s_inodes_per_block = blocksize / EXT4_INODE_SIZE(sb);
+            /* Number of inode table blocks per group */
+            sbi->s_itb_per_group = sbi->s_inodes_per_group / sbi->s_inodes_per_block;
+            sbi->s_desc_per_block = blocksize / EXT4_DESC_SIZE(sb);
+            /* Buffer containing the super block */
+            sbi->s_sbh = bh;
+            sbi->s_mount_state = le16_to_cpu(es->s_state);
+            sbi->s_addr_per_block_bits = ilog2(EXT4_ADDR_PER_BLOCK(sb));
+            sbi->s_desc_per_block_bits = ilog2(EXT4_DESC_PER_BLOCK(sb));
+
+            clustersize = BLOCK_SIZE << le32_to_cpu(es->s_log_cluster_size);
+            if (ext4_has_feature_bigalloc(sb)) {
+                sbi->s_cluster_bits = le32_to_cpu(es->s_log_cluster_size) - le32_to_cpu(es->s_log_block_size);
+                sbi->s_clusters_per_group = le32_to_cpu(es->s_clusters_per_group);
+            } else {
+                sbi->s_clusters_per_group = sbi->s_blocks_per_group;
+		        sbi->s_cluster_bits = 0;
+            }
+            sbi->s_cluster_ratio = clustersize / blocksize;
+
+            blocks_count = sb->s_bdev->bd_inode->i_size >> sb->s_blocksize_bits;
+            sbi->s_groups_count = blocks_count / EXT4_BLOCKS_PER_GROUP(sb);
+            // 所有group_desc占据的block数量
+            db_count = sbi->s_groups_count / EXT4_DESC_PER_BLOCK(sb);
+            sbi->s_group_desc = kvmalloc_array(db_count, sizeof(struct buffer_head *), GFP_KERNEL);
+            /* Pre-read the descriptors into the buffer cache */
+            for (i = 0; i < db_count; i++) {
+                block = descriptor_loc(sb, logical_sb_block, i);
+                sbi->s_group_desc[i] = ext4_sb_breadahead_unmovable(sb, block);
+            }
+            sbi->s_gdb_count = db_count;
+
+            sbi->s_stripe = ext4_get_stripe_size(sbi);
+
+            sb->s_op = &ext4_sops;
+
+            sb->s_root = NULL;
+
+            // 先加载journal
+            ext4_load_journal(sb, es, parsed_opts.journal_devnum);
+
+            // 加载root所在inode
+            root = ext4_iget(sb, EXT4_ROOT_INO, EXT4_IGET_SPECIAL);
+            {
+                __ext4_iget((sb), (ino), (flags), __func__, __LINE__);
+                {
+                    struct inode *inode = iget_locked(sb, ino);
+                    struct ext4_inode_info *ei = EXT4_I(inode);
+
+                    struct ext4_iloc iloc;
+                    __ext4_get_inode_loc_noinmem(inode, &iloc);
+                    struct ext4_inode *raw_inode = ext4_raw_inode(&iloc);
+
+                    inode->i_uid = (uid_t)le16_to_cpu(raw_inode->i_uid_low);
+	                inode->i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
+
+                    inode->i_size = ext4_isize(sb, raw_inode);
+
+                    // 设置inode->i_op和inode->i_fop
+                    if (S_ISREG(inode->i_mode)) {
+                        inode->i_op = &ext4_file_inode_operations;
+                        inode->i_fop = &ext4_file_operations;
+                        ext4_set_aops(inode);
+                    } else if (S_ISDIR(inode->i_mode)) {
+                        inode->i_op = &ext4_dir_inode_operations;
+                        inode->i_fop = &ext4_dir_operations;
+                    } else if (S_ISLNK(inode->i_mode)) {
+                        if (ext4_inode_is_fast_symlink(inode)) {
+                            inode->i_link = (char *)ei->i_data;
+                            inode->i_op = &ext4_fast_symlink_inode_operations;
+                        } else {
+                            inode->i_op = &ext4_symlink_inode_operations;
+                            ext4_set_aops(inode);
+                        }
+                    } else if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode) ||
+                               S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {
+                        inode->i_op = &ext4_special_inode_operations;
+                    }
+                }
+            }
+            sb->s_root = d_make_root(root);
+        }
+    }
+}
+
+```
