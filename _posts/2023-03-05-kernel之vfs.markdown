@@ -101,29 +101,29 @@ int do_new_mount(struct path *path, const char *fstype, int sb_flags,
 
 ```c
 struct inode {
-	umode_t			i_mode;
-	unsigned short	i_opflags;
-	kuid_t			i_uid;
-	kgid_t			i_gid;
-	unsigned int	i_flags;
+    umode_t            i_mode;
+    unsigned short    i_opflags;
+    kuid_t            i_uid;
+    kgid_t            i_gid;
+    unsigned int    i_flags;
 
     // 从root继承
-    const struct inode_operations	*i_op;
-	struct super_block	*i_sb;
-	struct address_space	*i_mapping;
+    const struct inode_operations    *i_op;
+    struct super_block    *i_sb;
+    struct address_space    *i_mapping;
 
-    dev_t			i_rdev;
-	loff_t			i_size;
+    dev_t            i_rdev;
+    loff_t            i_size;
 
-	struct timespec64	i_atime;
-	struct timespec64	i_mtime;
-	struct timespec64	i_ctime;
+    struct timespec64    i_atime;
+    struct timespec64    i_mtime;
+    struct timespec64    i_ctime;
 
     union {
         // 从root继承
-		const struct file_operations	*i_fop;
-		void (*free_inode)(struct inode *);
-	};
+        const struct file_operations    *i_fop;
+        void (*free_inode)(struct inode *);
+    };
 }
 ```
 
@@ -131,13 +131,13 @@ struct inode {
 
 ```c
 struct dentry *lookup_open(struct nameidata *nd, struct file *file,
-				  const struct open_flags *op, bool got_write) {
+                  const struct open_flags *op, bool got_write) {
     if (!dentry->d_inode && (open_flag & O_CREAT)) {
-		file->f_mode |= FMODE_CREATED;
-		
+        file->f_mode |= FMODE_CREATED;
+        
         // 创建文件
-		dir_inode->i_op->create(mnt_userns, dir_inode, dentry, mode, open_flag & O_EXCL);
-	}
+        dir_inode->i_op->create(mnt_userns, dir_inode, dentry, mode, open_flag & O_EXCL);
+    }
 }
 ```
 
@@ -148,10 +148,10 @@ struct dentry *lookup_open(struct nameidata *nd, struct file *file,
 ```c
 struct dentry {
     struct dentry *d_parent;
-	struct qstr d_name;
-	struct inode *d_inode;
+    struct qstr d_name;
+    struct inode *d_inode;
     const struct dentry_operations *d_op;
-	struct super_block *d_sb;
+    struct super_block *d_sb;
 }
 ```
 
@@ -159,8 +159,8 @@ struct dentry {
 
 ```c
 struct dentry *d_alloc_parallel(struct dentry *parent,
-				const struct qstr *name,
-				wait_queue_head_t *wq)
+                const struct qstr *name,
+                wait_queue_head_t *wq)
 {
     struct dentry *new = d_alloc(parent, name);
     {
@@ -174,7 +174,7 @@ struct dentry *d_alloc_parallel(struct dentry *parent,
             d_set_d_op(dentry, dentry->d_sb->s_d_op);
         }
         dentry->d_parent = parent;
-	    list_add(&dentry->d_child, &parent->d_subdirs);
+        list_add(&dentry->d_child, &parent->d_subdirs);
     }
 }
 ```
@@ -189,39 +189,39 @@ static struct hlist_head *mount_hashtable;
 static struct hlist_head *mountpoint_hashtable;
 
 struct vfsmount {
-	struct dentry *mnt_root;
-	struct super_block *mnt_sb;
-	int mnt_flags;
-	struct user_namespace *mnt_userns;
+    struct dentry *mnt_root;
+    struct super_block *mnt_sb;
+    int mnt_flags;
+    struct user_namespace *mnt_userns;
 }
 
 static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
 {
     // 根据(mnt/dentry)计算hash
-	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
-	tmp += ((unsigned long)dentry / L1_CACHE_BYTES);
-	tmp = tmp + (tmp >> m_hash_shift);
-	return &mount_hashtable[tmp & m_hash_mask];
+    unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
+    tmp += ((unsigned long)dentry / L1_CACHE_BYTES);
+    tmp = tmp + (tmp >> m_hash_shift);
+    return &mount_hashtable[tmp & m_hash_mask];
 }
 
 // 查找
 struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
 {
-	struct hlist_head *head = m_hash(mnt, dentry);
-	struct mount *p;
+    struct hlist_head *head = m_hash(mnt, dentry);
+    struct mount *p;
 
-	hlist_for_each_entry_rcu(p, head, mnt_hash)
-		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
-			return p;
-	return NULL;
+    hlist_for_each_entry_rcu(p, head, mnt_hash)
+        if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+            return p;
+    return NULL;
 }
 
 // 注册
 static void __attach_mnt(struct mount *mnt, struct mount *parent)
 {
-	hlist_add_head_rcu(&mnt->mnt_hash,
-			   m_hash(&parent->mnt, mnt->mnt_mountpoint));
-	list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
+    hlist_add_head_rcu(&mnt->mnt_hash,
+               m_hash(&parent->mnt, mnt->mnt_mountpoint));
+    list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
 }
 
 ```
@@ -231,20 +231,20 @@ static void __attach_mnt(struct mount *mnt, struct mount *parent)
 ```c
 struct vfsmount *vfs_create_mount(struct fs_context *fc)
 {
-	struct mount *mnt;
+    struct mount *mnt;
 
-	mnt = alloc_vfsmnt(fc->source ?: "none");
+    mnt = alloc_vfsmnt(fc->source ?: "none");
 
-	atomic_inc(&fc->root->d_sb->s_active);
-	mnt->mnt.mnt_sb		= fc->root->d_sb;
-	mnt->mnt.mnt_root	= dget(fc->root);
-	mnt->mnt_mountpoint	= mnt->mnt.mnt_root;
-	mnt->mnt_parent		= mnt;
+    atomic_inc(&fc->root->d_sb->s_active);
+    mnt->mnt.mnt_sb        = fc->root->d_sb;
+    mnt->mnt.mnt_root    = dget(fc->root);
+    mnt->mnt_mountpoint    = mnt->mnt.mnt_root;
+    mnt->mnt_parent        = mnt;
 
-	lock_mount_hash();
-	list_add_tail(&mnt->mnt_instance, &mnt->mnt.mnt_sb->s_mounts);
-	unlock_mount_hash();
-	return &mnt->mnt;
+    lock_mount_hash();
+    list_add_tail(&mnt->mnt_instance, &mnt->mnt.mnt_sb->s_mounts);
+    unlock_mount_hash();
+    return &mnt->mnt;
 }
 ```
 
@@ -254,10 +254,10 @@ struct vfsmount *vfs_create_mount(struct fs_context *fc)
 
 ```c
 struct file {
-    struct path		f_path;
-	struct inode		*f_inode;
-	const struct file_operations	*f_op;
-    struct address_space	*f_mapping;
+    struct path        f_path;
+    struct inode        *f_inode;
+    const struct file_operations    *f_op;
+    struct address_space    *f_mapping;
 }
 ```
 
@@ -265,7 +265,7 @@ struct file {
 
 ```c
 struct file *path_openat(struct nameidata *nd,
-			const struct open_flags *op, unsigned flags)
+            const struct open_flags *op, unsigned flags)
 {
     struct file *file = alloc_empty_file(op->open_flag, current_cred());
     do_open(nd, file, op);
@@ -273,10 +273,10 @@ struct file *path_openat(struct nameidata *nd,
         vfs_open(&nd->path, file);
         {
             file->f_path = *path;
-	        return do_dentry_open(file, d_backing_inode(path->dentry), NULL);
+            return do_dentry_open(file, d_backing_inode(path->dentry), NULL);
             {
                 f->f_inode = inode;
-	            f->f_mapping = inode->i_mapping;
+                f->f_mapping = inode->i_mapping;
                 f->f_op = fops_get(inode->i_fop);
                 f->f_op->open(inode, f);
             }
@@ -291,12 +291,12 @@ struct file *path_openat(struct nameidata *nd,
 
 ```c
 long do_mount(const char *dev_name, const char __user *dir_name,
-		const char *type_page, unsigned long flags, void *data_page)
+        const char *type_page, unsigned long flags, void *data_page)
 {
-	struct path path;
+    struct path path;
     // 查找挂载路径
-	user_path_at(AT_FDCWD, dir_name, LOOKUP_FOLLOW, &path);
-	path_mount(dev_name, &path, type_page, flags, data_page);
+    user_path_at(AT_FDCWD, dir_name, LOOKUP_FOLLOW, &path);
+    path_mount(dev_name, &path, type_page, flags, data_page);
     {
         do_new_mount(path, type_page, sb_flags, mnt_flags, dev_name, data_page);
         {
@@ -305,9 +305,9 @@ long do_mount(const char *dev_name, const char __user *dir_name,
             struct fs_context *fc = fs_context_for_mount(type, sb_flags);
             {
                 fc = kzalloc(sizeof(struct fs_context), GFP_KERNEL_ACCOUNT);
-                fc->sb_flags	= sb_flags;
+                fc->sb_flags    = sb_flags;
                 fc->sb_flags_mask = sb_flags_mask;
-                fc->fs_type	= get_filesystem(fs_type);
+                fc->fs_type    = get_filesystem(fs_type);
 
                 // 初始化fc
                 init_fs_context = fc->fs_type->init_fs_context;
@@ -329,10 +329,10 @@ long do_mount(const char *dev_name, const char __user *dir_name,
                 struct vfsmount *mnt = vfs_create_mount(fc);
                 {
                     mnt = alloc_vfsmnt(fc->source ?: "none");
-                    mnt->mnt.mnt_sb		= fc->root->d_sb;
-                    mnt->mnt.mnt_root	= dget(fc->root);
-                    mnt->mnt_mountpoint	= mnt->mnt.mnt_root;
-                    mnt->mnt_parent		= mnt;
+                    mnt->mnt.mnt_sb        = fc->root->d_sb;
+                    mnt->mnt.mnt_root    = dget(fc->root);
+                    mnt->mnt_mountpoint    = mnt->mnt.mnt_root;
+                    mnt->mnt_parent        = mnt;
                 }
 
                 struct mountpoint *mp = lock_mount(mountpoint);
@@ -357,7 +357,7 @@ long do_mount(const char *dev_name, const char __user *dir_name,
                         attach_recursive_mnt(mnt, p, mp, false);
                         {
                             mnt_set_mountpoint(dest_mnt, dest_mp, source_mnt);
-		                    commit_tree(source_mnt);
+                            commit_tree(source_mnt);
                             {
                                 // vfsmount添加到注册表
                                 __attach_mnt(mnt, parent);
@@ -376,8 +376,8 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 ```c
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
-	struct open_how how = build_open_how(flags, mode);
-	return do_sys_openat2(dfd, filename, &how);
+    struct open_how how = build_open_how(flags, mode);
+    return do_sys_openat2(dfd, filename, &how);
     {
         // 查找空闲fd
         int fd = get_unused_fd_flags(how->flags);
@@ -409,18 +409,18 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
                             nd->inode = nd->path.dentry->d_inode;
                         }
                         return s;
-	                }
+                    }
 
                     // 相对于工作目录
                     if (nd->dfd == AT_FDCWD) {
                         get_fs_pwd(current->fs, &nd->path);
-			            nd->inode = nd->path.dentry->d_inode;
+                        nd->inode = nd->path.dentry->d_inode;
                     } else {
                         // 相对于任意目录
                         struct fd f = fdget_raw(nd->dfd);
-		                struct dentry *dentry = f.file->f_path.dentry;
+                        struct dentry *dentry = f.file->f_path.dentry;
                         nd->path = f.file->f_path;
-			            nd->inode = nd->path.dentry->d_inode;
+                        nd->inode = nd->path.dentry->d_inode;
                     }
                 }
 
@@ -453,7 +453,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
                                 struct dentry *dentry = lookup_fast(nd, &inode, &seq);
                                 if (unlikely(!dentry)) {
                                     // 创建并初始化dentry
-		                            dentry = lookup_slow(&nd->last, nd->path.dentry, nd->flags);
+                                    dentry = lookup_slow(&nd->last, nd->path.dentry, nd->flags);
                                     {
                                         dentry = d_alloc_parallel(dir, name, &wq);
                                         struct inode *inode = dir->d_inode;
@@ -468,14 +468,14 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
                                     handle_mounts(nd, dentry, &path, &inode, &seq);
                                     {
                                         path->mnt = nd->path.mnt;
-	                                    path->dentry = dentry;
+                                        path->dentry = dentry;
                                         traverse_mounts(path, &jumped, &nd->total_link_count, nd->flags);
                                         {
                                             // 从注册表查找挂载点记录
                                             struct vfsmount *mounted = lookup_mnt(path);
                                             // 路径切换到挂载点文件系统的root
                                             path->mnt = mounted;
-				                            path->dentry = dget(mounted->mnt_root);
+                                            path->dentry = dget(mounted->mnt_root);
                                         }
                                         *inode = d_backing_inode(path->dentry);
                                     }
@@ -508,7 +508,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
                             nd->stack[depth++].name = name;
                             name = link;
                             continue;
-		                }
+                        }
                     }
                 }
                 
@@ -524,7 +524,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
                         }
                         // 查找
                         if (d_in_lookup(dentry)) {
-		                    dentry = dir_inode->i_op->lookup(dir_inode, dentry, nd->flags);
+                            dentry = dir_inode->i_op->lookup(dir_inode, dentry, nd->flags);
                         }
                         // 不存在则创建
                         if (!dentry->d_inode && (open_flag & O_CREAT)) {
@@ -543,7 +543,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
                         return do_dentry_open(file, d_backing_inode(path->dentry), NULL);
                         {
                             file->f_inode = inode;
-	                        file->f_mapping = inode->i_mapping;
+                            file->f_mapping = inode->i_mapping;
                             file->f_op = fops_get(inode->i_fop);
                             file->f_op->open(inode, f);
                         }
@@ -558,7 +558,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
         fd_install(fd, f);
         {
             struct files_struct *files = current->files;
-	        struct fdtable *fdt = files_fdtable(files);
+            struct fdtable *fdt = files_fdtable(files);
             rcu_assign_pointer(fdt->fd[fd], file);
         }
     }
@@ -573,7 +573,7 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
     struct fd f = fdget_pos(fd);
     // 当前位置
     loff_t *ppos = file_ppos(f.file);
-	vfs_read(f.file, buf, count, ppos);
+    vfs_read(f.file, buf, count, ppos);
     {
         if (file->f_op->read)
             ret = file->f_op->read(file, buf, count, pos);
@@ -609,16 +609,16 @@ ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 ```c
 
 static struct file_system_type ramfs_fs_type = {
-	.name		= "ramfs",
-	.init_fs_context = ramfs_init_fs_context,
-	.parameters	= ramfs_fs_parameters,
-	.kill_sb	= ramfs_kill_sb,
-	.fs_flags	= FS_USERNS_MOUNT,
+    .name        = "ramfs",
+    .init_fs_context = ramfs_init_fs_context,
+    .parameters    = ramfs_fs_parameters,
+    .kill_sb    = ramfs_kill_sb,
+    .fs_flags    = FS_USERNS_MOUNT,
 };
 
 static int __init init_ramfs_fs(void)
 {
-	return register_filesystem(&ramfs_fs_type);
+    return register_filesystem(&ramfs_fs_type);
 }
 fs_initcall(init_ramfs_fs);
 
@@ -629,31 +629,31 @@ fs_initcall(init_ramfs_fs);
 ```c
 
 static const struct fs_context_operations ramfs_context_ops = {
-	.free		= ramfs_free_fc,
-	.parse_param	= ramfs_parse_param,
-	.get_tree	= ramfs_get_tree,
+    .free        = ramfs_free_fc,
+    .parse_param    = ramfs_parse_param,
+    .get_tree    = ramfs_get_tree,
 };
 
 // 初始化fc
 int ramfs_init_fs_context(struct fs_context *fc)
 {
-	fc->ops = &ramfs_context_ops;
+    fc->ops = &ramfs_context_ops;
 }
 
 // 填充super_block
 static int ramfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
-	struct inode *inode;
+    struct inode *inode;
 
-	sb->s_maxbytes		= MAX_LFS_FILESIZE;
-	sb->s_blocksize		= PAGE_SIZE;
-	sb->s_blocksize_bits	= PAGE_SHIFT;
-	sb->s_magic		= RAMFS_MAGIC;
-	sb->s_op		= &ramfs_ops;
-	sb->s_time_gran		= 1;
+    sb->s_maxbytes        = MAX_LFS_FILESIZE;
+    sb->s_blocksize        = PAGE_SIZE;
+    sb->s_blocksize_bits    = PAGE_SHIFT;
+    sb->s_magic        = RAMFS_MAGIC;
+    sb->s_op        = &ramfs_ops;
+    sb->s_time_gran        = 1;
 
     // 生成root inode
-	inode = ramfs_get_inode(sb, NULL, S_IFDIR, 0);
+    inode = ramfs_get_inode(sb, NULL, S_IFDIR, 0);
     {
         struct inode * inode = new_inode(sb);
         {
@@ -665,38 +665,38 @@ static int ramfs_fill_super(struct super_block *sb, struct fs_context *fc)
         }
 
         inode->i_ino = get_next_ino();
-		inode->i_mapping->a_ops = &ram_aops;
-		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+        inode->i_mapping->a_ops = &ram_aops;
+        inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
 
-		switch (mode & S_IFMT) {
-		default:
+        switch (mode & S_IFMT) {
+        default:
             // char设备/块设备等特殊文件
-			init_special_inode(inode, mode, dev);
-			break;
-		case S_IFREG:
+            init_special_inode(inode, mode, dev);
+            break;
+        case S_IFREG:
             // 普通文件
-			inode->i_op = &ramfs_file_inode_operations;
-			inode->i_fop = &ramfs_file_operations;
-			break;
-		case S_IFDIR:
+            inode->i_op = &ramfs_file_inode_operations;
+            inode->i_fop = &ramfs_file_operations;
+            break;
+        case S_IFDIR:
             // 目录文件
-			inode->i_op = &ramfs_dir_inode_operations;
-			inode->i_fop = &simple_dir_operations;
-			inc_nlink(inode);
-			break;
-		case S_IFLNK:
+            inode->i_op = &ramfs_dir_inode_operations;
+            inode->i_fop = &simple_dir_operations;
+            inc_nlink(inode);
+            break;
+        case S_IFLNK:
             // 链接
-			inode->i_op = &page_symlink_inode_operations;
-			break;
-		}
+            inode->i_op = &page_symlink_inode_operations;
+            break;
+        }
     }
-	sb->s_root = d_make_root(inode);
+    sb->s_root = d_make_root(inode);
 }
 
 // 初始化super_block
 static int ramfs_get_tree(struct fs_context *fc)
 {
-	return get_tree_nodev(fc, ramfs_fill_super);
+    return get_tree_nodev(fc, ramfs_fill_super);
     {
         return vfs_get_super(fc, vfs_get_independent_super, fill_super);
         {
@@ -725,3 +725,217 @@ static int ramfs_get_tree(struct fs_context *fc)
 
 ```
 
+### dir inode ops
+
+```c
+static const struct inode_operations ramfs_dir_inode_operations = {
+    .create        = ramfs_create,     // 创建文件
+    .lookup        = simple_lookup,    // 查找文件
+    .link        = simple_link,      // 创建链接
+    .unlink        = simple_unlink,    // 取消链接
+    .symlink    = ramfs_symlink,    // 创建软链接
+    .mkdir        = ramfs_mkdir,      // 创建目录
+    .rmdir        = simple_rmdir,     // 删除目录
+    .mknod        = ramfs_mknod,      // 创建inode
+    .rename        = simple_rename,    // 重命名
+    .tmpfile    = ramfs_tmpfile,    // 创建临时文件
+};
+```
+
+`create`和`mkdir`都是直接调用`mknode`，只是`model`不同
+
+```c
+static int
+ramfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
+        struct dentry *dentry, umode_t mode, dev_t dev)
+{
+    struct inode * inode = ramfs_get_inode(dir->i_sb, dir, mode, dev);
+    int error = -ENOSPC;
+
+    if (inode) {
+        d_instantiate(dentry, inode);
+        dget(dentry);    /* Extra count - pin the dentry in core */
+        error = 0;
+        dir->i_mtime = dir->i_ctime = current_time(dir);
+    }
+    return error;
+}
+```
+
+```c
+struct dentry *simple_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
+{
+    if (dentry->d_name.len > NAME_MAX)
+        return ERR_PTR(-ENAMETOOLONG);
+    if (!dentry->d_sb->s_d_op)
+        d_set_d_op(dentry, &simple_dentry_operations);
+    d_add(dentry, NULL);
+    return NULL;
+}
+```
+
+`lookup`的实现第一次看可能会比较懵，本来是应该实现文件查找功能的，看起来啥也没干。
+由于`ramfs`是基于内存的，是在内存中从0开始创建的，创建的过程中dentry已经缓存。再看上面`open`的过程
+
+```c
+walk_component(nd, WALK_MORE);
+{
+    // 先看指定文件是否打开过，查找dentry缓存
+    struct dentry *dentry = lookup_fast(nd, &inode, &seq);
+    if (unlikely(!dentry)) {
+        // 缓存不存在才创建并初始化dentry
+        dentry = lookup_slow(&nd->last, nd->path.dentry, nd->flags);
+        {
+            dentry = d_alloc_parallel(dir, name, &wq);
+            struct inode *inode = dir->d_inode;
+            inode->i_op->lookup(inode, dentry, flags);
+        }
+    }
+}
+```
+
+`ramfs`查找文件时如果走到`lookup_slow`，文件肯定是不存在的，所以`lookup`只是设置了`delete`函数删除当前查找的dentry。
+
+### dir file ops
+
+`ramfs`的dir不支持读操作，此处没什么有价值的代码。
+
+```c
+const struct file_operations simple_dir_operations = {
+    .open        = dcache_dir_open,
+    .release    = dcache_dir_close,
+    .llseek        = dcache_dir_lseek,
+    .read        = generic_read_dir,
+    .iterate_shared    = dcache_readdir,
+    .fsync        = noop_fsync,
+};
+```
+
+### file inode ops
+
+```c
+const struct inode_operations ramfs_file_inode_operations = {
+    .setattr    = simple_setattr,
+    .getattr    = simple_getattr,
+};
+```
+
+### file file ops
+
+```c
+const struct file_operations ramfs_file_operations = {
+    .read_iter    = generic_file_read_iter,
+    .write_iter    = generic_file_write_iter,
+    .mmap        = generic_file_mmap,
+    .fsync        = noop_fsync,
+    .splice_read    = generic_file_splice_read,
+    .splice_write    = iter_file_splice_write,
+    .llseek        = generic_file_llseek,
+    .get_unmapped_area    = ramfs_mmu_get_unmapped_area,
+};
+```
+
+读文件
+
+```c
+ssize_t generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+    ssize_t retval = 0;
+    return filemap_read(iocb, iter, retval);
+    {
+        struct pagevec pvec;
+        pagevec_init(&pvec);
+
+        // 读数据到page cache
+        filemap_get_pages(iocb, iter, &pvec);
+        {
+            struct file *filp = iocb->ki_filp;
+            struct address_space *mapping = filp->f_mapping;
+            // 起始位置所在page
+            pgoff_t index = iocb->ki_pos >> PAGE_SHIFT;
+            // 截止位置所在page
+            pgoff_t last_index = DIV_ROUND_UP(iocb->ki_pos + iter->count, PAGE_SIZE);
+            // 读取数据
+            filemap_get_read_batch(mapping, index, last_index, pvec);
+            {
+                // ramfs相当于所有的文件内容都在page_cache中
+                XA_STATE(xas, &mapping->i_pages, index);
+                for (head = xas_load(&xas); head; head = xas_next(&xas)) {
+                    pagevec_add(pvec, head);
+                }
+            }
+        }
+
+        // 复制数据到user提供的buf
+        for (i = 0; i < pagevec_count(&pvec); i++) {
+            struct page *page = pvec.pages[i];
+            copy_page_to_iter(page, offset, bytes, iter);
+        }
+    }
+}
+```
+
+写文件
+
+```c
+
+const struct address_space_operations ram_aops = {
+    .readpage    = simple_readpage,
+    .write_begin    = simple_write_begin,
+    .write_end    = simple_write_end,
+    .set_page_dirty    = __set_page_dirty_no_writeback,
+};
+
+ssize_t generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+    __generic_file_write_iter(iocb, from);
+    {
+        generic_perform_write(file, from, iocb->ki_pos);
+        {
+            do {
+                // 计算第一个page的offset
+                offset = (pos & (PAGE_SIZE - 1));
+                bytes = min_t(unsigned long, PAGE_SIZE - offset, iov_iter_count(i));
+
+                a_ops->write_begin(file, mapping, pos, bytes, flags, &page, &fsdata);
+                // 复制user提供的数据到page_cache
+                copy_page_from_iter_atomic(page, offset, bytes, i);
+                a_ops->write_end(file, mapping, pos, bytes, copied, page, fsdata);
+            } while (iov_iter_count(i));
+        }
+    }
+}
+
+int simple_write_begin(struct file *file, struct address_space *mapping,
+            loff_t pos, unsigned len, unsigned flags,
+            struct page **pagep, void **fsdata)
+{
+    struct page *page;
+    pgoff_t index;
+
+    // 文件位置转page_cache索引
+    index = pos >> PAGE_SHIFT;
+
+    // 查找index对应的page，不存在则分配
+    page = grab_cache_page_write_begin(mapping, index, flags);
+    {
+        page = mapping_get_entry(mapping, index);
+        if (!page && (fgp_flags & FGP_CREAT)) {
+            page = __page_cache_alloc(gfp_mask);
+            add_to_page_cache_lru(page, mapping, index, gfp_mask);
+        }
+    }
+
+    *pagep = page;
+
+    return 0;
+}
+
+static int simple_write_end(struct file *file, struct address_space *mapping,
+            loff_t pos, unsigned len, unsigned copied,
+            struct page *page, void *fsdata)
+{
+    set_page_dirty(page);
+}
+
+```
