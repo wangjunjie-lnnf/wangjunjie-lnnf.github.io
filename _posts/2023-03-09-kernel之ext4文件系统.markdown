@@ -165,33 +165,712 @@ __getblk_gfp(struct block_device *bdev, sector_t block, unsigned size, gfp_t gfp
 
 An `ext4` file system is split into a series of `block groups`. To reduce performance difficulties due to fragmentation, the block allocator tries very hard to keep each file’s blocks within the same group, thereby reducing seek times. The size of a block group is specified in `sb.s_blocks_per_group` blocks, though it can also calculated as `8 * block_size_in_bytes`. With the default block size of 4KiB, each group will contain 32,768 blocks, for a length of 128MiB.
 
-All fields in ext4 are written to disk in `little-endian` order. HOWEVER, all fields in jbd2 (the journal) are written to disk in `big-endian` order.
+每个`group`使用一个`block`存储`Data Block Bitmap`，每个`bit`标识一个`block`，所以`sb.s_blocks_per_group == 8 * block_size_in_bytes`。 
+
+All fields in `ext4` are written to disk in `little-endian` order. HOWEVER, all fields in `jbd2` (the journal) are written to disk in `big-endian` order.
 
 ### Blocks
 
 `ext4` allocates storage space in units of `blocks`. A block is a group of `sectors` between `1KiB` and `64KiB`, and the number of sectors must be an integral power of 2. Blocks are in turn grouped into larger units called `block groups`. Block size is specified at `mkfs` time and typically is `4KiB`. You may experience mounting problems if block size is greater than page size (i.e. 64KiB blocks on a i386 which only has 4KiB memory pages). By default a filesystem can contain `2^32` blocks; if the `64bit` feature is enabled, then a filesystem can have `2^64` blocks. `The location of structures is stored in terms of the block number the structure lives in and not the absolute offset on disk`.
 
+最小的物理单位是`sectors`，大小一般是`512B`，由硬件决定。最小的逻辑单位是`blocks`，格式化文件系统时指定大小，典型值是`4KiB`，`blocks`由多个连续的`sectors`构成。
+多个连续的`blocks`由构成了`block groups`。磁盘数据结构的坐标是此数据结构所在的block的索引，默认一个文件系统可以包含`2^32`个blocks。
+
 For 32-bit filesystems, limits are as follows:
 
-[32-bit](/assets/images/2023-03-09/32-bit.png)
+![32-bit](/assets/images/2023-03-09/32-bit.png)
 
 For 64-bit filesystems, limits are as follows:
 
-[64-bit](/assets/images/2023-03-09/64-bit.png)
+![64-bit](/assets/images/2023-03-09/64-bit.png)
 
 ### Layout
 
 The layout of a standard block group is approximately as follows
 
-[layout](/assets/images/2023-03-09/layout.png)
+![layout-typical](/assets/images/2023-03-09/layout-typical.png)
 
-For the special case of block group 0, the first 1024 bytes are unused, to allow for the installation of x86 boot sectors and other oddities. The superblock will start at offset 1024 bytes, whichever block that happens to be (usually 0). However, if for some reason the block size = 1024, then block 0 is marked in use and the superblock goes in block 1. For all other block groups, there is no padding.
+For the special case of block group 0, the `first 1024 bytes` are unused, to allow for the installation of `x86 boot sectors` and other oddities. The `superblock` will start at offset 1024 bytes, whichever block that happens to be (usually 0). However, if for some reason the block size = 1024, then block 0 is marked in use and the superblock goes in block 1. For all other block groups, there is no padding.
 
-The ext4 driver primarily works with the superblock and the group descriptors that are found in block group 0. Redundant copies of the superblock and group descriptors are written to some of the block groups across the disk in case the beginning of the disk gets trashed, though not all block groups necessarily host a redundant copy. If the group does not have a redundant copy, the block group begins with the data block bitmap. Note also that when the filesystem is freshly formatted, mkfs will allocate “reserve GDT block” space after the block group descriptors and before the start of the block bitmaps to allow for future expansion of the filesystem. By default, a filesystem is allowed to increase in size by a factor of 1024x over the original filesystem size.
+第一个group的前1024字节需要空出来用于安装`bootloader`，之后的1KB才是`superblock`。
+
+The `ext4` driver primarily works with the `superblock` and the `group descriptors` that are found in block group 0. Redundant copies of the superblock and group descriptors are written to some of the block groups across the disk in case the beginning of the disk gets trashed, though not all block groups necessarily host a redundant copy. If the group does not have a redundant copy, the block group begins with the data block bitmap. Note also that when the filesystem is freshly formatted, mkfs will allocate “reserve GDT block” space after the block group descriptors and before the start of the block bitmaps to allow for future expansion of the filesystem. By default, a filesystem is allowed to increase in size by a factor of 1024x over the original filesystem size.
+
+`superblock`和`group descriptors`是核心数据结构，为避免损坏，会冗余存储到多个group。
 
 The location of the inode table is given by `grp.bg_inode_table_*`. It is continuous range of blocks large enough to contain `sb.s_inodes_per_group` * `sb.s_inode_size bytes`.
 
 As for the ordering of items in a block group, it is generally established that the super block and the group descriptor table, if present, will be at the beginning of the block group. The bitmaps and the inode table can be anywhere, and it is quite possible for the bitmaps to come after the inode table, or for both to be in different groups (flex_bg). Leftover space is used for file data blocks, indirect block maps, extent tree blocks, and extended attributes.
+
+如果一个group包含`super block`和`group descriptor table`，一定出现在开头。`bitmaps`和`inode table`可以出现在任意位置，具体的位置由其`group descriptor`指定。
+
+### Flexible Block Groups
+
+`Flexible Block Groups`用于集中group的元数据以快速加载，同时大文件的数据块可以更连续。
+
+![layout-flex](/assets/images/2023-03-09/layout-flex.png)
+
+Starting in `ext4`, there is a new feature called `flexible block groups` (flex_bg). In a flex_bg, several block groups are tied together as one logical block group; the bitmap spaces and the inode table space in the first block group of the flex_bg are expanded to include the bitmaps and inode tables of all other block groups in the flex_bg. For example, `if the flex_bg size is 4, then group 0 will contain (in order) the superblock, group descriptors, data block bitmaps for groups 0-3, inode bitmaps for groups 0-3, inode tables for groups 0-3, and the remaining space in group 0 is for file data`. The effect of this is to group the block group metadata close together for faster loading, and to enable large files to be continuous on disk. Backup copies of the superblock and group descriptors are always at the beginning of block groups, even if flex_bg is enabled. The number of block groups that make up a flex_bg is given by `2 ^ sb.s_log_groups_per_flex`.
+
+### Meta Block Groups
+
+`META_BG`用于解决文件系统上限受制于所有`group descriptors`必须连续存储在一个group中。
+
+![layout-meta](/assets/images/2023-03-09/layout-meta.png)
+
+Without the option `META_BG`, for safety concerns, all block group descriptors copies are kept in the first block group. Given the default `128MiB(2^27 bytes)` block group size and `64-byte group descriptors`, ext4 can have at most `2^27/64 = 2^21` block groups. This limits the entire filesystem size to `2^21 * 2^27 = 2^48`bytes or `256TiB`.
+
+The solution to this problem is to use the `metablock group feature` (META_BG), which is already in ext3 for all 2.6 releases. With the META_BG feature, ext4 filesystems are partitioned into many metablock groups. `Each metablock group is a cluster of block groups whose group descriptor structures can be stored in a single disk block`. For ext4 filesystems with 4 KB block size, a single metablock group partition includes 64 block groups, or 8 GiB of disk space. `The metablock group feature moves the location of the group descriptors from the congested first block group of the whole filesystem into the first group of each metablock group itself`. `The backups are in the second and last group of each metablock group`. This increases the 2^21 maximum block groups limit to the hard limit 2^32, allowing support for a 512PiB filesystem.
+
+The change in the filesystem format replaces the current scheme where the superblock is followed by a variable-length set of block group descriptors. Instead, `the superblock and a single block group descriptor block is placed at the beginning of the first, second, and last block groups in a meta-block group`. A meta-block group is a collection of block groups which can be described by a single block group descriptor block. Since the size of the block group descriptor structure is 32 bytes, a meta-block group contains 32 block groups for filesystems with a 1KB block size, and 128 block groups for filesystems with a 4KB blocksize. Filesystems can either be created using this new block group descriptor layout, or `existing filesystems can be resized on-line, and the field s_first_meta_bg in the superblock will indicate the first block group using this new layout`.
+
+标准布局和`META_BG`可以混用，前面使用标准布局，后面使用`META_BG`，第一个`META_BG`的位置由`s_first_meta_bg`指定。
+
+### Special inodes
+
+ext4 reserves some inode for special features, as follows:
+
+![special-inodes](/assets/images/2023-03-09/special-inodes.png)
+
+### Block and Inode Allocation Policy
+
+ext4 recognizes that data locality is generally a desirably quality of a filesystem. On a spinning disk, keeping related blocks near each other reduces the amount of movement that the head actuator and disk must perform to access a data block, thus speeding up disk IO. On an SSD there of course are no moving parts, but locality can increase the size of each transfer request while reducing the total number of requests. This locality may also have the effect of concentrating writes on a single erase block, which can speed up file rewrites significantly. Therefore, it is useful to reduce fragmentation whenever possible.
+
+`data locality`可以提高性能，对于hdd来说读取时可以减少移动磁头的次数，对于ssd来说，集中写满一个可擦除的块。
+
+The first tool that ext4 uses to combat fragmentation is the multi-block allocator. When a file is first created, the block allocator speculatively allocates 8KiB of disk space to the file on the assumption that the space will get written soon. When the file is closed, the unused speculative allocations are of course freed, but if the speculation is correct (typically the case for full writes of small files) then the file data gets written out in a single multi-block extent. 
+
+新建的文件首次分配8KB的连续磁盘空间，用不完再回收。
+
+A second related trick that ext4 uses is delayed allocation. Under this scheme, when a file needs more blocks to absorb file writes, the filesystem defers deciding the exact placement on the disk until all the dirty buffers are being written out to disk. By not committing to a particular placement until it’s absolutely necessary (the commit timeout is hit, or sync() is called, or the kernel runs out of memory), the hope is that the filesystem can make better location decisions.
+
+延迟分配，合并多个分配请求。
+
+The third trick that ext4 (and ext3) uses is that it tries to keep a file’s data blocks in the same block group as its inode. This cuts down on the seek penalty when the filesystem first has to read a file’s inode to learn where the file’s data blocks live and then seek over to the file’s data blocks to begin I/O operations.
+
+尽量保证inode和数据块在相同的group。
+
+The fourth trick is that all the inodes in a directory are placed in the same block group as the directory, when feasible. The working assumption here is that all the files in a directory might be related, therefore it is useful to try to keep them all together.
+
+尽量保证文件夹和其下的文件的inode在同一个group。
+
+The fifth trick is that the disk volume is cut up into 128MB block groups; these mini-containers are used as outlined above to try to maintain data locality. However, there is a deliberate quirk – when a directory is created in the root directory, the inode allocator scans the block groups and puts that directory into the least heavily loaded block group that it can find. This encourages directories to spread out over a disk; as the top-level directory/file blobs fill up one block group, the allocators simply move on to the next block group. Allegedly this scheme evens out the loading on the block groups, though the author suspects that the directories which are so unlucky as to land towards the end of a spinning drive get a raw deal performance-wise.
+
+root目录下创建的文件夹放到最空闲的group。
+
+Of course if all of these mechanisms fail, one can always use `e4defrag` to defragment files.
+
+### Bigalloc
+
+At the moment, the default size of a block is 4KiB, which is a commonly supported page size on most MMU-capable hardware. This is fortunate, as ext4 code is not prepared to handle the case where the block size exceeds the page size. However, for a filesystem of mostly huge files, it is desirable to be able to allocate disk blocks in units of multiple blocks to reduce both fragmentation and metadata overhead. The bigalloc feature provides exactly this ability.
+
+`Bigalloc`用于优化大文件存储。
+
+The bigalloc feature (`EXT4_FEATURE_RO_COMPAT_BIGALLOC`) changes ext4 to use clustered allocation, so that each bit in the ext4 block allocation bitmap addresses a power of two number of blocks. For example, if the file system is mainly going to be storing large files in the 4-32 megabyte range, it might make sense to set a cluster size of 1 megabyte. This means that each bit in the block allocation bitmap now addresses 256 4k blocks. This shrinks the total size of the block allocation bitmaps for a 2T file system from 64 megabytes to 256 kilobytes. It also means that a block group addresses 32 gigabytes instead of 128 megabytes, also shrinking the amount of file system overhead for metadata.
+
+`Bigalloc`实现机制是把逻辑单位从`block`替换为更大的`cluster`。
+
+The administrator can set a block cluster size at mkfs time (which is stored in the `s_log_cluster_size` field in the `superblock`); from then on, `the block bitmaps track clusters, not individual blocks`. This means that block groups can be several gigabytes in size (instead of just 128MiB); however, `the minimum allocation unit becomes a cluster, not a block, even for directories`.
+
+`bitmap`追踪的最小单位和`存储分配`的最小单位都变成了`cluster`，对于文件夹来说有点浪费。
+
+### Inline Data
+
+`Inline Data`用于优化少于`160字节`的小文件的存储，避免分配data block。
+
+The inline data feature was designed to handle the case that a file’s data is so tiny that it readily fits inside the inode, which (theoretically) reduces disk block consumption and reduces seeks. If the file is `smaller than 60 bytes`, then the data are stored inline in `inode.i_block`. If the rest of the file would fit inside the extended attribute space, then it might be found as an extended attribute `system.data` within the inode body (“ibody EA”). This of course constrains the amount of extended attributes one can attach to an inode. If the data size increases beyond `i_block + ibody EA`, a regular block is allocated and the contents moved to that block.
+
+Pending a change to compact the extended attribute key used to store inline data, one ought to be able to store 160 bytes of data in a 256-byte inode.
+
+The inline data feature requires the presence of an extended attribute for “system.data”, even if the attribute value is zero length.
+
+
+## 数据结构
+
+### ext4_super_block
+
+The `superblock` records various information about the enclosing filesystem, such as block counts, inode counts, supported features, maintenance information, and more.
+
+If the `sparse_super` feature flag is set, redundant copies of the superblock and group descriptors are kept only in the groups whose group number is either `0 or a power of 3, 5, or 7`. If the flag is not set, redundant copies are kept in all groups.
+
+```c
+
+struct ext4_super_block {
+/*00*/	__le32	s_inodes_count;			/* Inodes count */
+		__le32	s_blocks_count_lo;		/* Blocks count */
+		__le32	s_r_blocks_count_lo;	/* Reserved blocks count */
+		__le32	s_free_blocks_count_lo;	/* Free blocks count */
+/*10*/	__le32	s_free_inodes_count;	/* Free inodes count */
+		__le32	s_first_data_block;		/* First Data Block */
+		__le32	s_log_block_size;		/* Block size */
+		__le32	s_log_cluster_size;		/* Allocation cluster size */
+/*20*/	__le32	s_blocks_per_group;		/* # Blocks per group */
+		__le32	s_clusters_per_group;	/* # Clusters per group */
+		__le32	s_inodes_per_group;		/* # Inodes per group */
+		__le32	s_mtime;				/* Mount time */
+/*30*/	__le32	s_wtime;				/* Write time */
+		__le16	s_mnt_count;			/* Mount count */
+		__le16	s_max_mnt_count;		/* Maximal mount count */
+		__le16	s_magic;				/* Magic signature */
+		__le16	s_state;				/* File system state */
+		__le16	s_errors;				/* Behaviour when detecting errors */
+		__le16	s_minor_rev_level;		/* minor revision level */
+/*40*/	__le32	s_lastcheck;			/* time of last check */
+		__le32	s_checkinterval;		/* max. time between checks */
+		__le32	s_creator_os;			/* OS */
+		__le32	s_rev_level;			/* Revision level */
+/*50*/	__le16	s_def_resuid;			/* Default uid for reserved blocks */
+		__le16	s_def_resgid;			/* Default gid for reserved blocks */
+	/*
+	 * These fields are for EXT4_DYNAMIC_REV superblocks only.
+	 */
+		__le32	s_first_ino;			/* First non-reserved inode */
+		__le16  s_inode_size;			/* size of inode structure */
+		__le16	s_block_group_nr;		/* block group # of this superblock */
+		__le32	s_feature_compat;		/* compatible feature set */
+/*60*/	__le32	s_feature_incompat;		/* incompatible feature set */
+		__le32	s_feature_ro_compat;	/* readonly-compatible feature set */
+/*68*/	__u8	s_uuid[16];				/* 128-bit uuid for volume */
+/*78*/	char	s_volume_name[16];		/* volume name */
+/*88*/	char	s_last_mounted[64] __nonstring;	/* directory where last mounted */
+/*C8*/	__le32	s_algorithm_usage_bitmap; /* For compression */
+	/*
+	 * Performance hints.  Directory preallocation should only
+	 * happen if the EXT4_FEATURE_COMPAT_DIR_PREALLOC flag is on.
+	 */
+		__u8	s_prealloc_blocks;		/* Nr of blocks to try to preallocate*/
+		__u8	s_prealloc_dir_blocks;	/* Nr to preallocate for dirs */
+		__le16	s_reserved_gdt_blocks;	/* Per group desc for online growth */
+	/*
+	 * Journaling support valid if EXT4_FEATURE_COMPAT_HAS_JOURNAL set.
+	 */
+/*D0*/	__u8	s_journal_uuid[16];		/* uuid of journal superblock */
+/*E0*/	__le32	s_journal_inum;			/* inode number of journal file */
+		__le32	s_journal_dev;			/* device number of journal file */
+		__le32	s_last_orphan;			/* start of list of inodes to delete */
+		__le32	s_hash_seed[4];			/* HTREE hash seed */
+		__u8	s_def_hash_version;		/* Default hash version to use */
+		__u8	s_jnl_backup_type;	
+		__le16  s_desc_size;			/* size of group descriptor */
+/*100*/	__le32	s_default_mount_opts;
+		__le32	s_first_meta_bg;		/* First metablock block group */
+		__le32	s_mkfs_time;			/* When the filesystem was created */
+		__le32	s_jnl_blocks[17];		/* Backup of the journal inode */
+	/* 64bit support valid if EXT4_FEATURE_COMPAT_64BIT */
+/*150*/	__le32	s_blocks_count_hi;		/* Blocks count */
+		__le32	s_r_blocks_count_hi;	/* Reserved blocks count */
+		__le32	s_free_blocks_count_hi;	/* Free blocks count */
+		__le16	s_min_extra_isize;		/* All inodes have at least # bytes */
+		__le16	s_want_extra_isize; 	/* New inodes should reserve # bytes */
+		__le32	s_flags;				/* Miscellaneous flags */
+		__le16  s_raid_stride;			/* RAID stride */
+		__le16  s_mmp_update_interval;  /* # seconds to wait in MMP checking */
+		__le64  s_mmp_block;            /* Block for multi-mount protection */
+		__le32  s_raid_stripe_width;    /* blocks on all data disks (N*stride)*/
+		__u8	s_log_groups_per_flex;  /* FLEX_BG group size */
+		__u8	s_checksum_type;		/* metadata checksum algorithm used */
+		__u8	s_encryption_level;		/* versioning level for encryption */
+		__u8	s_reserved_pad;			/* Padding to next 32bits */
+		__le64	s_kbytes_written;		/* nr of lifetime kilobytes written */
+		__le32	s_snapshot_inum;		/* Inode number of active snapshot */
+		__le32	s_snapshot_id;			/* sequential ID of active snapshot */
+		__le64	s_snapshot_r_blocks_count; /* reserved blocks for active snapshot's future use */
+		__le32	s_snapshot_list;		/* inode number of the head of the on-disk snapshot list */
+#define EXT4_S_ERR_START offsetof(struct ext4_super_block, s_error_count)
+		__le32	s_error_count;			/* number of fs errors */
+		__le32	s_first_error_time;		/* first time an error happened */
+		__le32	s_first_error_ino;		/* inode involved in first error */
+		__le64	s_first_error_block;	/* block involved of first error */
+		__u8	s_first_error_func[32] __nonstring;	/* function where the error happened */
+		__le32	s_first_error_line;		/* line number where error happened */
+		__le32	s_last_error_time;		/* most recent time of an error */
+		__le32	s_last_error_ino;		/* inode involved in last error */
+		__le32	s_last_error_line;		/* line number where error happened */
+		__le64	s_last_error_block;		/* block involved of last error */
+		__u8	s_last_error_func[32] __nonstring;	/* function where the error happened */
+#define EXT4_S_ERR_END offsetof(struct ext4_super_block, s_mount_opts)
+		__u8	s_mount_opts[64];
+		__le32	s_usr_quota_inum;		/* inode for tracking user quota */
+		__le32	s_grp_quota_inum;		/* inode for tracking group quota */
+		__le32	s_overhead_clusters;	/* overhead blocks/clusters in fs */
+		__le32	s_backup_bgs[2];		/* groups with sparse_super2 SBs */
+		__u8	s_encrypt_algos[4];		/* Encryption algorithms in use  */
+		__u8	s_encrypt_pw_salt[16];	/* Salt used for string2key algorithm */
+		__le32	s_lpf_ino;				/* Location of the lost+found inode */
+		__le32	s_prj_quota_inum;		/* inode for tracking project quota */
+		__le32	s_checksum_seed;		/* crc32c(uuid) if csum_seed set */
+		__u8	s_wtime_hi;
+		__u8	s_mtime_hi;
+		__u8	s_mkfs_time_hi;
+		__u8	s_lastcheck_hi;
+		__u8	s_first_error_time_hi;
+		__u8	s_last_error_time_hi;
+		__u8	s_first_error_errcode;
+		__u8    s_last_error_errcode;
+		__le16  s_encoding;				/* Filename charset encoding */
+		__le16  s_encoding_flags;		/* Filename charset encoding flags */
+		__le32  s_orphan_file_inum;		/* Inode for tracking orphan inodes */
+		__le32	s_reserved[94];			/* Padding to the end of the block */
+		__le32	s_checksum;				/* crc32c(superblock) */
+};
+
+```
+
+### Block Group Descriptors
+
+Each block group on the filesystem has one of these descriptors associated with it. As noted in the Layout section above, the group descriptors (if present) are the second item in the block group. The standard configuration is for each block group to contain a full copy of the block group descriptor table unless the `sparse_super` feature flag is set.
+
+Notice how the group descriptor records the location of both bitmaps and the inode table (i.e. they can float). This means that within a block group, the only data structures with fixed locations are the superblock and the group descriptor table. The flex_bg mechanism uses this property to group several block groups into a flex group and lay out all of the groups’ bitmaps and inode tables into one long run in the first group of the flex group.
+
+If the meta_bg feature flag is set, then several block groups are grouped together into a meta group. Note that in the meta_bg case, however, the first, second and last block groups within the larger meta group contain only group descriptors for the groups inside the meta group.
+
+`flex_bg and meta_bg do not appear to be mutually exclusive features`.
+
+In ext2, ext3, and ext4 (when the 64bit feature is not enabled), the block group descriptor was only 32 bytes long and therefore ends at bg_checksum. On an ext4 filesystem with the 64bit feature enabled, the block group descriptor expands to at least the 64 bytes described below; the size is stored in the superblock.
+
+```c
+
+struct ext4_group_desc
+{
+	__le32	bg_block_bitmap_lo;			/* Blocks bitmap block */
+	__le32	bg_inode_bitmap_lo;			/* Inodes bitmap block */
+	__le32	bg_inode_table_lo;			/* Inodes table block */
+	__le16	bg_free_blocks_count_lo;	/* Free blocks count */
+	__le16	bg_free_inodes_count_lo;	/* Free inodes count */
+	__le16	bg_used_dirs_count_lo;		/* Directories count */
+	__le16	bg_flags;					/* EXT4_BG_flags (INODE_UNINIT, etc) */
+	__le32  bg_exclude_bitmap_lo;   	/* Exclude bitmap for snapshots */
+	__le16  bg_block_bitmap_csum_lo;	/* crc32c(s_uuid+grp_num+bbitmap) LE */
+	__le16  bg_inode_bitmap_csum_lo;	/* crc32c(s_uuid+grp_num+ibitmap) LE */
+	__le16  bg_itable_unused_lo;		/* Unused inodes count */
+	__le16  bg_checksum;				/* crc16(sb_uuid+group+desc) */
+	__le32	bg_block_bitmap_hi;			/* Blocks bitmap block MSB */
+	__le32	bg_inode_bitmap_hi;			/* Inodes bitmap block MSB */
+	__le32	bg_inode_table_hi;			/* Inodes table block MSB */
+	__le16	bg_free_blocks_count_hi;	/* Free blocks count MSB */
+	__le16	bg_free_inodes_count_hi;	/* Free inodes count MSB */
+	__le16	bg_used_dirs_count_hi;		/* Directories count MSB */
+	__le16  bg_itable_unused_hi;    	/* Unused inodes count MSB */
+	__le32  bg_exclude_bitmap_hi;   	/* Exclude bitmap block MSB */
+	__le16  bg_block_bitmap_csum_hi;	/* crc32c(s_uuid+grp_num+bbitmap) BE */
+	__le16  bg_inode_bitmap_csum_hi;	/* crc32c(s_uuid+grp_num+ibitmap) BE */
+	__u32   bg_reserved;
+};
+
+```
+
+### Block and inode Bitmaps
+
+The data block bitmap tracks the usage of data blocks within the block group.
+
+The inode bitmap records which entries in the inode table are in use.
+
+As with most bitmaps, one bit represents the usage status of one data block or inode table entry. This implies a block group size of `8 * number_of_bytes_in_a_logical_block`.
+
+NOTE: If BLOCK_UNINIT is set for a given block group, various parts of the kernel and e2fsprogs code pretends that the block bitmap contains zeros (i.e. all blocks in the group are free). However, it is not necessarily the case that no blocks are in use – if meta_bg is set, the bitmaps and group descriptor live inside the group. Unfortunately, ext2fs_test_block_bitmap2() will return ‘0’ for those locations, which produces confusing debugfs output.
+
+### Inode Table
+
+Inode tables are statically allocated at mkfs time. Each block group descriptor points to the start of the table, and the superblock records the number of inodes per group. 
+
+## Journal (jbd2)
+
+`Journal`自身就是一个inode=8的隐藏文件，用于实现事务，避免出现数据不一致。
+
+Introduced in ext3, the ext4 filesystem employs a journal to protect the filesystem against metadata inconsistencies in the case of a system crash. Up to 10,240,000 file system blocks can be reserved inside the filesystem as a place to land “important” data writes on-disk as quickly as possible. Once the important data transaction is fully written to the disk and flushed from the disk write cache, a record of the data being committed is also written to the journal. At some later point in time, the journal code writes the transactions to their final locations on disk (this could involve a lot of seeking or a lot of small read-write-erases) before erasing the commit record. Should the system crash during the second slow write, the journal can be replayed all the way to the latest commit record, guaranteeing the atomicity of whatever gets written through the journal to the disk. The effect of this is to guarantee that the filesystem does not become stuck midway through a metadata update.
+
+For performance reasons, `ext4 by default only writes filesystem metadata through the journal`. This means that file data blocks are /not/ guaranteed to be in any consistent state after a crash. If this default guarantee level (`data=ordered`) is not satisfactory, there is a mount option to control journal behavior. If `data=journal`, all data and metadata are written to disk through the journal. This is slower but safest. If `data=writeback`, dirty data blocks are not flushed to the disk before the metadata are written to disk through the journal.
+
+In case of `data=ordered` mode, Ext4 also supports fast commits which help reduce commit latency significantly. The default `data=ordered` mode works by logging metadata blocks to the journal. In fast commit mode, Ext4 only stores the minimal delta needed to recreate the affected metadata in fast commit space that is shared with JBD2. Once the fast commit area fills in or if fast commit is not possible or if JBD2 commit timer goes off, Ext4 performs a traditional full commit. A full commit invalidates all the fast commits that happened before it and thus it makes the fast commit area empty for further fast commits. This feature needs to be enabled at mkfs time.
+
+The journal inode is typically `inode 8`. The first 68 bytes of the journal inode are replicated in the ext4 superblock. `The journal itself is normal (but hidden) file within the filesystem`. The file usually consumes an entire block group, though mke2fs tries to put it in the middle of the disk.
+
+All fields in jbd2 are written to disk in `big-endian order`. This is the opposite of ext4.
+
+The maximum size of a journal embedded in an ext4 filesystem is `2^32` blocks. jbd2 itself does not seem to care.
+
+### Layout
+
+Generally speaking, the journal has this format:
+
+![journal-layout](/assets/images/2023-03-09/journal-layout.png)
+
+Notice that `a transaction begins with either a descriptor and some data, or a block revocation list`. A finished transaction always ends with a commit. If there is no commit record (or the checksums don’t match), the transaction will be discarded during replay.
+
+事务中的记录分两种：更新数据块和撤回数据块
+
+```c
+
+typedef struct journal_header_s
+{
+	__be32		h_magic;
+	__be32		h_blocktype;
+	__be32		h_sequence;
+} journal_header_t;
+
+### Super Block
+
+The key data kept within are size of the journal, and where to find the start of the log of transactions.
+
+```c
+
+typedef struct journal_superblock_s
+{
+/* 0x0000 */
+	journal_header_t s_header;
+
+/* 0x000C */
+	/* Static information describing the journal */
+	__be32	s_blocksize;		/* journal device blocksize */
+	__be32	s_maxlen;			/* total blocks in journal file */
+	__be32	s_first;			/* first block of log information */
+
+/* 0x0018 */
+	/* Dynamic information describing the current state of the log */
+	__be32	s_sequence;			/* first commit ID expected in log */
+	__be32	s_start;			/* blocknr of start of log */
+
+/* 0x0020 */
+	/* Error value, as set by jbd2_journal_abort(). */
+	__be32	s_errno;
+
+/* 0x0024 */
+	/* Remaining fields are only valid in a version-2 superblock */
+	__be32	s_feature_compat;		/* compatible feature set */
+	__be32	s_feature_incompat;		/* incompatible feature set */
+	__be32	s_feature_ro_compat;	/* readonly-compatible feature set */
+/* 0x0030 */
+	__u8	s_uuid[16];			/* 128-bit uuid for journal */
+
+/* 0x0040 */
+	__be32	s_nr_users;			/* Nr of filesystems sharing log */
+
+	__be32	s_dynsuper;			/* Blocknr of dynamic superblock copy*/
+
+/* 0x0048 */
+	__be32	s_max_transaction;	/* Limit of journal blocks per trans.*/
+	__be32	s_max_trans_data;	/* Limit of data blocks per trans. */
+
+/* 0x0050 */
+	__u8	s_checksum_type;	/* checksum type */
+	__u8	s_padding2[3];
+/* 0x0054 */
+	__be32	s_num_fc_blks;		/* Number of fast commit blocks */
+/* 0x0058 */
+	__u32	s_padding[41];
+	__be32	s_checksum;			/* crc32c(superblock) */
+
+/* 0x0100 */
+	__u8	s_users[16*48];		/* ids of all fs'es sharing the log */
+/* 0x0400 */
+} journal_superblock_t;
+
+```
+
+journal恢复过程：
+
+```c
+int ext4_load_journal(struct super_block *sb,
+			     struct ext4_super_block *es,
+			     unsigned long journal_devnum)
+{
+	journal_t *journal = ext4_get_journal(sb, journal_inum);
+	{
+		struct inode *journal_inode = ext4_get_journal_inode(sb, journal_inum);
+		journal_t *journal = jbd2_journal_init_inode(journal_inode);
+		{
+			journal = kzalloc(sizeof(*journal), GFP_KERNEL);
+			journal->j_commit_interval = (HZ * 5);
+			journal->j_min_batch_time = 0;
+			journal->j_max_batch_time = 15000; /* 15ms */
+			// 读取journal的super_block
+			journal->j_sb_buffer = getblk_unmovable(journal->j_dev, start, journal->j_blocksize);
+			journal->j_inode = inode;
+		}
+		journal->j_private = sb;
+		return journal;
+	}
+
+	jbd2_journal_load(journal);
+	{
+		// 等待super_block加载完成
+		load_superblock(journal);
+
+		jbd2_journal_recover(journal);
+		{
+			// scan: 校验checksum			
+			do_one_pass(journal, &info, PASS_SCAN);
+			// revoke: 收集撤销事务中的待撤销block列表
+			do_one_pass(journal, &info, PASS_REVOKE);
+			{
+				scan_revoke_records(journal, bh, next_commit_ID, info);
+				{
+					// 撤销块格式: head + block号列表
+					while (offset + record_len <= max) {
+						unsigned long long blocknr;
+
+						if (record_len == 4)
+							blocknr = be32_to_cpu(* ((__be32 *) (bh->b_data+offset)));
+						else
+							blocknr = be64_to_cpu(* ((__be64 *) (bh->b_data+offset)));
+						
+						offset += record_len;
+						
+						// 插入hash表
+						jbd2_journal_set_revoke(journal, blocknr, sequence);
+					}
+				}
+			}
+			// replay: replay非待撤销block的数据
+			do_one_pass(journal, &info, PASS_REPLAY);
+			{
+				journal_superblock_t *sb = journal->j_superblock;
+				next_commit_ID = be32_to_cpu(sb->s_sequence);
+				next_log_block = be32_to_cpu(sb->s_start);
+
+				struct buffer_head *bh;
+
+				while(1) {
+					// 读取journal的block
+					jread(&bh, journal, next_log_block);
+					next_log_block++;
+
+					journal_header_t *tmp = (journal_header_t *)bh->b_data;
+					// 块类型
+					blocktype = be32_to_cpu(tmp->h_blocktype);
+					// 事务id
+					sequence = be32_to_cpu(tmp->h_sequence);
+
+					// 描述符块的body是一组tag
+					journal_block_tag_t	tag;
+					char *tagp = &bh->b_data[sizeof(journal_header_t)];
+					// 遍历每一个tag
+					while ((tagp - bh->b_data + tag_bytes) <= journal->j_blocksize - descr_csum_size) {
+						memcpy(&tag, tagp, sizeof(tag));
+						// 描述符块的每个tag都对应一个后续的数据块
+						io_block = next_log_block++;
+						jread(&obh, journal, io_block);
+						// tag中记录的待恢复的块号
+						blocknr = read_tag_block(journal, &tag);
+
+						// 检查此block是否在当前或后续事务中撤销
+						if (jbd2_journal_test_revoke(journal, blocknr, next_commit_ID)) {
+							brelse(obh);
+							++info->nr_revoke_hits;
+							goto skip_write;
+						}
+
+						// 读取待更新数据块到page_cache
+						struct buffer_head *nbh = __getblk(journal->j_fs_dev, blocknr, journal->j_blocksize);
+						// 复制数据
+						memcpy(nbh->b_data, obh->b_data, journal->j_blocksize);
+						mark_buffer_dirty(nbh);
+						++info->nr_replays;
+					}
+				}
+
+			}
+			// sync & flush：刷盘
+			sync_blockdev(journal->j_fs_dev);
+			if (journal->j_flags & JBD2_BARRIER) {
+				blkdev_issue_flush(journal->j_fs_dev);
+			}
+		}
+
+		journal_reset(journal);
+	}
+}
+```
+
+## inode
+
+In a regular UNIX filesystem, the inode stores all the metadata pertaining to the file (time stamps, block maps, extended attributes, etc), not the directory entry. To find the information associated with a file, one must traverse the directory files to find the directory entry associated with a file, then load the inode to find the metadata for that file. ext4 appears to cheat (for performance reasons) a little bit by `storing a copy of the file type (normally stored in the inode) in the directory entry`. (Compare all this to FAT, which stores all the file information directly in the directory entry, but does not support hard links and is in general more seek-happy than ext4 due to its simpler block allocator and extensive use of linked lists.)
+
+`The inode table is a linear array of struct ext4_inode`. The table is sized to have enough blocks to store at least `sb.s_inode_size * sb.s_inodes_per_group bytes`. The number of the block group containing an inode can be calculated as `(inode_number - 1) / sb.s_inodes_per_group`, and the offset into the group’s table is `(inode_number - 1) % sb.s_inodes_per_group`. There is no inode 0.
+
+```c
+struct ext4_inode {
+	__le16	i_mode;			/* File mode */
+	__le16	i_uid;			/* Low 16 bits of Owner Uid */
+	__le32	i_size_lo;		/* Size in bytes */
+	__le32	i_atime;		/* Access time */
+	__le32	i_ctime;		/* Inode Change time */
+	__le32	i_mtime;		/* Modification time */
+	__le32	i_dtime;		/* Deletion Time */
+	__le16	i_gid;			/* Low 16 bits of Group Id */
+	__le16	i_links_count;	/* Links count */
+	__le32	i_blocks_lo;	/* Blocks count */
+	__le32	i_flags;		/* File flags */
+	union {
+		struct {
+			__le32  l_i_version;
+		} linux1;
+	} osd1;					/* OS dependent 1 */
+	__le32	i_block[15];	/* Pointers to blocks */
+	__le32	i_generation;	/* File version (for NFS) */
+	__le32	i_file_acl_lo;	/* File ACL */
+	__le32	i_size_high;
+	__le32	i_obso_faddr;	/* Obsoleted fragment address */
+	union {
+		struct {
+			__le16	l_i_blocks_high; /* were l_i_reserved1 */
+			__le16	l_i_file_acl_high;
+			__le16	l_i_uid_high;	/* these 2 fields */
+			__le16	l_i_gid_high;	/* were reserved2[0] */
+			__le16	l_i_checksum_lo;/* crc32c(uuid+inum+inode) LE */
+			__le16	l_i_reserved;
+		} linux2;
+	} osd2;					/* OS dependent 2 */
+	__le16	i_extra_isize;
+	__le16	i_checksum_hi;	/* crc32c(uuid+inum+inode) BE */
+	__le32  i_ctime_extra;  /* extra Change time      (nsec << 2 | epoch) */
+	__le32  i_mtime_extra;  /* extra Modification time(nsec << 2 | epoch) */
+	__le32  i_atime_extra;  /* extra Access time      (nsec << 2 | epoch) */
+	__le32  i_crtime;       /* File Creation time */
+	__le32  i_crtime_extra; /* extra FileCreationtime (nsec << 2 | epoch) */
+	__le32  i_version_hi;	/* high 32 bits for 64-bit version */
+	__le32	i_projid;		/* Project ID */
+};
+```
+
+Each block group contains `sb->s_inodes_per_group inodes`. Because inode 0 is defined not to exist, this formula can be used to find the block group that an inode lives in: `bg = (inode_num - 1) / sb->s_inodes_per_group`. The particular inode can be found within the block group’s inode table at `index = (inode_num - 1) % sb->s_inodes_per_group`. To get the byte address within the inode table, use `offset = index * sb->s_inode_size`.
+
+Depending on the type of file an inode describes, the 60 bytes of storage in `inode.i_block` can be used in different ways. In general, regular files and directories will use it for file block indexing information, and special files will use it for special purposes.
+
+### Symbolic Links
+
+The target of a symbolic link will be stored in this field if the target string is less than 60 bytes long. Otherwise, either extents or block maps will be used to allocate data blocks to store the link target.
+
+### Direct/Indirect Block Addressing
+
+老的数据块是`12+1+1+1`的3级寻址方式，效率较低。
+
+`In ext2/3, file block numbers were mapped to logical block numbers by means of an (up to) three level 1-1 block map`. To find the logical block that stores a particular file block, the code would navigate through this increasingly complicated structure. 
+
+Note that with this block mapping scheme, it is necessary to fill out a lot of mapping data even for a large contiguous file! This inefficiency led to the creation of the extent mapping scheme, discussed below.
+
+Notice also that a file using this mapping scheme cannot be placed higher than 2^32 blocks.
+
+![block-addressing](/assets/images/2023-03-09/block-addressing.png)
+
+### Extent Tree
+
+`In ext4, the file to logical block map has been replaced with an extent tree`. Under the old scheme, allocating a contiguous run of 1,000 blocks requires an indirect block to map all 1,000 entries; with extents, the mapping is reduced to a single `struct ext4_extent` with ee_len = 1000. If flex_bg is enabled, it is possible to allocate very large files with a single extent, at a considerable reduction in metadata block use, and some improvement in disk efficiency. The inode must have the `extents flag (0x80000) flag` set for this feature to be in use.
+
+`Extents are arranged as a tree`. Each node of the tree begins with a `struct ext4_extent_header`. If the node is an `interior node (eh.eh_depth > 0)`, the header is followed by `eh.eh_entries` instances of `struct ext4_extent_idx`; each of these index entries points to a block containing more nodes in the extent tree. If the node is a `leaf node (eh.eh_depth == 0)`, then the header is followed by `eh.eh_entries` instances of `struct ext4_extent`; these instances point to the file’s data blocks. `The root node of the extent tree is stored in inode.i_block`, which allows for the first four extents to be recorded without the use of extra metadata blocks.
+
+```c
+/* extent是tree结构，此结构为tree-node */
+struct ext4_extent_header {
+	__le16	eh_magic;		/* probably will support different formats */
+	__le16	eh_entries;		/* number of valid entries */
+	__le16	eh_max;			/* capacity of store in entries */
+	__le16	eh_depth;		/* has tree real underlying blocks? */
+	__le32	eh_generation;	/* generation of the tree */
+};
+
+/* 指向[ei_block, ei_leaf_hi<<32 | ei_leaf_lo] */
+struct ext4_extent_idx {
+	__le32	ei_block;
+	__le32	ei_leaf_lo;
+	__le16	ei_leaf_hi;
+	__u16	ei_unused;
+};
+
+struct ext4_extent {
+	__le32	ee_block;		/* first logical block extent covers */
+	__le16	ee_len;			/* number of blocks covered by extent */
+	__le16	ee_start_hi;	/* high 16 bits of physical block */
+	__le32	ee_start_lo;	/* low 32 bits of physical block */
+};
+```
+
+If the `inline data feature` is enabled for the filesystem and the flag is set for the inode, it is possible that the first 60 bytes of the file data are stored here.
+
+### Directory Entries
+
+dir下存储的是`文件名->inode`的映射关系。
+
+In an ext4 filesystem, a directory is more or less a flat file that `maps an arbitrary byte string (usually ASCII) to an inode number` on the filesystem. There can be many directory entries across the filesystem that reference the same inode number–these are known as `hard links`, and that is why hard links cannot reference files on other filesystems. As such, directory entries are found by reading the data block(s) associated with a directory file for the particular directory entry that is desired.
+
+#### Linear (Classic) Directories
+
+线性模式：lkv格式，效率较低。
+
+By default, each directory lists its entries in an “almost-linear” array. I write “almost” because it’s not a linear array in the memory sense because directory entries are not split across filesystem blocks. Therefore, it is more accurate to say that a `directory is a series of data blocks and that each block contains a linear array of directory entries`. The end of each per-block array is signified by reaching the end of the block; the last entry in the block has a record length that takes it all the way to the end of the block. The end of the entire directory is of course signified by reaching the end of the file. `Unused directory entries are signified by inode = 0`. By default the filesystem uses `struct ext4_dir_entry_2` for directory entries unless the “filetype” feature flag is not set, in which case it uses `struct ext4_dir_entry`.
+
+```c
+struct ext4_dir_entry {
+	__le32	inode;		/* Inode number */
+	__le16	rec_len;	/* Directory entry length */
+	__le16	name_len;	/* Name length */
+	char	name[255];	/* File name */
+};
+
+#define EXT4_FT_UNKNOWN		0
+#define EXT4_FT_REG_FILE	1
+#define EXT4_FT_DIR			2
+#define EXT4_FT_CHRDEV		3
+#define EXT4_FT_BLKDEV		4
+#define EXT4_FT_FIFO		5
+#define EXT4_FT_SOCK		6
+#define EXT4_FT_SYMLINK		7
+
+struct ext4_dir_entry_2 {
+	__le32	inode;			/* Inode number */
+	__le16	rec_len;		/* Directory entry length */
+	__u8	name_len;		/* Name length */
+	__u8	file_type;		/* See file type macros EXT4_FT_* below */
+	char	name[255];		/* File name */
+};
+```
+
+#### Hash Tree Directories
+
+hash-tree结构：
+
+A linear array of directory entries isn’t great for performance, so a new feature was added to ext3 to provide a faster (but peculiar) `balanced tree keyed off a hash of the directory entry name`. If the `EXT4_INDEX_FL (0x1000) flag` is set in the inode, this directory uses a `hashed btree (htree)` to organize and find directory entries. For backwards read-only compatibility with ext2, this tree is actually hidden inside the directory file, masquerading as “empty” directory data blocks! It was stated previously that the end of the linear directory entry table was signified with an entry pointing to inode 0; this is (ab)used to fool the old linear-scan algorithm into thinking that the rest of the directory block is empty so that it moves on.
+
+`The root of the tree always lives in the first data block of the directory`. By ext2 custom, the ‘.’ and ‘..’ entries must appear at the beginning of this first block, so they are put here as two struct ext4_dir_entry_2s and not stored in the tree. The rest of the root node contains metadata about the tree and finally a `hash->block` map to find nodes that are lower in the htree. If `dx_root.info.indirect_levels` is non-zero then the htree has `two levels`; the data block pointed to by the root node’s map is an interior node, which is indexed by a minor hash. Interior nodes in this tree contains a zeroed out `struct ext4_dir_entry_2` followed by a `minor_hash->block` map to find leafe nodes. Leaf nodes contain a linear array of all `struct ext4_dir_entry_2`; all of these entries (presumably) hash to the same value. If there is an overflow, the entries simply overflow into the next leaf node, and the least-significant bit of the hash (in the interior node map) that gets us to this next leaf node is set.
+
+To traverse the directory as a htree, the code calculates the hash of the desired file name and uses it to find the corresponding block number. If the tree is flat, the block is a linear array of directory entries that can be searched; otherwise, the minor hash of the file name is computed and used against this second block to find the corresponding third block number. That third block number will be a linear array of directory entries.
+
+To traverse the directory as a linear array (such as the old code does), the code simply reads every data block in the directory. The blocks used for the htree will appear to have no entries (aside from ‘.’ and ‘..’) and so only the leaf nodes will appear to have any interesting content.
+
+```c
+struct fake_dirent
+{
+	__le32 inode;
+	__le16 rec_len;
+	u8 name_len;
+	u8 file_type;
+};
+
+struct dx_entry
+{
+	__le32 hash;
+	__le32 block;
+};
+
+struct dx_root
+{
+	struct fake_dirent dot;
+	char dot_name[4];
+	struct fake_dirent dotdot;
+	char dotdot_name[4];
+	struct dx_root_info
+	{
+		__le32 reserved_zero;
+		u8 hash_version;
+		u8 info_length; /* 8 */
+		u8 indirect_levels;
+		u8 unused_flags;
+	} info;
+	struct dx_entry	entries[];
+};
+```
+
+---
 
 # Code
 
@@ -282,6 +961,7 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
             sbi->s_inode_size = le16_to_cpu(es->s_inode_size);
 		    sbi->s_first_ino = le32_to_cpu(es->s_first_ino);
 
+			// 更新blocksize
             if (sb->s_blocksize != blocksize) {
                 sb_set_blocksize(sb, blocksize);
             }
@@ -321,7 +1001,7 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
             // 所有group_desc占据的block数量
             db_count = sbi->s_groups_count / EXT4_DESC_PER_BLOCK(sb);
             sbi->s_group_desc = kvmalloc_array(db_count, sizeof(struct buffer_head *), GFP_KERNEL);
-            /* Pre-read the descriptors into the buffer cache */
+            /* 预读所有的group_desc */
             for (i = 0; i < db_count; i++) {
                 block = descriptor_loc(sb, logical_sb_block, i);
                 sbi->s_group_desc[i] = ext4_sb_breadahead_unmovable(sb, block);
@@ -336,6 +1016,20 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
 
             // 先加载journal
             ext4_load_journal(sb, es, parsed_opts.journal_devnum);
+			{
+				unsigned int journal_inum = le32_to_cpu(es->s_journal_inum);
+				dev_t journal_dev = new_decode_dev(journal_devnum);
+				journal_t *journal;
+				if (journal_inum) {
+					// journal在inode=8的隐藏文件
+					journal = ext4_get_journal(sb, journal_inum);
+				} else {
+					// journal在独立的块设备
+					journal = ext4_get_dev_journal(sb, journal_dev);
+				}
+
+				jbd2_journal_load(journal);
+			}
 
             // 加载root所在inode
             root = ext4_iget(sb, EXT4_ROOT_INO, EXT4_IGET_SPECIAL);
@@ -358,7 +1052,7 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
                     if (S_ISREG(inode->i_mode)) {
                         inode->i_op = &ext4_file_inode_operations;
                         inode->i_fop = &ext4_file_operations;
-                        ext4_set_aops(inode);
+                        inode->i_mapping->a_ops = &ext4_aops;
                     } else if (S_ISDIR(inode->i_mode)) {
                         inode->i_op = &ext4_dir_inode_operations;
                         inode->i_fop = &ext4_dir_operations;
@@ -368,7 +1062,7 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
                             inode->i_op = &ext4_fast_symlink_inode_operations;
                         } else {
                             inode->i_op = &ext4_symlink_inode_operations;
-                            ext4_set_aops(inode);
+                            inode->i_mapping->a_ops = &ext4_aops;
                         }
                     } else if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode) ||
                                S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {
@@ -377,6 +1071,16 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
                 }
             }
             sb->s_root = d_make_root(root);
+
+			// 更新super_block所在的page_cache
+			ext4_setup_super(sb, es, sb_rdonly(sb));
+			{
+				ext4_commit_super(sb);
+				{
+					ext4_update_super(sb);
+					mark_buffer_dirty(sbh);
+				}
+			}
         }
     }
 }
