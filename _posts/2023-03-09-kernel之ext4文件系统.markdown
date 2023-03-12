@@ -755,6 +755,8 @@ Notice also that a file using this mapping scheme cannot be placed higher than 2
 
 ### Extent Tree
 
+![extent-htree](/assets/images/2023-03-09/extent-htree.png)
+
 `In ext4, the file to logical block map has been replaced with an extent tree`. Under the old scheme, allocating a contiguous run of 1,000 blocks requires an indirect block to map all 1,000 entries; with extents, the mapping is reduced to a single `struct ext4_extent` with ee_len = 1000. If flex_bg is enabled, it is possible to allocate very large files with a single extent, at a considerable reduction in metadata block use, and some improvement in disk efficiency. The inode must have the `extents flag (0x80000) flag` set for this feature to be in use.
 
 `Extents are arranged as a tree`. Each node of the tree begins with a `struct ext4_extent_header`. If the node is an `interior node (eh.eh_depth > 0)`, the header is followed by `eh.eh_entries` instances of `struct ext4_extent_idx`; each of these index entries points to a block containing more nodes in the extent tree. If the node is a `leaf node (eh.eh_depth == 0)`, then the header is followed by `eh.eh_entries` instances of `struct ext4_extent`; these instances point to the file’s data blocks. `The root node of the extent tree is stored in inode.i_block`, which allows for the first four extents to be recorded without the use of extra metadata blocks.
@@ -829,6 +831,8 @@ struct ext4_dir_entry_2 {
 
 hash-tree结构：
 
+![dir-htree](/assets/images/2023-03-09/dir-htree.png)
+
 A linear array of directory entries isn’t great for performance, so a new feature was added to ext3 to provide a faster (but peculiar) `balanced tree keyed off a hash of the directory entry name`. If the `EXT4_INDEX_FL (0x1000) flag` is set in the inode, this directory uses a `hashed btree (htree)` to organize and find directory entries. For backwards read-only compatibility with ext2, this tree is actually hidden inside the directory file, masquerading as “empty” directory data blocks! It was stated previously that the end of the linear directory entry table was signified with an entry pointing to inode 0; this is (ab)used to fool the old linear-scan algorithm into thinking that the rest of the directory block is empty so that it moves on.
 
 `The root of the tree always lives in the first data block of the directory`. By ext2 custom, the ‘.’ and ‘..’ entries must appear at the beginning of this first block, so they are put here as two struct ext4_dir_entry_2s and not stored in the tree. The rest of the root node contains metadata about the tree and finally a `hash->block` map to find nodes that are lower in the htree. If `dx_root.info.indirect_levels` is non-zero then the htree has `two levels`; the data block pointed to by the root node’s map is an interior node, which is indexed by a minor hash. Interior nodes in this tree contains a zeroed out `struct ext4_dir_entry_2` followed by a `minor_hash->block` map to find leafe nodes. Leaf nodes contain a linear array of all `struct ext4_dir_entry_2`; all of these entries (presumably) hash to the same value. If there is an overflow, the entries simply overflow into the next leaf node, and the least-significant bit of the hash (in the interior node map) that gets us to this next leaf node is set.
@@ -866,6 +870,12 @@ struct dx_root
 		u8 indirect_levels;
 		u8 unused_flags;
 	} info;
+	struct dx_entry	entries[];
+};
+
+struct dx_node
+{
+	struct fake_dirent fake;
 	struct dx_entry	entries[];
 };
 ```
@@ -1086,3 +1096,392 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
 }
 
 ```
+
+## inode
+
+### 创建inode
+
+```c
+struct inode *__ext4_new_inode(struct user_namespace *mnt_userns,
+			       handle_t *handle, struct inode *dir,
+			       umode_t mode, const struct qstr *qstr,
+			       __u32 goal, uid_t *owner, __u32 i_flags,
+			       int handle_type, unsigned int line_no,
+			       int nblocks)
+{
+	// 在内存中创建inode
+	struct inode *inode = new_inode(sb);
+
+	// 先确定在磁盘上的group
+	if (S_ISDIR(mode))
+		// dir分配策略: 查找文件夹少空闲inode多的group
+		ret2 = find_group_orlov(sb, dir, &group, mode, qstr);
+	else
+		// file分配策略: 跟parent放到同一个flex group
+		ret2 = find_group_other(sb, dir, &group, mode);
+
+	// 加载inode-bitmap
+	struct buffer_head *inode_bitmap_bh = ext4_read_inode_bitmap(sb, group);
+	// 从bitmap查找空闲的inode
+	find_inode_bit(sb, group, inode_bitmap_bh, &ino);
+}
+```
+
+### 查找inode
+
+```c
+struct inode *__ext4_iget(struct super_block *sb, unsigned long ino,
+			  ext4_iget_flags flags, const char *function,
+			  unsigned int line)
+{
+	// 查找已加载的inode，不存在时使用sb->s_op->alloc_inode(sb)创建
+	struct inode *inode = iget_locked(sb, ino);
+	// inode的内存表示
+	struct ext4_inode_info *ei = EXT4_I(inode);
+
+	// 加载inode-table中此inode所在的block
+	struct ext4_iloc iloc;
+	__ext4_get_inode_loc_noinmem(inode, &iloc);
+	// 解析磁盘上的inode
+	struct ext4_inode *raw_inode = ext4_raw_inode(&iloc);
+
+	// 使用raw_inode初始化inode和ei
+	inode->i_mode = le16_to_cpu(raw_inode->i_mode);
+	i_uid = (uid_t)le16_to_cpu(raw_inode->i_uid_low);
+	i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
+	for (block = 0; block < EXT4_N_BLOCKS; block++)
+		ei->i_data[block] = raw_inode->i_block[block];
+
+	// 设置ops
+	if (S_ISREG(inode->i_mode)) {
+		inode->i_op = &ext4_file_inode_operations;
+		inode->i_fop = &ext4_file_operations;
+		inode->i_mapping->a_ops = &ext4_aops;
+	} else if (S_ISDIR(inode->i_mode)) {
+		inode->i_op = &ext4_dir_inode_operations;
+		inode->i_fop = &ext4_dir_operations;
+	} else if (S_ISLNK(inode->i_mode)) {
+		inode->i_op = &ext4_symlink_inode_operations;
+		inode->i_mapping->a_ops = &ext4_aops;
+	}
+}
+```
+
+## dir inode_ops
+
+```c
+const struct inode_operations ext4_dir_inode_operations = {
+	.create		= ext4_create,
+	.lookup		= ext4_lookup,
+	.link		= ext4_link,
+	.unlink		= ext4_unlink,
+	.symlink	= ext4_symlink,
+	.mkdir		= ext4_mkdir,
+	.rmdir		= ext4_rmdir,
+	.mknod		= ext4_mknod,
+	.tmpfile	= ext4_tmpfile,
+	.rename		= ext4_rename2,
+	.setattr	= ext4_setattr,
+	.getattr	= ext4_getattr,
+	.listxattr	= ext4_listxattr,
+	.get_acl	= ext4_get_acl,
+	.set_acl	= ext4_set_acl,
+	.fiemap         = ext4_fiemap,
+	.fileattr_get	= ext4_fileattr_get,
+	.fileattr_set	= ext4_fileattr_set,
+};
+```
+
+### 创建dir
+
+```c
+static int ext4_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
+		      struct dentry *dentry, umode_t mode)
+{
+	// 分配inode
+	struct inode *inode = __ext4_new_inode(mnt_userns, dir, S_IFDIR | mode,
+					    &dentry->d_name, ...);
+	
+	inode->i_op = &ext4_dir_inode_operations;
+	inode->i_fop = &ext4_dir_operations;
+	// 初始化存储结构: inline/新增数据块
+	ext4_init_new_dir(handle, dir, inode);
+
+	ext4_mark_inode_dirty(handle, inode);
+
+	// 写入parent
+	ext4_add_entry(handle, dentry, inode);
+	{
+		if (ext4_has_inline_data(dir)) {
+			ext4_try_add_inline_entry(handle, &fname, dir, inode);
+		} else if (is_dx(dir)) {
+			// hash-tree结构: 大概是高度最多4层没有sibling指针的b+tree
+			ext4_dx_add_entry(handle, &fname, dir, inode);
+			{
+				// 计算从root开始的路径
+				struct dx_frame *frame = dx_probe(fname, dir, NULL, frames);
+				// 先尝试插入叶子节点
+				err = add_dirent_to_buf(handle, fname, dir, inode, NULL, bh);
+				if (err != -ENOSPC) {
+					return err;
+				}
+				// 如果叶子节点满了，考虑是否增加tree的高度
+				if (dx_get_count(entries) == dx_get_limit(entries)) {
+					int add_level = 1;
+					// 如果每一层都满了，应该增加tree的高度
+					while (frame > frames) {
+						if (dx_get_count((frame - 1)->entries) < dx_get_limit((frame - 1)->entries)) {
+							add_level = 0;
+							break;
+						}
+						frame--;
+					}
+
+					// 添加新的index-block
+					bh2 = ext4_append(handle, dir, &newblock);
+					node2 = (struct dx_node *)(bh2->b_data);
+					entries2 = node2->entries;
+
+					if (!add_level) {
+						// 当前frame已满，复制一半到新增的index-block
+						memcpy((char *) entries2, (char *) (entries + icount1), icount2 * sizeof(struct dx_entry));
+						dx_set_count(entries, icount1);
+						dx_set_count(entries2, icount2);
+
+						// 新增的索引插入未满的parent
+						dx_insert_block((frame - 1), hash2, newblock);
+					} else {
+						struct dx_root *dxroot;
+						// 复制root的现有entry到新增的block
+						memcpy((char *) entries2, (char *) entries, icount * sizeof(struct dx_entry));
+
+						// root的第一个entry指向新增的block
+						dx_set_block(entries + 0, newblock);
+						dxroot = (struct dx_root *)frames[0].bh->b_data;
+						// root的level+1
+						dxroot->info.indirect_levels += 1;
+						// restart=true说明htree发生变化，重新处理
+						restart = 1;
+					}
+				}
+				// 分隔已满的叶子节点，返回插入点
+				struct ext4_dir_entry_2 *de = do_split(handle, dir, &bh, frame, &fname->hinfo);
+				// 插入数据
+				add_dirent_to_buf(handle, fname, dir, inode, de, bh);
+			}
+		} else {
+			// 数据结构大概是ext4_dir_entry_2数组
+			blocks = dir->i_size >> sb->s_blocksize_bits;
+			for (block = 0; block < blocks; block++) {
+				ext4_read_dirblock(dir, block, DIRENT);
+				// 找到一个空闲的位置插入
+				add_dirent_to_buf(handle, &fname, dir, inode, NULL, bh);
+			}
+		}
+	}
+
+	// 实例化dentry
+	d_instantiate_new(dentry, inode);
+	if (IS_DIRSYNC(dir))
+		// sync
+		ext4_handle_sync(handle);
+}
+```
+
+### 查找文件
+
+```c
+static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
+{
+	struct ext4_dir_entry_2 *de;
+	// 读取dentry所在的block到page_cache
+	struct buffer_head *bh = ext4_lookup_entry(dir, dentry, &de);
+	{
+		// inline-data直接遍历inode->i_block构成的ext4_dir_entry_2数组
+		if (ext4_has_inline_data(dir)) {
+			ext4_find_inline_entry(dir, fname, res_dir, &has_inline_data);
+		} else if (is_dx(dir)) {
+			// 搜索htree
+			ext4_dx_find_entry(dir, fname, res_dir);
+			{
+				// 计算从root开始的路径
+				struct dx_frame *frame = dx_probe(fname, dir, NULL, frames);
+				do {
+					// 搜索叶子节点的ext4_dir_entry_2数组结构
+					retval = search_dirblock(bh, dir, fname, block << EXT4_BLOCK_SIZE_BITS(sb), res_dir);
+					if (retval == 1) {
+						return success;
+					}
+					// 判断是否继续
+					retval = ext4_htree_next_block(dir, fname->hinfo.hash, frame, frames, NULL);
+					{
+						// 下一个数据块的hash值
+						bhash = dx_get_hash(++(p->at));
+						// hash发生变化停止搜索
+						if ((bhash & ~1) != hash)
+							return 0;
+					}
+				} while (retval == 1)
+			}
+		} else {
+			// 每次预读最多8个block
+			ext4_bread_batch(dir, block, ra_max, false /* wait */, bh_use);
+			// 搜索每个block的ext4_dir_entry_2数组结构
+			search_dirblock(bh, dir, fname, block << EXT4_BLOCK_SIZE_BITS(sb), res_dir);
+		}
+	}
+
+	// 根据dentry的ino加载磁盘的inode结构
+	__u32 ino = le32_to_cpu(de->inode);
+	struct inode *inode = ext4_iget(dir->i_sb, ino, EXT4_IGET_NORMAL);
+	// 使用inode初始化dentry
+	return d_splice_alias(inode, dentry);
+}
+```
+
+
+## file inode_ops
+
+```c
+const struct inode_operations ext4_file_inode_operations = {
+	.setattr	= ext4_setattr,
+	.getattr	= ext4_file_getattr,
+	.listxattr	= ext4_listxattr,
+	.get_acl	= ext4_get_acl,
+	.set_acl	= ext4_set_acl,
+	.fiemap		= ext4_fiemap,
+	.fileattr_get	= ext4_fileattr_get,
+	.fileattr_set	= ext4_fileattr_set,
+};
+```
+
+## symbol-link inode_ops
+
+```c
+const struct inode_operations ext4_symlink_inode_operations = {
+	.get_link	= page_get_link,
+	.setattr	= ext4_setattr,
+	.getattr	= ext4_getattr,
+	.listxattr	= ext4_listxattr,
+};
+```
+
+## address_space_operations
+
+```c
+static const struct address_space_operations ext4_aops = {
+	.readpage			= ext4_readpage,
+	.readahead			= ext4_readahead,
+	.writepage			= ext4_writepage,
+	.writepages			= ext4_writepages,
+	.write_begin		= ext4_write_begin,
+	.write_end			= ext4_write_end,
+	.set_page_dirty		= ext4_set_page_dirty,
+	.bmap				= ext4_bmap,
+	.invalidatepage		= ext4_invalidatepage,
+	.releasepage		= ext4_releasepage,
+	.direct_IO			= noop_direct_IO,
+	.migratepage		= buffer_migrate_page,
+	.is_partially_uptodate  = block_is_partially_uptodate,
+	.error_remove_page	= generic_error_remove_page,
+	.swap_activate		= ext4_iomap_swap_activate,
+};
+```
+
+### readpage
+
+```c
+static int ext4_readpage(struct file *file, struct page *page)
+{
+	ext4_mpage_readpages(inode, NULL, page);
+	{
+		// page->index转block_in_file
+		block_in_file = next_block = (sector_t)page->index << (PAGE_SHIFT - blkbits);
+		last_block = block_in_file + nr_pages * blocks_per_page;
+
+		struct ext4_map_blocks map;
+		map.m_lblk = block_in_file;
+		map.m_len = last_block - block_in_file;
+
+		// 逻辑块转物理块
+		ext4_map_blocks(NULL, inode, &map, 0);
+		{
+			if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)) {
+				// 数据块是extent格式
+				retval = ext4_ext_map_blocks(handle, inode, map, 0);
+				{
+					// 从root开始搜索路径
+					struct ext4_ext_path *path = ext4_find_extent(inode, map->m_lblk, NULL, 0);
+					ex = path[depth].p_ext;
+					if (ex) {
+						// 搜索到的逻辑块号及其对应的物理块号和块数量
+						ext4_lblk_t ee_block = le32_to_cpu(ex->ee_block);
+						ext4_fsblk_t ee_start = ext4_ext_pblock(ex);
+						unsigned short ee_len = ext4_ext_get_actual_len(ex);
+						if (in_range(map->m_lblk, ee_block, ee_len)) {
+							// 找到了对应的物理块
+							newblock = map->m_lblk - ee_block + ee_start;
+						}
+					}
+
+					// 分配新的数据块
+					newex.ee_block = cpu_to_le32(map->m_lblk);
+					cluster_offset = EXT4_LBLK_COFF(sbi, map->m_lblk);
+					get_implied_cluster_alloc(inode->i_sb, map, ex, path);
+					// 插入extent索引结构
+					ext4_ext_insert_extent(handle, inode, &path, &newex, flags);
+				}
+			} else {
+				// 数据块是传统的12+1+1+1三级间接寻址
+				retval = ext4_ind_map_blocks(handle, inode, map, 0);
+			}
+		}
+
+		// 转换的过程有3种
+		// 1. 已经加载到内存: map.m_flags & EXT4_MAP_MAPPED
+		// 2. 物理块不存在: 文件存在漏洞，page内容全部置零
+		// 3. 物理块存在但是还未加载：提交bio请求加载数据
+	}
+}
+```
+
+## dir file_ops
+
+```c
+const struct file_operations ext4_dir_operations = {
+	.llseek		= ext4_dir_llseek,
+	.read		= generic_read_dir,
+	.iterate_shared	= ext4_readdir,
+	.unlocked_ioctl = ext4_ioctl,
+	.fsync		= ext4_sync_file,
+	.release	= ext4_release_dir,
+};
+```
+
+## file file_ops
+
+```c
+const struct file_operations ext4_file_operations = {
+	.llseek		= ext4_llseek,
+	.read_iter	= ext4_file_read_iter,
+	.write_iter	= ext4_file_write_iter,
+	.iopoll		= iomap_dio_iopoll,
+	.unlocked_ioctl = ext4_ioctl,
+	.mmap		= ext4_file_mmap,
+	.mmap_supported_flags = MAP_SYNC,
+	.open		= ext4_file_open,
+	.release	= ext4_release_file,
+	.fsync		= ext4_sync_file,
+	.get_unmapped_area = thp_get_unmapped_area,
+	.splice_read	= generic_file_splice_read,
+	.splice_write	= iter_file_splice_write,
+	.fallocate	= ext4_fallocate,
+};
+```
+
+`read/write`的实现借助`readpage/writepage`
+
+
+
+
+
