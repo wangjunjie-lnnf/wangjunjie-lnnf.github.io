@@ -960,20 +960,546 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	if (tcp_filter(sk, skb))
 		goto discard_and_relse;
 
-    // tcp状态机
+    // tcp状态机，此处只展示连接建立之后的流程
     tcp_v4_do_rcv(sk, skb);
+    {
+        if (sk->sk_state == TCP_ESTABLISHED) {
+            tcp_rcv_established(sk, skb);
+            {
+                // 校验时间戳和seq等
+                tcp_validate_incoming(sk, skb, th, 1);
+
+                // 处理收到的ack
+                tcp_ack(sk, skb, FLAG_SLOWPATH | FLAG_UPDATE_TS_RECENT);
+                {
+                    // 更新滑动窗口
+                    tcp_ack_update_window(sk, skb, ack, ack_seq);
+                    // 清理retransmit queue
+                    tcp_clean_rtx_queue(sk, skb, prior_fack, prior_snd_una, &sack_state, flag & FLAG_ECE);
+                    // 拥堵控制
+                    tcp_cong_control(sk, ack, delivered, flag, sack_state.rate);
+                }
+
+                // 更新rtt
+                tcp_rcv_rtt_measure_ts(sk, skb);
+
+                tcp_data_queue(sk, skb);
+                {
+                    // 插入sk->sk_receive_queue
+                    tcp_queue_rcv(sk, skb, &fragstolen);
+                }
+            }
+        }
+    }
 }
 ```
 
+# 状态机
+
+The rules that determine what TCP does are determined by what state TCP is in. The current state is changed based on various stimuli, such as segments that are transmitted or received, timers that expire, application reads or writes, or information from other layers.
+
+tcp状态机
+![tcp-state-1](/assets/images/2023-03-12/tcp-state-1.png)
+
+连接建立和断开对应的状态
+![tcp-state-2](/assets/images/2023-03-12/tcp-state-2.png)
+
+When initialized, TCP starts in the `CLOSED` state. Usually an immediate transition takes it to either the `SYN_SENT` or `LISTEN` state, depending on whether the TCP is asked to perform an active or passive open, respectively.
+
+`TIME_WAIT`是一个非常特殊的状态
+
+The `TIME_WAIT` state is also called the `2MSL wait state`. It is a state in which TCP waits for a time equal to twice the `Maximum Segment Lifetime (MSL)`, sometimes called timed wait. Every implementation must choose a value for the MSL. It is the maximum amount of time any segment can exist in the network before being discarded. [RFC0793] specifies the `MSL` as `2 minutes`. Common implementation values, however, are `30s`, `1 minute`, or `2 minutes`. In most cases, the value can be modified. On Linux, the value `net.ipv4.tcp_fin_timeout`(`default 60`) holds the 2MSL wait timeout value (`in seconds`).
+
+Given the MSL value for an implementation, the rule is: When TCP performs an active close and sends the final ACK, that connection must stay in the `TIME_ WAIT` state for twice the MSL. This lets TCP resend the final ACK in case it is lost. TCP will always retransmit FINs until it receives a final ACK.
+
+Another effect of this 2MSL wait state is that while the TCP implementation waits, the endpoints defining that connection (`client IP address, client port number, server IP address, and server port number`) cannot be reused. That connection can be reused only when the 2MSL wait is over. Most implementations and APIs provide a way to bypass this restriction. With the Berkeley sockets API, the `SO_REUSEADDR` socket option enables the bypass operation. It lets the caller assign itself a local port number even if that port number is part of some connection in the 2MSL wait state. 
+
+`SO_REUSEADDR`可以绕过`TIME_WAIT`的限制。
+
+For interactive applications, it is normally the client that does the active close and enters the `TIME_WAIT` state. The server usually does the passive close and does not go through the TIME_WAIT state. The implication is that if we terminate a client, and restart the same client immediately, that new client cannot reuse the same local port number. This is not ordinarily a problem, because `clients normally use ephemeral ports assigned by the operating system` and do not care what the assigned port number is.
+
+`TIME_WAIT`对client的影响很小，因为client每次都使用随机端口。
+
+With servers, however, the situation is different. They almost always use well-known ports. If we terminate a server process that has a connection established and immediately try to restart it, the server cannot assign its assigned port number to its endpoint (it gets an “`Address already in use`” binding error), because that port number is part of a connection that is in a 2MSL wait state. It may take from 1 to 4 minutes for the server to be able to restart, depending on the local system’s value for the MSL.
+
+`TIME_WAIT`状态下重用端口会提示`Address already in use`。
+
 # socket
+
+## 注册文件系统
+
+```c
+static struct vfsmount *sock_mnt;
+
+static struct file_system_type sock_fs_type = {
+	.name =		"sockfs",
+	.init_fs_context = sockfs_init_fs_context,
+	.kill_sb =	kill_anon_super,
+};
+
+static int __init sock_init(void)
+{
+    register_filesystem(&sock_fs_type);
+    // 直接挂载
+    sock_mnt = kern_mount(&sock_fs_type);
+}
+
+static const struct super_operations sockfs_ops = {
+	.alloc_inode	= sock_alloc_inode,
+	.free_inode	    = sock_free_inode,
+	.statfs		    = simple_statfs,
+};
+
+// 初始化super_block
+static int sockfs_init_fs_context(struct fs_context *fc)
+{
+	struct pseudo_fs_context *ctx = init_pseudo(fc, SOCKFS_MAGIC);s
+	ctx->ops = &sockfs_ops;
+	ctx->dops = &sockfs_dentry_operations;
+	ctx->xattr = sockfs_xattr_handlers;
+	return 0;
+}
+
+// 创建inode
+static struct inode *sock_alloc_inode(struct super_block *sb)
+{
+	struct socket_alloc *ei = kmem_cache_alloc(sock_inode_cachep, GFP_KERNEL);
+	init_waitqueue_head(&ei->socket.wq.wait);
+	
+	ei->socket.state = SS_UNCONNECTED;
+	ei->socket.flags = 0;
+
+    // inode嵌入在socket_alloc中
+	return &ei->vfs_inode;
+}
+
+```
+
+## 注册协议族
+
+```c
+static struct net_proto_family *net_families[46];
+
+static const struct net_proto_family inet_family_ops = {
+	.family = PF_INET,
+	.create = inet_create,
+	.owner	= THIS_MODULE,
+};
+
+sock_register(&inet_family_ops);
+```
+
+## 注册协议
+
+```c
+static struct list_head inetsw[11];
+
+struct proto tcp_prot = {
+	.name			= "TCP",
+	.close			= tcp_close,
+	.pre_connect	= tcp_v4_pre_connect,
+	.connect		= tcp_v4_connect,
+	.disconnect		= tcp_disconnect,
+	.accept			= inet_csk_accept,
+	.ioctl			= tcp_ioctl,
+	.init			= tcp_v4_init_sock,
+	.destroy		= tcp_v4_destroy_sock,
+	.shutdown		= tcp_shutdown,
+	.setsockopt		= tcp_setsockopt,
+	.getsockopt		= tcp_getsockopt,
+	.keepalive		= tcp_set_keepalive,
+	.recvmsg		= tcp_recvmsg,
+	.sendmsg		= tcp_sendmsg,
+	.sendpage		= tcp_sendpage,
+	.backlog_rcv	= tcp_v4_do_rcv,
+	.release_cb		= tcp_release_cb,
+	.hash			= inet_hash,
+	.unhash			= inet_unhash,
+	.get_port		= inet_csk_get_port
+};
+
+const struct proto_ops inet_dgram_ops = {
+	.family		   = PF_INET,
+	.release	   = inet_release,
+	.bind		   = inet_bind,
+	.connect	   = inet_dgram_connect,
+	.socketpair	   = sock_no_socketpair,
+	.accept		   = sock_no_accept,
+	.getname	   = inet_getname,
+	.poll		   = udp_poll,
+	.ioctl		   = inet_ioctl,
+	.gettstamp	   = sock_gettstamp,
+	.listen		   = sock_no_listen,
+	.shutdown	   = inet_shutdown,
+	.setsockopt	   = sock_common_setsockopt,
+	.getsockopt	   = sock_common_getsockopt,
+	.sendmsg	   = inet_sendmsg,
+	.read_sock	   = udp_read_sock,
+	.recvmsg	   = inet_recvmsg,
+	.mmap		   = sock_no_mmap,
+	.sendpage	   = inet_sendpage,
+	.set_peek_off	   = sk_set_peek_off,
+};
+
+static struct inet_protosw inetsw_array[] =
+{
+	{
+		.type =       SOCK_STREAM,
+		.protocol =   IPPROTO_TCP,
+		.prot =       &tcp_prot,
+		.ops =        &inet_stream_ops,
+		.flags =      INET_PROTOSW_PERMANENT | INET_PROTOSW_ICSK,
+	},
+
+	{
+		.type =       SOCK_DGRAM,
+		.protocol =   IPPROTO_UDP,
+		.prot =       &udp_prot,
+		.ops =        &inet_dgram_ops,
+		.flags =      INET_PROTOSW_PERMANENT,
+    },
+
+    {
+		.type =       SOCK_DGRAM,
+		.protocol =   IPPROTO_ICMP,
+		.prot =       &ping_prot,
+		.ops =        &inet_sockraw_ops,
+		.flags =      INET_PROTOSW_REUSE,
+	},
+
+	{
+		.type =       SOCK_RAW,
+		.protocol =   IPPROTO_IP,	/* wild card */
+		.prot =       &raw_prot,
+		.ops =        &inet_sockraw_ops,
+		.flags =      INET_PROTOSW_REUSE,
+    }
+};
+
+for (q = inetsw_array; q < &inetsw_array[4]; ++q)
+	inet_register_protosw(q);
+```
+
+## 系统调用
+
+### socket
+
+```c
+static const struct file_operations socket_file_ops = {
+	.read_iter =	sock_read_iter,
+	.write_iter =	sock_write_iter,
+	.poll =		    sock_poll
+};
+
+int __sys_socket(int family, int type, int protocol)
+{
+    sock_create(family, type, protocol, &sock);
+    {
+        struct socket *sock = sock_alloc();
+        sock->type = type;
+
+        struct net_proto_family *pf = net_families[family];
+        // 使用指定的协议族初始化socket: inet_create
+        pf->create(net, sock, protocol, kern);
+        {
+            // 查找协议族下的协议
+            struct inet_protosw *answer = inetsw[sock->type];
+            sock->ops = answer->ops;
+
+            struct sock *sk = sk_alloc(net, PF_INET, GFP_KERNEL, answer->prot, kern);
+            {
+                sk = sk_prot_alloc(prot, priority | __GFP_ZERO, family);
+                sk->sk_family = family;
+                sk->sk_prot = sk->sk_prot_creator = prot;
+            }
+
+            sock_init_data(sock, sk);
+            {
+                // 默认可以放下256个skb
+                sk->sk_rcvbuf =	sysctl_rmem_default;
+	            sk->sk_sndbuf =	sysctl_wmem_default;
+                sk->sk_state = TCP_CLOSE;
+            }
+        }
+    }
+
+    sock_map_fd(sock, flags & (O_CLOEXEC | O_NONBLOCK));
+    {
+        struct file *file = sock_alloc_file(sock, flags, NULL);
+        {
+            file = alloc_file_pseudo(SOCK_INODE(sock), ..., &socket_file_ops);
+
+            sock->file = file;
+	        file->private_data = sock;
+        }
+    }
+}
+```
+
+### bind
+
+```c
+int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
+{
+    struct socket *sock = sockfd_lookup_light(fd, ...);
+    sock->ops->bind(sock, (struct sockaddr *)&address, addrlen);
+    {
+        struct net *net = sock_net(sock->sk);
+        inet->inet_saddr = addr->sin_addr.s_addr;
+
+        // 检查端口是否可用: inet_csk_get_port
+        sk->sk_prot->get_port(sk, snum);
+        {
+            // 查找hash表
+            head = &hinfo->bhash[inet_bhashfn(net, port, hinfo->bhash_size)];
+            inet_bind_bucket_for_each(tb, &head->chain)
+		        if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev && tb->port == port) {
+                    // 端口
+                    if (sk->sk_reuse == SK_FORCE_REUSE) {
+                        return success;
+                    } 
+                    // 检查是否能绑定正在使用的端口
+                    if (inet_csk_bind_conflict(sk, tb, true, true)) {
+                        return fail;
+                    }
+                }
+            // 创建记录插入hash表
+            inet_bind_bucket_create(hinfo->bind_bucket_cachep, net, head, port, l3mdev);
+        }
+
+        inet->inet_sport = htons(inet->inet_num);
+        inet->inet_daddr = 0;
+        inet->inet_dport = 0;
+    }
+}
+```
+
+### listen
+
+```c
+int __sys_listen(int fd, int backlog)
+{
+    struct socket *sock = sockfd_lookup_light(fd, ...);
+
+    // inet_listen
+    sock->ops->listen(sock, backlog);
+    {
+        inet_csk_listen_start(sk, backlog);
+        {
+            struct inet_connection_sock *icsk = inet_csk(sk);
+	        struct inet_sock *inet = inet_sk(sk);
+            // 创建accept队列
+            reqsk_queue_alloc(&icsk->icsk_accept_queue);
+            // 修改状态
+            inet_sk_state_store(sk, TCP_LISTEN);
+            // 又检查端口
+            sk->sk_prot->get_port(sk, inet->inet_num);
+        }
+    }
+}
+```
+
+### connect
+
+```c
+int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
+{
+    // inet_stream_connect
+    sock->ops->connect(sock, (struct sockaddr *)address, addrlen, ...);
+    {
+        // tcp_v4_connect
+        sk->sk_prot->connect(sk, uaddr, addr_len);
+
+        sock->state = SS_CONNECTING;
+
+        // 阻塞时长
+        timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
+
+        // 3次握手已经进行中
+        if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
+            if (!timeo) {
+                return;
+            } 
+
+            // 等待超时
+            inet_wait_for_connect(sk, timeo, ...);
+            {
+                while ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
+                    release_sock(sk);
+                    timeo = wait_woken(&wait, TASK_INTERRUPTIBLE, timeo);
+                    lock_sock(sk);
+                    // 被signal打断或超时
+                    if (signal_pending(current) || !timeo)
+                        break;
+                }
+            }
+        }
+    }
+}
+```
+
+### accept
+
+```c
+int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
+		  int __user *upeer_addrlen, int flags)
+{
+    struct file *newfile = do_accept(file, file_flags, upeer_sockaddr, upeer_addrlen, flags);
+    {
+        // server socket
+        sock = sock_from_file(file);
+        // child socket
+        newsock = sock_alloc();
+
+        newsock->type = sock->type;
+	    newsock->ops = sock->ops;
+
+        // inet_csk_accept
+        sock->ops->accept(sock, newsock, sock->file->f_flags | file_flags, false);
+        {
+            struct request_sock_queue *queue = &icsk->icsk_accept_queue;
+
+            // 如果连接队列为空，等待直到超时
+            if (reqsk_queue_empty(queue)) {
+		        long timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
+                inet_csk_wait_for_connect(sk, timeo);
+            }
+
+            // 从队列里取出一个
+            struct request_sock *req = reqsk_queue_remove(queue, sk);
+	        newsock = req->sk;
+        }
+    }
+
+    fd_install(newfd, newfile);
+    return newfd;
+}
+```
+
+### shutdown
+
+```c
+int __sys_shutdown(int fd, int how)
+{
+    struct socket *sock = sockfd_lookup_light(fd, ...);
+    __sys_shutdown_sock(sock, how);
+    {
+        // tcp_shutdown
+        sock->ops->shutdown(sock, how);
+        {
+            if ((1 << sk->sk_state) &
+                (TCPF_ESTABLISHED | TCPF_SYN_SENT |
+                 TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
+                if (tcp_close_state(sk))
+                    tcp_send_fin(sk);
+	}
+        }
+    }
+}
+```
+
+### sendmsg
+
+```c
+long __sys_sendmsg(int fd, struct user_msghdr __user *msg, unsigned int flags, ...)
+{
+    struct socket *sock = sockfd_lookup_light(fd, ...);
+
+    ___sys_sendmsg(sock, msg, &msg_sys, flags, NULL, 0);
+    {
+        // tcp_sendmsg
+        sock->ops->sendmsg(sock, msg_sys);
+        {
+            mss_now = tcp_send_mss(sk, &size_goal, flags);
+
+            // 生成skb，复制数据，最多mss，加入发送队列
+            while (msg_data_left(msg)) {
+                // 生成新的skb
+                skb = sk_stream_alloc_skb(sk, 0, sk->sk_allocation, first_skb);
+                // 插入发送队列
+			    skb_entail(sk, skb);
+                // 复制数据
+                skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
+            }
+
+            // 开始发送
+            tcp_push(sk, flags & ~MSG_MORE, mss_now, TCP_NAGLE_PUSH, size_goal);
+            {
+                __tcp_push_pending_frames(sk, mss_now, nonagle);
+                {
+                    tcp_write_xmit(sk, cur_mss, nonagle, 0, sk_gfp_mask(sk, GFP_ATOMIC));
+                    {
+                        while ((skb = tcp_send_head(sk))) {
+                            // 发送一个skb
+                            tcp_transmit_skb(sk, skb, 1, gfp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### recvmsg
+
+```c
+long __sys_recvmsg(int fd, struct user_msghdr __user *msg, unsigned int flags, ...)
+{
+    struct socket *sock = sockfd_lookup_light(fd, ...);
+
+    // tcp_recvmsg
+    sock->ops->recvmsg(sock, msg_sys, flags);
+    {
+        tcp_recvmsg_locked(sk, msg, len, nonblock, flags, &tss, &cmsg_flags);
+        {
+            // 循环读取接收队列的skb，直到满足用户指定的长度
+            do {
+                skb_queue_walk(&sk->sk_receive_queue, skb) {
+                    offset = *seq - TCP_SKB_CB(skb)->seq;
+                    // 此skb还有未复制的数据
+                    if (offset < skb->len) {
+                        used = skb->len - offset;
+                        if (len < used)
+                            used = len;
+                        
+                        // 复制数据
+                        skb_copy_datagram_msg(skb, offset, msg, used);
+
+                        copied += used;
+                        len -= used;
+                    }
+                }
+            } while (len > 0);
+        }
+    }
+
+}
+```
 
 # 连接建立
 
+```c
+int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+{
+
+}
+```
+
 # 连接断开
 
-# 状态机
+```c
+void tcp_send_fin(struct sock *sk)
+{
+
+}
+```
 
 # 定时器
+
+# 拥堵控制
+
+
 
 
 
