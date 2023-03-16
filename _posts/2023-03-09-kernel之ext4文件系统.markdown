@@ -14,45 +14,45 @@ tags: kernel fs ext4
 
 ```c
 enum bh_state_bits {
-	BH_Uptodate,	    /* Contains valid data */
-	BH_Dirty,	        /* Is dirty */
-	BH_Lock,	        /* Is locked */
-	BH_Req,		        /* Has been submitted for I/O */
+    BH_Uptodate,        /* Contains valid data */
+    BH_Dirty,            /* Is dirty */
+    BH_Lock,            /* Is locked */
+    BH_Req,                /* Has been submitted for I/O */
 
-	BH_Mapped,	        /* Has a disk mapping */
-	BH_New,		        /* Disk mapping was newly created by get_block */
-	BH_Async_Read,	    /* Is under end_buffer_async_read I/O */
-	BH_Async_Write,	    /* Is under end_buffer_async_write I/O */
-	BH_Delay,	        /* Buffer is not yet allocated on disk */
-	BH_Boundary,	    /* Block is followed by a discontiguity */
-	BH_Write_EIO,	    /* I/O error on write */
-	BH_Unwritten,	    /* Buffer is allocated on disk but not written */
-	BH_Quiet,	        /* Buffer Error Prinks to be quiet */
-	BH_Meta,	        /* Buffer contains metadata */
-	BH_Prio,	        /* Buffer should be submitted with REQ_PRIO */
-	BH_Defer_Completion, /* Defer AIO completion to workqueue */
+    BH_Mapped,            /* Has a disk mapping */
+    BH_New,                /* Disk mapping was newly created by get_block */
+    BH_Async_Read,        /* Is under end_buffer_async_read I/O */
+    BH_Async_Write,        /* Is under end_buffer_async_write I/O */
+    BH_Delay,            /* Buffer is not yet allocated on disk */
+    BH_Boundary,        /* Block is followed by a discontiguity */
+    BH_Write_EIO,        /* I/O error on write */
+    BH_Unwritten,        /* Buffer is allocated on disk but not written */
+    BH_Quiet,            /* Buffer Error Prinks to be quiet */
+    BH_Meta,            /* Buffer contains metadata */
+    BH_Prio,            /* Buffer should be submitted with REQ_PRIO */
+    BH_Defer_Completion, /* Defer AIO completion to workqueue */
 
-	BH_PrivateStart,    /* not a state bit, but the first bit available
-			 		     * for private allocation by other entities */
+    BH_PrivateStart,    /* not a state bit, but the first bit available
+                          * for private allocation by other entities */
 };
 
 struct buffer_head {
-	unsigned long b_state;		        /* buffer state bitmap (see above) */
-	struct buffer_head *b_this_page;    /* circular list of page's buffers */
-	struct page *b_page;		        /* the page this bh is mapped to */
+    unsigned long b_state;                /* buffer state bitmap (see above) */
+    struct buffer_head *b_this_page;    /* circular list of page's buffers */
+    struct page *b_page;                /* the page this bh is mapped to */
 
-	sector_t b_blocknr;		            /* start block number */
-	size_t b_size;			            /* size of mapping */
-	char *b_data;			            /* pointer to data within the page */
+    sector_t b_blocknr;                    /* start block number */
+    size_t b_size;                        /* size of mapping */
+    char *b_data;                        /* pointer to data within the page */
 
-	struct block_device *b_bdev;
-	bh_end_io_t *b_end_io;		        /* I/O completion */
- 	void *b_private;		            /* reserved for b_end_io */
-	struct list_head b_assoc_buffers;   /* associated with another mapping */
-	struct address_space *b_assoc_map;	/* mapping this buffer is associated with */
-	atomic_t b_count;		            /* users using this buffer_head */
-	spinlock_t b_uptodate_lock;	        /* Used by the first bh in a page, to
-					 			         * serialise IO completion of other buffers in the page */
+    struct block_device *b_bdev;
+    bh_end_io_t *b_end_io;                /* I/O completion */
+     void *b_private;                    /* reserved for b_end_io */
+    struct list_head b_assoc_buffers;   /* associated with another mapping */
+    struct address_space *b_assoc_map;    /* mapping this buffer is associated with */
+    atomic_t b_count;                    /* users using this buffer_head */
+    spinlock_t b_uptodate_lock;            /* Used by the first bh in a page, to
+                                          * serialise IO completion of other buffers in the page */
 };
 
 // 查找或创建buffer_head
@@ -60,17 +60,17 @@ struct buffer_head *
 __getblk_gfp(struct block_device *bdev, sector_t block, unsigned size, gfp_t gfp)
 {
     // 查找block是否已缓存在page_cache
-	struct buffer_head *bh = __find_get_block(bdev, block, size);
+    struct buffer_head *bh = __find_get_block(bdev, block, size);
     {
         // 查找当前cpu的lru队列
-	    struct buffer_head *bh = lookup_bh_lru(bdev, block, size);
+        struct buffer_head *bh = lookup_bh_lru(bdev, block, size);
         {
             if (bh == NULL) {
                 bh = __find_get_block_slow(bdev, block);
                 {
                     // inode来自bdev文件系统
                     struct inode *bd_inode = bdev->bd_inode;
-	                struct address_space *bd_mapping = bd_inode->i_mapping;
+                    struct address_space *bd_mapping = bd_inode->i_mapping;
                     // block转page：块设备的逻辑视图是一个块数组
                     pgoff_t index = block >> (PAGE_SHIFT - bd_inode->i_blkbits);
                     // 查找稀疏数组xarray
@@ -95,13 +95,13 @@ __getblk_gfp(struct block_device *bdev, sector_t block, unsigned size, gfp_t gfp
 
     if (bh == NULL)
         // 创建buffer_head
-		bh = __getblk_slow(bdev, block, size, gfp);
+        bh = __getblk_slow(bdev, block, size, gfp);
         {
             grow_buffers(bdev, block, size, gfp);
             {
                 // 计算block对应的page
                 int sizebits = PAGE_SHIFT - __ffs(size);
-	            pgoff_t index = block >> sizebits;
+                pgoff_t index = block >> sizebits;
                 return grow_dev_page(bdev, block, index, size, sizebits, gfp);
                 {
                     struct page *page = find_or_create_page(inode->i_mapping, index, gfp_mask);
@@ -113,7 +113,7 @@ __getblk_gfp(struct block_device *bdev, sector_t block, unsigned size, gfp_t gfp
                                 // 查找xarray
                                 XA_STATE(xas, &mapping->i_pages, index);
                                 xas_reset(&xas);
-	                            struct page *page = xas_load(&xas);
+                                struct page *page = xas_load(&xas);
                                 if (! page && (fgp_flags & FGP_CREAT)) {
                                     // 从buddy系统分配page
                                     page = __page_cache_alloc(gfp_mask);
@@ -153,7 +153,7 @@ __getblk_gfp(struct block_device *bdev, sector_t block, unsigned size, gfp_t gfp
             }
         }
     
-	return bh;
+    return bh;
 }
 ```
 
@@ -296,122 +296,122 @@ If the `sparse_super` feature flag is set, redundant copies of the superblock an
 ```c
 
 struct ext4_super_block {
-/*00*/	__le32	s_inodes_count;			/* Inodes count */
-		__le32	s_blocks_count_lo;		/* Blocks count */
-		__le32	s_r_blocks_count_lo;	/* Reserved blocks count */
-		__le32	s_free_blocks_count_lo;	/* Free blocks count */
-/*10*/	__le32	s_free_inodes_count;	/* Free inodes count */
-		__le32	s_first_data_block;		/* First Data Block */
-		__le32	s_log_block_size;		/* Block size */
-		__le32	s_log_cluster_size;		/* Allocation cluster size */
-/*20*/	__le32	s_blocks_per_group;		/* # Blocks per group */
-		__le32	s_clusters_per_group;	/* # Clusters per group */
-		__le32	s_inodes_per_group;		/* # Inodes per group */
-		__le32	s_mtime;				/* Mount time */
-/*30*/	__le32	s_wtime;				/* Write time */
-		__le16	s_mnt_count;			/* Mount count */
-		__le16	s_max_mnt_count;		/* Maximal mount count */
-		__le16	s_magic;				/* Magic signature */
-		__le16	s_state;				/* File system state */
-		__le16	s_errors;				/* Behaviour when detecting errors */
-		__le16	s_minor_rev_level;		/* minor revision level */
-/*40*/	__le32	s_lastcheck;			/* time of last check */
-		__le32	s_checkinterval;		/* max. time between checks */
-		__le32	s_creator_os;			/* OS */
-		__le32	s_rev_level;			/* Revision level */
-/*50*/	__le16	s_def_resuid;			/* Default uid for reserved blocks */
-		__le16	s_def_resgid;			/* Default gid for reserved blocks */
-	/*
-	 * These fields are for EXT4_DYNAMIC_REV superblocks only.
-	 */
-		__le32	s_first_ino;			/* First non-reserved inode */
-		__le16  s_inode_size;			/* size of inode structure */
-		__le16	s_block_group_nr;		/* block group # of this superblock */
-		__le32	s_feature_compat;		/* compatible feature set */
-/*60*/	__le32	s_feature_incompat;		/* incompatible feature set */
-		__le32	s_feature_ro_compat;	/* readonly-compatible feature set */
-/*68*/	__u8	s_uuid[16];				/* 128-bit uuid for volume */
-/*78*/	char	s_volume_name[16];		/* volume name */
-/*88*/	char	s_last_mounted[64] __nonstring;	/* directory where last mounted */
-/*C8*/	__le32	s_algorithm_usage_bitmap; /* For compression */
-	/*
-	 * Performance hints.  Directory preallocation should only
-	 * happen if the EXT4_FEATURE_COMPAT_DIR_PREALLOC flag is on.
-	 */
-		__u8	s_prealloc_blocks;		/* Nr of blocks to try to preallocate*/
-		__u8	s_prealloc_dir_blocks;	/* Nr to preallocate for dirs */
-		__le16	s_reserved_gdt_blocks;	/* Per group desc for online growth */
-	/*
-	 * Journaling support valid if EXT4_FEATURE_COMPAT_HAS_JOURNAL set.
-	 */
-/*D0*/	__u8	s_journal_uuid[16];		/* uuid of journal superblock */
-/*E0*/	__le32	s_journal_inum;			/* inode number of journal file */
-		__le32	s_journal_dev;			/* device number of journal file */
-		__le32	s_last_orphan;			/* start of list of inodes to delete */
-		__le32	s_hash_seed[4];			/* HTREE hash seed */
-		__u8	s_def_hash_version;		/* Default hash version to use */
-		__u8	s_jnl_backup_type;	
-		__le16  s_desc_size;			/* size of group descriptor */
-/*100*/	__le32	s_default_mount_opts;
-		__le32	s_first_meta_bg;		/* First metablock block group */
-		__le32	s_mkfs_time;			/* When the filesystem was created */
-		__le32	s_jnl_blocks[17];		/* Backup of the journal inode */
-	/* 64bit support valid if EXT4_FEATURE_COMPAT_64BIT */
-/*150*/	__le32	s_blocks_count_hi;		/* Blocks count */
-		__le32	s_r_blocks_count_hi;	/* Reserved blocks count */
-		__le32	s_free_blocks_count_hi;	/* Free blocks count */
-		__le16	s_min_extra_isize;		/* All inodes have at least # bytes */
-		__le16	s_want_extra_isize; 	/* New inodes should reserve # bytes */
-		__le32	s_flags;				/* Miscellaneous flags */
-		__le16  s_raid_stride;			/* RAID stride */
-		__le16  s_mmp_update_interval;  /* # seconds to wait in MMP checking */
-		__le64  s_mmp_block;            /* Block for multi-mount protection */
-		__le32  s_raid_stripe_width;    /* blocks on all data disks (N*stride)*/
-		__u8	s_log_groups_per_flex;  /* FLEX_BG group size */
-		__u8	s_checksum_type;		/* metadata checksum algorithm used */
-		__u8	s_encryption_level;		/* versioning level for encryption */
-		__u8	s_reserved_pad;			/* Padding to next 32bits */
-		__le64	s_kbytes_written;		/* nr of lifetime kilobytes written */
-		__le32	s_snapshot_inum;		/* Inode number of active snapshot */
-		__le32	s_snapshot_id;			/* sequential ID of active snapshot */
-		__le64	s_snapshot_r_blocks_count; /* reserved blocks for active snapshot's future use */
-		__le32	s_snapshot_list;		/* inode number of the head of the on-disk snapshot list */
+/*00*/    __le32    s_inodes_count;            /* Inodes count */
+        __le32    s_blocks_count_lo;        /* Blocks count */
+        __le32    s_r_blocks_count_lo;    /* Reserved blocks count */
+        __le32    s_free_blocks_count_lo;    /* Free blocks count */
+/*10*/    __le32    s_free_inodes_count;    /* Free inodes count */
+        __le32    s_first_data_block;        /* First Data Block */
+        __le32    s_log_block_size;        /* Block size */
+        __le32    s_log_cluster_size;        /* Allocation cluster size */
+/*20*/    __le32    s_blocks_per_group;        /* # Blocks per group */
+        __le32    s_clusters_per_group;    /* # Clusters per group */
+        __le32    s_inodes_per_group;        /* # Inodes per group */
+        __le32    s_mtime;                /* Mount time */
+/*30*/    __le32    s_wtime;                /* Write time */
+        __le16    s_mnt_count;            /* Mount count */
+        __le16    s_max_mnt_count;        /* Maximal mount count */
+        __le16    s_magic;                /* Magic signature */
+        __le16    s_state;                /* File system state */
+        __le16    s_errors;                /* Behaviour when detecting errors */
+        __le16    s_minor_rev_level;        /* minor revision level */
+/*40*/    __le32    s_lastcheck;            /* time of last check */
+        __le32    s_checkinterval;        /* max. time between checks */
+        __le32    s_creator_os;            /* OS */
+        __le32    s_rev_level;            /* Revision level */
+/*50*/    __le16    s_def_resuid;            /* Default uid for reserved blocks */
+        __le16    s_def_resgid;            /* Default gid for reserved blocks */
+    /*
+     * These fields are for EXT4_DYNAMIC_REV superblocks only.
+     */
+        __le32    s_first_ino;            /* First non-reserved inode */
+        __le16  s_inode_size;            /* size of inode structure */
+        __le16    s_block_group_nr;        /* block group # of this superblock */
+        __le32    s_feature_compat;        /* compatible feature set */
+/*60*/    __le32    s_feature_incompat;        /* incompatible feature set */
+        __le32    s_feature_ro_compat;    /* readonly-compatible feature set */
+/*68*/    __u8    s_uuid[16];                /* 128-bit uuid for volume */
+/*78*/    char    s_volume_name[16];        /* volume name */
+/*88*/    char    s_last_mounted[64] __nonstring;    /* directory where last mounted */
+/*C8*/    __le32    s_algorithm_usage_bitmap; /* For compression */
+    /*
+     * Performance hints.  Directory preallocation should only
+     * happen if the EXT4_FEATURE_COMPAT_DIR_PREALLOC flag is on.
+     */
+        __u8    s_prealloc_blocks;        /* Nr of blocks to try to preallocate*/
+        __u8    s_prealloc_dir_blocks;    /* Nr to preallocate for dirs */
+        __le16    s_reserved_gdt_blocks;    /* Per group desc for online growth */
+    /*
+     * Journaling support valid if EXT4_FEATURE_COMPAT_HAS_JOURNAL set.
+     */
+/*D0*/    __u8    s_journal_uuid[16];        /* uuid of journal superblock */
+/*E0*/    __le32    s_journal_inum;            /* inode number of journal file */
+        __le32    s_journal_dev;            /* device number of journal file */
+        __le32    s_last_orphan;            /* start of list of inodes to delete */
+        __le32    s_hash_seed[4];            /* HTREE hash seed */
+        __u8    s_def_hash_version;        /* Default hash version to use */
+        __u8    s_jnl_backup_type;    
+        __le16  s_desc_size;            /* size of group descriptor */
+/*100*/    __le32    s_default_mount_opts;
+        __le32    s_first_meta_bg;        /* First metablock block group */
+        __le32    s_mkfs_time;            /* When the filesystem was created */
+        __le32    s_jnl_blocks[17];        /* Backup of the journal inode */
+    /* 64bit support valid if EXT4_FEATURE_COMPAT_64BIT */
+/*150*/    __le32    s_blocks_count_hi;        /* Blocks count */
+        __le32    s_r_blocks_count_hi;    /* Reserved blocks count */
+        __le32    s_free_blocks_count_hi;    /* Free blocks count */
+        __le16    s_min_extra_isize;        /* All inodes have at least # bytes */
+        __le16    s_want_extra_isize;     /* New inodes should reserve # bytes */
+        __le32    s_flags;                /* Miscellaneous flags */
+        __le16  s_raid_stride;            /* RAID stride */
+        __le16  s_mmp_update_interval;  /* # seconds to wait in MMP checking */
+        __le64  s_mmp_block;            /* Block for multi-mount protection */
+        __le32  s_raid_stripe_width;    /* blocks on all data disks (N*stride)*/
+        __u8    s_log_groups_per_flex;  /* FLEX_BG group size */
+        __u8    s_checksum_type;        /* metadata checksum algorithm used */
+        __u8    s_encryption_level;        /* versioning level for encryption */
+        __u8    s_reserved_pad;            /* Padding to next 32bits */
+        __le64    s_kbytes_written;        /* nr of lifetime kilobytes written */
+        __le32    s_snapshot_inum;        /* Inode number of active snapshot */
+        __le32    s_snapshot_id;            /* sequential ID of active snapshot */
+        __le64    s_snapshot_r_blocks_count; /* reserved blocks for active snapshot's future use */
+        __le32    s_snapshot_list;        /* inode number of the head of the on-disk snapshot list */
 #define EXT4_S_ERR_START offsetof(struct ext4_super_block, s_error_count)
-		__le32	s_error_count;			/* number of fs errors */
-		__le32	s_first_error_time;		/* first time an error happened */
-		__le32	s_first_error_ino;		/* inode involved in first error */
-		__le64	s_first_error_block;	/* block involved of first error */
-		__u8	s_first_error_func[32] __nonstring;	/* function where the error happened */
-		__le32	s_first_error_line;		/* line number where error happened */
-		__le32	s_last_error_time;		/* most recent time of an error */
-		__le32	s_last_error_ino;		/* inode involved in last error */
-		__le32	s_last_error_line;		/* line number where error happened */
-		__le64	s_last_error_block;		/* block involved of last error */
-		__u8	s_last_error_func[32] __nonstring;	/* function where the error happened */
+        __le32    s_error_count;            /* number of fs errors */
+        __le32    s_first_error_time;        /* first time an error happened */
+        __le32    s_first_error_ino;        /* inode involved in first error */
+        __le64    s_first_error_block;    /* block involved of first error */
+        __u8    s_first_error_func[32] __nonstring;    /* function where the error happened */
+        __le32    s_first_error_line;        /* line number where error happened */
+        __le32    s_last_error_time;        /* most recent time of an error */
+        __le32    s_last_error_ino;        /* inode involved in last error */
+        __le32    s_last_error_line;        /* line number where error happened */
+        __le64    s_last_error_block;        /* block involved of last error */
+        __u8    s_last_error_func[32] __nonstring;    /* function where the error happened */
 #define EXT4_S_ERR_END offsetof(struct ext4_super_block, s_mount_opts)
-		__u8	s_mount_opts[64];
-		__le32	s_usr_quota_inum;		/* inode for tracking user quota */
-		__le32	s_grp_quota_inum;		/* inode for tracking group quota */
-		__le32	s_overhead_clusters;	/* overhead blocks/clusters in fs */
-		__le32	s_backup_bgs[2];		/* groups with sparse_super2 SBs */
-		__u8	s_encrypt_algos[4];		/* Encryption algorithms in use  */
-		__u8	s_encrypt_pw_salt[16];	/* Salt used for string2key algorithm */
-		__le32	s_lpf_ino;				/* Location of the lost+found inode */
-		__le32	s_prj_quota_inum;		/* inode for tracking project quota */
-		__le32	s_checksum_seed;		/* crc32c(uuid) if csum_seed set */
-		__u8	s_wtime_hi;
-		__u8	s_mtime_hi;
-		__u8	s_mkfs_time_hi;
-		__u8	s_lastcheck_hi;
-		__u8	s_first_error_time_hi;
-		__u8	s_last_error_time_hi;
-		__u8	s_first_error_errcode;
-		__u8    s_last_error_errcode;
-		__le16  s_encoding;				/* Filename charset encoding */
-		__le16  s_encoding_flags;		/* Filename charset encoding flags */
-		__le32  s_orphan_file_inum;		/* Inode for tracking orphan inodes */
-		__le32	s_reserved[94];			/* Padding to the end of the block */
-		__le32	s_checksum;				/* crc32c(superblock) */
+        __u8    s_mount_opts[64];
+        __le32    s_usr_quota_inum;        /* inode for tracking user quota */
+        __le32    s_grp_quota_inum;        /* inode for tracking group quota */
+        __le32    s_overhead_clusters;    /* overhead blocks/clusters in fs */
+        __le32    s_backup_bgs[2];        /* groups with sparse_super2 SBs */
+        __u8    s_encrypt_algos[4];        /* Encryption algorithms in use  */
+        __u8    s_encrypt_pw_salt[16];    /* Salt used for string2key algorithm */
+        __le32    s_lpf_ino;                /* Location of the lost+found inode */
+        __le32    s_prj_quota_inum;        /* inode for tracking project quota */
+        __le32    s_checksum_seed;        /* crc32c(uuid) if csum_seed set */
+        __u8    s_wtime_hi;
+        __u8    s_mtime_hi;
+        __u8    s_mkfs_time_hi;
+        __u8    s_lastcheck_hi;
+        __u8    s_first_error_time_hi;
+        __u8    s_last_error_time_hi;
+        __u8    s_first_error_errcode;
+        __u8    s_last_error_errcode;
+        __le16  s_encoding;                /* Filename charset encoding */
+        __le16  s_encoding_flags;        /* Filename charset encoding flags */
+        __le32  s_orphan_file_inum;        /* Inode for tracking orphan inodes */
+        __le32    s_reserved[94];            /* Padding to the end of the block */
+        __le32    s_checksum;                /* crc32c(superblock) */
 };
 
 ```
@@ -432,29 +432,29 @@ In ext2, ext3, and ext4 (when the 64bit feature is not enabled), the block group
 
 struct ext4_group_desc
 {
-	__le32	bg_block_bitmap_lo;			/* Blocks bitmap block */
-	__le32	bg_inode_bitmap_lo;			/* Inodes bitmap block */
-	__le32	bg_inode_table_lo;			/* Inodes table block */
-	__le16	bg_free_blocks_count_lo;	/* Free blocks count */
-	__le16	bg_free_inodes_count_lo;	/* Free inodes count */
-	__le16	bg_used_dirs_count_lo;		/* Directories count */
-	__le16	bg_flags;					/* EXT4_BG_flags (INODE_UNINIT, etc) */
-	__le32  bg_exclude_bitmap_lo;   	/* Exclude bitmap for snapshots */
-	__le16  bg_block_bitmap_csum_lo;	/* crc32c(s_uuid+grp_num+bbitmap) LE */
-	__le16  bg_inode_bitmap_csum_lo;	/* crc32c(s_uuid+grp_num+ibitmap) LE */
-	__le16  bg_itable_unused_lo;		/* Unused inodes count */
-	__le16  bg_checksum;				/* crc16(sb_uuid+group+desc) */
-	__le32	bg_block_bitmap_hi;			/* Blocks bitmap block MSB */
-	__le32	bg_inode_bitmap_hi;			/* Inodes bitmap block MSB */
-	__le32	bg_inode_table_hi;			/* Inodes table block MSB */
-	__le16	bg_free_blocks_count_hi;	/* Free blocks count MSB */
-	__le16	bg_free_inodes_count_hi;	/* Free inodes count MSB */
-	__le16	bg_used_dirs_count_hi;		/* Directories count MSB */
-	__le16  bg_itable_unused_hi;    	/* Unused inodes count MSB */
-	__le32  bg_exclude_bitmap_hi;   	/* Exclude bitmap block MSB */
-	__le16  bg_block_bitmap_csum_hi;	/* crc32c(s_uuid+grp_num+bbitmap) BE */
-	__le16  bg_inode_bitmap_csum_hi;	/* crc32c(s_uuid+grp_num+ibitmap) BE */
-	__u32   bg_reserved;
+    __le32    bg_block_bitmap_lo;            /* Blocks bitmap block */
+    __le32    bg_inode_bitmap_lo;            /* Inodes bitmap block */
+    __le32    bg_inode_table_lo;            /* Inodes table block */
+    __le16    bg_free_blocks_count_lo;    /* Free blocks count */
+    __le16    bg_free_inodes_count_lo;    /* Free inodes count */
+    __le16    bg_used_dirs_count_lo;        /* Directories count */
+    __le16    bg_flags;                    /* EXT4_BG_flags (INODE_UNINIT, etc) */
+    __le32  bg_exclude_bitmap_lo;       /* Exclude bitmap for snapshots */
+    __le16  bg_block_bitmap_csum_lo;    /* crc32c(s_uuid+grp_num+bbitmap) LE */
+    __le16  bg_inode_bitmap_csum_lo;    /* crc32c(s_uuid+grp_num+ibitmap) LE */
+    __le16  bg_itable_unused_lo;        /* Unused inodes count */
+    __le16  bg_checksum;                /* crc16(sb_uuid+group+desc) */
+    __le32    bg_block_bitmap_hi;            /* Blocks bitmap block MSB */
+    __le32    bg_inode_bitmap_hi;            /* Inodes bitmap block MSB */
+    __le32    bg_inode_table_hi;            /* Inodes table block MSB */
+    __le16    bg_free_blocks_count_hi;    /* Free blocks count MSB */
+    __le16    bg_free_inodes_count_hi;    /* Free inodes count MSB */
+    __le16    bg_used_dirs_count_hi;        /* Directories count MSB */
+    __le16  bg_itable_unused_hi;        /* Unused inodes count MSB */
+    __le32  bg_exclude_bitmap_hi;       /* Exclude bitmap block MSB */
+    __le16  bg_block_bitmap_csum_hi;    /* crc32c(s_uuid+grp_num+bbitmap) BE */
+    __le16  bg_inode_bitmap_csum_hi;    /* crc32c(s_uuid+grp_num+ibitmap) BE */
+    __u32   bg_reserved;
 };
 
 ```
@@ -503,9 +503,9 @@ Notice that `a transaction begins with either a descriptor and some data, or a b
 
 typedef struct journal_header_s
 {
-	__be32		h_magic;
-	__be32		h_blocktype;
-	__be32		h_sequence;
+    __be32        h_magic;
+    __be32        h_blocktype;
+    __be32        h_sequence;
 } journal_header_t;
 
 ### Super Block
@@ -517,51 +517,51 @@ The key data kept within are size of the journal, and where to find the start of
 typedef struct journal_superblock_s
 {
 /* 0x0000 */
-	journal_header_t s_header;
+    journal_header_t s_header;
 
 /* 0x000C */
-	/* Static information describing the journal */
-	__be32	s_blocksize;		/* journal device blocksize */
-	__be32	s_maxlen;			/* total blocks in journal file */
-	__be32	s_first;			/* first block of log information */
+    /* Static information describing the journal */
+    __be32    s_blocksize;        /* journal device blocksize */
+    __be32    s_maxlen;            /* total blocks in journal file */
+    __be32    s_first;            /* first block of log information */
 
 /* 0x0018 */
-	/* Dynamic information describing the current state of the log */
-	__be32	s_sequence;			/* first commit ID expected in log */
-	__be32	s_start;			/* blocknr of start of log */
+    /* Dynamic information describing the current state of the log */
+    __be32    s_sequence;            /* first commit ID expected in log */
+    __be32    s_start;            /* blocknr of start of log */
 
 /* 0x0020 */
-	/* Error value, as set by jbd2_journal_abort(). */
-	__be32	s_errno;
+    /* Error value, as set by jbd2_journal_abort(). */
+    __be32    s_errno;
 
 /* 0x0024 */
-	/* Remaining fields are only valid in a version-2 superblock */
-	__be32	s_feature_compat;		/* compatible feature set */
-	__be32	s_feature_incompat;		/* incompatible feature set */
-	__be32	s_feature_ro_compat;	/* readonly-compatible feature set */
+    /* Remaining fields are only valid in a version-2 superblock */
+    __be32    s_feature_compat;        /* compatible feature set */
+    __be32    s_feature_incompat;        /* incompatible feature set */
+    __be32    s_feature_ro_compat;    /* readonly-compatible feature set */
 /* 0x0030 */
-	__u8	s_uuid[16];			/* 128-bit uuid for journal */
+    __u8    s_uuid[16];            /* 128-bit uuid for journal */
 
 /* 0x0040 */
-	__be32	s_nr_users;			/* Nr of filesystems sharing log */
+    __be32    s_nr_users;            /* Nr of filesystems sharing log */
 
-	__be32	s_dynsuper;			/* Blocknr of dynamic superblock copy*/
+    __be32    s_dynsuper;            /* Blocknr of dynamic superblock copy*/
 
 /* 0x0048 */
-	__be32	s_max_transaction;	/* Limit of journal blocks per trans.*/
-	__be32	s_max_trans_data;	/* Limit of data blocks per trans. */
+    __be32    s_max_transaction;    /* Limit of journal blocks per trans.*/
+    __be32    s_max_trans_data;    /* Limit of data blocks per trans. */
 
 /* 0x0050 */
-	__u8	s_checksum_type;	/* checksum type */
-	__u8	s_padding2[3];
+    __u8    s_checksum_type;    /* checksum type */
+    __u8    s_padding2[3];
 /* 0x0054 */
-	__be32	s_num_fc_blks;		/* Number of fast commit blocks */
+    __be32    s_num_fc_blks;        /* Number of fast commit blocks */
 /* 0x0058 */
-	__u32	s_padding[41];
-	__be32	s_checksum;			/* crc32c(superblock) */
+    __u32    s_padding[41];
+    __be32    s_checksum;            /* crc32c(superblock) */
 
 /* 0x0100 */
-	__u8	s_users[16*48];		/* ids of all fs'es sharing the log */
+    __u8    s_users[16*48];        /* ids of all fs'es sharing the log */
 /* 0x0400 */
 } journal_superblock_t;
 
@@ -571,114 +571,114 @@ journal恢复过程：
 
 ```c
 int ext4_load_journal(struct super_block *sb,
-			     struct ext4_super_block *es,
-			     unsigned long journal_devnum)
+                 struct ext4_super_block *es,
+                 unsigned long journal_devnum)
 {
-	journal_t *journal = ext4_get_journal(sb, journal_inum);
-	{
-		struct inode *journal_inode = ext4_get_journal_inode(sb, journal_inum);
-		journal_t *journal = jbd2_journal_init_inode(journal_inode);
-		{
-			journal = kzalloc(sizeof(*journal), GFP_KERNEL);
-			journal->j_commit_interval = (HZ * 5);
-			journal->j_min_batch_time = 0;
-			journal->j_max_batch_time = 15000; /* 15ms */
-			// 读取journal的super_block
-			journal->j_sb_buffer = getblk_unmovable(journal->j_dev, start, journal->j_blocksize);
-			journal->j_inode = inode;
-		}
-		journal->j_private = sb;
-		return journal;
-	}
+    journal_t *journal = ext4_get_journal(sb, journal_inum);
+    {
+        struct inode *journal_inode = ext4_get_journal_inode(sb, journal_inum);
+        journal_t *journal = jbd2_journal_init_inode(journal_inode);
+        {
+            journal = kzalloc(sizeof(*journal), GFP_KERNEL);
+            journal->j_commit_interval = (HZ * 5);
+            journal->j_min_batch_time = 0;
+            journal->j_max_batch_time = 15000; /* 15ms */
+            // 读取journal的super_block
+            journal->j_sb_buffer = getblk_unmovable(journal->j_dev, start, journal->j_blocksize);
+            journal->j_inode = inode;
+        }
+        journal->j_private = sb;
+        return journal;
+    }
 
-	jbd2_journal_load(journal);
-	{
-		// 等待super_block加载完成
-		load_superblock(journal);
+    jbd2_journal_load(journal);
+    {
+        // 等待super_block加载完成
+        load_superblock(journal);
 
-		jbd2_journal_recover(journal);
-		{
-			// scan: 校验checksum			
-			do_one_pass(journal, &info, PASS_SCAN);
-			// revoke: 收集撤销事务中的待撤销block列表
-			do_one_pass(journal, &info, PASS_REVOKE);
-			{
-				scan_revoke_records(journal, bh, next_commit_ID, info);
-				{
-					// 撤销块格式: head + block号列表
-					while (offset + record_len <= max) {
-						unsigned long long blocknr;
+        jbd2_journal_recover(journal);
+        {
+            // scan: 校验checksum            
+            do_one_pass(journal, &info, PASS_SCAN);
+            // revoke: 收集撤销事务中的待撤销block列表
+            do_one_pass(journal, &info, PASS_REVOKE);
+            {
+                scan_revoke_records(journal, bh, next_commit_ID, info);
+                {
+                    // 撤销块格式: head + block号列表
+                    while (offset + record_len <= max) {
+                        unsigned long long blocknr;
 
-						if (record_len == 4)
-							blocknr = be32_to_cpu(* ((__be32 *) (bh->b_data+offset)));
-						else
-							blocknr = be64_to_cpu(* ((__be64 *) (bh->b_data+offset)));
-						
-						offset += record_len;
-						
-						// 插入hash表
-						jbd2_journal_set_revoke(journal, blocknr, sequence);
-					}
-				}
-			}
-			// replay: replay非待撤销block的数据
-			do_one_pass(journal, &info, PASS_REPLAY);
-			{
-				journal_superblock_t *sb = journal->j_superblock;
-				next_commit_ID = be32_to_cpu(sb->s_sequence);
-				next_log_block = be32_to_cpu(sb->s_start);
+                        if (record_len == 4)
+                            blocknr = be32_to_cpu(* ((__be32 *) (bh->b_data+offset)));
+                        else
+                            blocknr = be64_to_cpu(* ((__be64 *) (bh->b_data+offset)));
+                        
+                        offset += record_len;
+                        
+                        // 插入hash表
+                        jbd2_journal_set_revoke(journal, blocknr, sequence);
+                    }
+                }
+            }
+            // replay: replay非待撤销block的数据
+            do_one_pass(journal, &info, PASS_REPLAY);
+            {
+                journal_superblock_t *sb = journal->j_superblock;
+                next_commit_ID = be32_to_cpu(sb->s_sequence);
+                next_log_block = be32_to_cpu(sb->s_start);
 
-				struct buffer_head *bh;
+                struct buffer_head *bh;
 
-				while(1) {
-					// 读取journal的block
-					jread(&bh, journal, next_log_block);
-					next_log_block++;
+                while(1) {
+                    // 读取journal的block
+                    jread(&bh, journal, next_log_block);
+                    next_log_block++;
 
-					journal_header_t *tmp = (journal_header_t *)bh->b_data;
-					// 块类型
-					blocktype = be32_to_cpu(tmp->h_blocktype);
-					// 事务id
-					sequence = be32_to_cpu(tmp->h_sequence);
+                    journal_header_t *tmp = (journal_header_t *)bh->b_data;
+                    // 块类型
+                    blocktype = be32_to_cpu(tmp->h_blocktype);
+                    // 事务id
+                    sequence = be32_to_cpu(tmp->h_sequence);
 
-					// 描述符块的body是一组tag
-					journal_block_tag_t	tag;
-					char *tagp = &bh->b_data[sizeof(journal_header_t)];
-					// 遍历每一个tag
-					while ((tagp - bh->b_data + tag_bytes) <= journal->j_blocksize - descr_csum_size) {
-						memcpy(&tag, tagp, sizeof(tag));
-						// 描述符块的每个tag都对应一个后续的数据块
-						io_block = next_log_block++;
-						jread(&obh, journal, io_block);
-						// tag中记录的待恢复的块号
-						blocknr = read_tag_block(journal, &tag);
+                    // 描述符块的body是一组tag
+                    journal_block_tag_t    tag;
+                    char *tagp = &bh->b_data[sizeof(journal_header_t)];
+                    // 遍历每一个tag
+                    while ((tagp - bh->b_data + tag_bytes) <= journal->j_blocksize - descr_csum_size) {
+                        memcpy(&tag, tagp, sizeof(tag));
+                        // 描述符块的每个tag都对应一个后续的数据块
+                        io_block = next_log_block++;
+                        jread(&obh, journal, io_block);
+                        // tag中记录的待恢复的块号
+                        blocknr = read_tag_block(journal, &tag);
 
-						// 检查此block是否在当前或后续事务中撤销
-						if (jbd2_journal_test_revoke(journal, blocknr, next_commit_ID)) {
-							brelse(obh);
-							++info->nr_revoke_hits;
-							goto skip_write;
-						}
+                        // 检查此block是否在当前或后续事务中撤销
+                        if (jbd2_journal_test_revoke(journal, blocknr, next_commit_ID)) {
+                            brelse(obh);
+                            ++info->nr_revoke_hits;
+                            goto skip_write;
+                        }
 
-						// 读取待更新数据块到page_cache
-						struct buffer_head *nbh = __getblk(journal->j_fs_dev, blocknr, journal->j_blocksize);
-						// 复制数据
-						memcpy(nbh->b_data, obh->b_data, journal->j_blocksize);
-						mark_buffer_dirty(nbh);
-						++info->nr_replays;
-					}
-				}
+                        // 读取待更新数据块到page_cache
+                        struct buffer_head *nbh = __getblk(journal->j_fs_dev, blocknr, journal->j_blocksize);
+                        // 复制数据
+                        memcpy(nbh->b_data, obh->b_data, journal->j_blocksize);
+                        mark_buffer_dirty(nbh);
+                        ++info->nr_replays;
+                    }
+                }
 
-			}
-			// sync & flush：刷盘
-			sync_blockdev(journal->j_fs_dev);
-			if (journal->j_flags & JBD2_BARRIER) {
-				blkdev_issue_flush(journal->j_fs_dev);
-			}
-		}
+            }
+            // sync & flush：刷盘
+            sync_blockdev(journal->j_fs_dev);
+            if (journal->j_flags & JBD2_BARRIER) {
+                blkdev_issue_flush(journal->j_fs_dev);
+            }
+        }
 
-		journal_reset(journal);
-	}
+        journal_reset(journal);
+    }
 }
 ```
 
@@ -690,46 +690,46 @@ In a regular UNIX filesystem, the inode stores all the metadata pertaining to th
 
 ```c
 struct ext4_inode {
-	__le16	i_mode;			/* File mode */
-	__le16	i_uid;			/* Low 16 bits of Owner Uid */
-	__le32	i_size_lo;		/* Size in bytes */
-	__le32	i_atime;		/* Access time */
-	__le32	i_ctime;		/* Inode Change time */
-	__le32	i_mtime;		/* Modification time */
-	__le32	i_dtime;		/* Deletion Time */
-	__le16	i_gid;			/* Low 16 bits of Group Id */
-	__le16	i_links_count;	/* Links count */
-	__le32	i_blocks_lo;	/* Blocks count */
-	__le32	i_flags;		/* File flags */
-	union {
-		struct {
-			__le32  l_i_version;
-		} linux1;
-	} osd1;					/* OS dependent 1 */
-	__le32	i_block[15];	/* Pointers to blocks */
-	__le32	i_generation;	/* File version (for NFS) */
-	__le32	i_file_acl_lo;	/* File ACL */
-	__le32	i_size_high;
-	__le32	i_obso_faddr;	/* Obsoleted fragment address */
-	union {
-		struct {
-			__le16	l_i_blocks_high; /* were l_i_reserved1 */
-			__le16	l_i_file_acl_high;
-			__le16	l_i_uid_high;	/* these 2 fields */
-			__le16	l_i_gid_high;	/* were reserved2[0] */
-			__le16	l_i_checksum_lo;/* crc32c(uuid+inum+inode) LE */
-			__le16	l_i_reserved;
-		} linux2;
-	} osd2;					/* OS dependent 2 */
-	__le16	i_extra_isize;
-	__le16	i_checksum_hi;	/* crc32c(uuid+inum+inode) BE */
-	__le32  i_ctime_extra;  /* extra Change time      (nsec << 2 | epoch) */
-	__le32  i_mtime_extra;  /* extra Modification time(nsec << 2 | epoch) */
-	__le32  i_atime_extra;  /* extra Access time      (nsec << 2 | epoch) */
-	__le32  i_crtime;       /* File Creation time */
-	__le32  i_crtime_extra; /* extra FileCreationtime (nsec << 2 | epoch) */
-	__le32  i_version_hi;	/* high 32 bits for 64-bit version */
-	__le32	i_projid;		/* Project ID */
+    __le16    i_mode;            /* File mode */
+    __le16    i_uid;            /* Low 16 bits of Owner Uid */
+    __le32    i_size_lo;        /* Size in bytes */
+    __le32    i_atime;        /* Access time */
+    __le32    i_ctime;        /* Inode Change time */
+    __le32    i_mtime;        /* Modification time */
+    __le32    i_dtime;        /* Deletion Time */
+    __le16    i_gid;            /* Low 16 bits of Group Id */
+    __le16    i_links_count;    /* Links count */
+    __le32    i_blocks_lo;    /* Blocks count */
+    __le32    i_flags;        /* File flags */
+    union {
+        struct {
+            __le32  l_i_version;
+        } linux1;
+    } osd1;                    /* OS dependent 1 */
+    __le32    i_block[15];    /* Pointers to blocks */
+    __le32    i_generation;    /* File version (for NFS) */
+    __le32    i_file_acl_lo;    /* File ACL */
+    __le32    i_size_high;
+    __le32    i_obso_faddr;    /* Obsoleted fragment address */
+    union {
+        struct {
+            __le16    l_i_blocks_high; /* were l_i_reserved1 */
+            __le16    l_i_file_acl_high;
+            __le16    l_i_uid_high;    /* these 2 fields */
+            __le16    l_i_gid_high;    /* were reserved2[0] */
+            __le16    l_i_checksum_lo;/* crc32c(uuid+inum+inode) LE */
+            __le16    l_i_reserved;
+        } linux2;
+    } osd2;                    /* OS dependent 2 */
+    __le16    i_extra_isize;
+    __le16    i_checksum_hi;    /* crc32c(uuid+inum+inode) BE */
+    __le32  i_ctime_extra;  /* extra Change time      (nsec << 2 | epoch) */
+    __le32  i_mtime_extra;  /* extra Modification time(nsec << 2 | epoch) */
+    __le32  i_atime_extra;  /* extra Access time      (nsec << 2 | epoch) */
+    __le32  i_crtime;       /* File Creation time */
+    __le32  i_crtime_extra; /* extra FileCreationtime (nsec << 2 | epoch) */
+    __le32  i_version_hi;    /* high 32 bits for 64-bit version */
+    __le32    i_projid;        /* Project ID */
 };
 ```
 
@@ -764,26 +764,26 @@ Notice also that a file using this mapping scheme cannot be placed higher than 2
 ```c
 /* extent是tree结构，此结构为tree-node */
 struct ext4_extent_header {
-	__le16	eh_magic;		/* probably will support different formats */
-	__le16	eh_entries;		/* number of valid entries */
-	__le16	eh_max;			/* capacity of store in entries */
-	__le16	eh_depth;		/* has tree real underlying blocks? */
-	__le32	eh_generation;	/* generation of the tree */
+    __le16    eh_magic;        /* probably will support different formats */
+    __le16    eh_entries;        /* number of valid entries */
+    __le16    eh_max;            /* capacity of store in entries */
+    __le16    eh_depth;        /* has tree real underlying blocks? */
+    __le32    eh_generation;    /* generation of the tree */
 };
 
 /* 指向[ei_block, ei_leaf_hi<<32 | ei_leaf_lo] */
 struct ext4_extent_idx {
-	__le32	ei_block;
-	__le32	ei_leaf_lo;
-	__le16	ei_leaf_hi;
-	__u16	ei_unused;
+    __le32    ei_block;
+    __le32    ei_leaf_lo;
+    __le16    ei_leaf_hi;
+    __u16    ei_unused;
 };
 
 struct ext4_extent {
-	__le32	ee_block;		/* first logical block extent covers */
-	__le16	ee_len;			/* number of blocks covered by extent */
-	__le16	ee_start_hi;	/* high 16 bits of physical block */
-	__le32	ee_start_lo;	/* low 32 bits of physical block */
+    __le32    ee_block;        /* first logical block extent covers */
+    __le16    ee_len;            /* number of blocks covered by extent */
+    __le16    ee_start_hi;    /* high 16 bits of physical block */
+    __le32    ee_start_lo;    /* low 32 bits of physical block */
 };
 ```
 
@@ -803,27 +803,27 @@ By default, each directory lists its entries in an “almost-linear” array. I 
 
 ```c
 struct ext4_dir_entry {
-	__le32	inode;		/* Inode number */
-	__le16	rec_len;	/* Directory entry length */
-	__le16	name_len;	/* Name length */
-	char	name[255];	/* File name */
+    __le32    inode;        /* Inode number */
+    __le16    rec_len;    /* Directory entry length */
+    __le16    name_len;    /* Name length */
+    char    name[255];    /* File name */
 };
 
-#define EXT4_FT_UNKNOWN		0
-#define EXT4_FT_REG_FILE	1
-#define EXT4_FT_DIR			2
-#define EXT4_FT_CHRDEV		3
-#define EXT4_FT_BLKDEV		4
-#define EXT4_FT_FIFO		5
-#define EXT4_FT_SOCK		6
-#define EXT4_FT_SYMLINK		7
+#define EXT4_FT_UNKNOWN        0
+#define EXT4_FT_REG_FILE    1
+#define EXT4_FT_DIR            2
+#define EXT4_FT_CHRDEV        3
+#define EXT4_FT_BLKDEV        4
+#define EXT4_FT_FIFO        5
+#define EXT4_FT_SOCK        6
+#define EXT4_FT_SYMLINK        7
 
 struct ext4_dir_entry_2 {
-	__le32	inode;			/* Inode number */
-	__le16	rec_len;		/* Directory entry length */
-	__u8	name_len;		/* Name length */
-	__u8	file_type;		/* See file type macros EXT4_FT_* below */
-	char	name[255];		/* File name */
+    __le32    inode;            /* Inode number */
+    __le16    rec_len;        /* Directory entry length */
+    __u8    name_len;        /* Name length */
+    __u8    file_type;        /* See file type macros EXT4_FT_* below */
+    char    name[255];        /* File name */
 };
 ```
 
@@ -844,39 +844,39 @@ To traverse the directory as a linear array (such as the old code does), the cod
 ```c
 struct fake_dirent
 {
-	__le32 inode;
-	__le16 rec_len;
-	u8 name_len;
-	u8 file_type;
+    __le32 inode;
+    __le16 rec_len;
+    u8 name_len;
+    u8 file_type;
 };
 
 struct dx_entry
 {
-	__le32 hash;
-	__le32 block;
+    __le32 hash;
+    __le32 block;
 };
 
 struct dx_root
 {
-	struct fake_dirent dot;
-	char dot_name[4];
-	struct fake_dirent dotdot;
-	char dotdot_name[4];
-	struct dx_root_info
-	{
-		__le32 reserved_zero;
-		u8 hash_version;
-		u8 info_length; /* 8 */
-		u8 indirect_levels;
-		u8 unused_flags;
-	} info;
-	struct dx_entry	entries[];
+    struct fake_dirent dot;
+    char dot_name[4];
+    struct fake_dirent dotdot;
+    char dotdot_name[4];
+    struct dx_root_info
+    {
+        __le32 reserved_zero;
+        u8 hash_version;
+        u8 info_length; /* 8 */
+        u8 indirect_levels;
+        u8 unused_flags;
+    } info;
+    struct dx_entry    entries[];
 };
 
 struct dx_node
 {
-	struct fake_dirent fake;
-	struct dx_entry	entries[];
+    struct fake_dirent fake;
+    struct dx_entry    entries[];
 };
 ```
 
@@ -888,25 +888,25 @@ struct dx_node
 
 ```c
 static struct file_system_type ext3_fs_type = {
-	.owner		= THIS_MODULE,
-	.name		= "ext3",
-	.mount		= ext4_mount,
-	.kill_sb	= kill_block_super,
-	.fs_flags	= FS_REQUIRES_DEV,
+    .owner        = THIS_MODULE,
+    .name        = "ext3",
+    .mount        = ext4_mount,
+    .kill_sb    = kill_block_super,
+    .fs_flags    = FS_REQUIRES_DEV,
 };
 
 static struct file_system_type ext4_fs_type = {
-	.owner		= THIS_MODULE,
-	.name		= "ext4",
-	.mount		= ext4_mount,
-	.kill_sb	= kill_block_super,
-	.fs_flags	= FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
+    .owner        = THIS_MODULE,
+    .name        = "ext4",
+    .mount        = ext4_mount,
+    .kill_sb    = kill_block_super,
+    .fs_flags    = FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
 };
 
 static int __init ext4_init_fs(void)
 {
     register_as_ext3();
-	register_filesystem(&ext4_fs_type);
+    register_filesystem(&ext4_fs_type);
 }
 
 module_init(ext4_init_fs)
@@ -918,45 +918,45 @@ module_init(ext4_init_fs)
 
 ```c
 const struct fs_context_operations legacy_fs_context_ops = {
-	.parse_param		= legacy_parse_param,
-	.get_tree		= legacy_get_tree,
-	.reconfigure		= legacy_reconfigure,
+    .parse_param        = legacy_parse_param,
+    .get_tree        = legacy_get_tree,
+    .reconfigure        = legacy_reconfigure,
 };
 
 static int legacy_init_fs_context(struct fs_context *fc)
 {
-	fc->fs_private = kzalloc(sizeof(struct legacy_fs_context), GFP_KERNEL_ACCOUNT);
-	fc->ops = &legacy_fs_context_ops;
-	return 0;
+    fc->fs_private = kzalloc(sizeof(struct legacy_fs_context), GFP_KERNEL_ACCOUNT);
+    fc->ops = &legacy_fs_context_ops;
+    return 0;
 }
 
 static int legacy_get_tree(struct fs_context *fc)
 {
-	struct legacy_fs_context *ctx = fc->fs_private;
-	struct dentry *root = fc->fs_type->mount(fc->fs_type, fc->sb_flags, fc->source, ctx->legacy_data);
-	
-	fc->root = root;
-	return 0;
+    struct legacy_fs_context *ctx = fc->fs_private;
+    struct dentry *root = fc->fs_type->mount(fc->fs_type, fc->sb_flags, fc->source, ctx->legacy_data);
+    
+    fc->root = root;
+    return 0;
 }
 
 struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
-		       const char *dev_name, void *data)
+               const char *dev_name, void *data)
 {
-	return mount_bdev(fs_type, flags, dev_name, data, ext4_fill_super);
+    return mount_bdev(fs_type, flags, dev_name, data, ext4_fill_super);
     {
         // 根据name查找dev
         struct block_device *bdev = blkdev_get_by_path(dev_name, mode, fs_type);
 
         // 创建super_block, 设置s->s_bdev=bdev
-	    s = sget(fs_type, test_bdev_super, set_bdev_super, flags | SB_NOSEC, bdev);
+        s = sget(fs_type, test_bdev_super, set_bdev_super, flags | SB_NOSEC, bdev);
         sb_set_blocksize(s, block_size(bdev));
         fill_super(s, data, flags & SB_SILENT ? 1 : 0);
         {
             struct ext4_sb_info *sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
             // super_block所在block(按1k计算)，默认1，参数sb=x,可以指定
-	        ext4_fsblk_t sb_block = get_sb_block(&data);
+            ext4_fsblk_t sb_block = get_sb_block(&data);
             sb->s_fs_info = sbi;
-	        sbi->s_sb = sb;
+            sbi->s_sb = sb;
             sbi->s_sb_block = sb_block;
 
             // 读取super_block所在的block到page_cache
@@ -965,13 +965,13 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
             sbi->s_es = es;
             
             // ext4格式化时选择的blocksize
-	        blocksize = EXT4_MIN_BLOCK_SIZE << le32_to_cpu(es->s_log_block_size);
+            blocksize = EXT4_MIN_BLOCK_SIZE << le32_to_cpu(es->s_log_block_size);
 
             /* size of inode structure */
             sbi->s_inode_size = le16_to_cpu(es->s_inode_size);
-		    sbi->s_first_ino = le32_to_cpu(es->s_first_ino);
+            sbi->s_first_ino = le32_to_cpu(es->s_first_ino);
 
-			// 更新blocksize
+            // 更新blocksize
             if (sb->s_blocksize != blocksize) {
                 sb_set_blocksize(sb, blocksize);
             }
@@ -985,7 +985,7 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
             sbi->s_desc_size = le16_to_cpu(es->s_desc_size);
 
             sbi->s_blocks_per_group = le32_to_cpu(es->s_blocks_per_group);
-	        sbi->s_inodes_per_group = le32_to_cpu(es->s_inodes_per_group);
+            sbi->s_inodes_per_group = le32_to_cpu(es->s_inodes_per_group);
             sbi->s_inodes_per_block = blocksize / EXT4_INODE_SIZE(sb);
             /* Number of inode table blocks per group */
             sbi->s_itb_per_group = sbi->s_inodes_per_group / sbi->s_inodes_per_block;
@@ -1002,7 +1002,7 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
                 sbi->s_clusters_per_group = le32_to_cpu(es->s_clusters_per_group);
             } else {
                 sbi->s_clusters_per_group = sbi->s_blocks_per_group;
-		        sbi->s_cluster_bits = 0;
+                sbi->s_cluster_bits = 0;
             }
             sbi->s_cluster_ratio = clustersize / blocksize;
 
@@ -1026,20 +1026,20 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
 
             // 先加载journal
             ext4_load_journal(sb, es, parsed_opts.journal_devnum);
-			{
-				unsigned int journal_inum = le32_to_cpu(es->s_journal_inum);
-				dev_t journal_dev = new_decode_dev(journal_devnum);
-				journal_t *journal;
-				if (journal_inum) {
-					// journal在inode=8的隐藏文件
-					journal = ext4_get_journal(sb, journal_inum);
-				} else {
-					// journal在独立的块设备
-					journal = ext4_get_dev_journal(sb, journal_dev);
-				}
+            {
+                unsigned int journal_inum = le32_to_cpu(es->s_journal_inum);
+                dev_t journal_dev = new_decode_dev(journal_devnum);
+                journal_t *journal;
+                if (journal_inum) {
+                    // journal在inode=8的隐藏文件
+                    journal = ext4_get_journal(sb, journal_inum);
+                } else {
+                    // journal在独立的块设备
+                    journal = ext4_get_dev_journal(sb, journal_dev);
+                }
 
-				jbd2_journal_load(journal);
-			}
+                jbd2_journal_load(journal);
+            }
 
             // 加载root所在inode
             root = ext4_iget(sb, EXT4_ROOT_INO, EXT4_IGET_SPECIAL);
@@ -1054,7 +1054,7 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
                     struct ext4_inode *raw_inode = ext4_raw_inode(&iloc);
 
                     inode->i_uid = (uid_t)le16_to_cpu(raw_inode->i_uid_low);
-	                inode->i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
+                    inode->i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
 
                     inode->i_size = ext4_isize(sb, raw_inode);
 
@@ -1082,15 +1082,15 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
             }
             sb->s_root = d_make_root(root);
 
-			// 更新super_block所在的page_cache
-			ext4_setup_super(sb, es, sb_rdonly(sb));
-			{
-				ext4_commit_super(sb);
-				{
-					ext4_update_super(sb);
-					mark_buffer_dirty(sbh);
-				}
-			}
+            // 更新super_block所在的page_cache
+            ext4_setup_super(sb, es, sb_rdonly(sb));
+            {
+                ext4_commit_super(sb);
+                {
+                    ext4_update_super(sb);
+                    mark_buffer_dirty(sbh);
+                }
+            }
         }
     }
 }
@@ -1103,27 +1103,27 @@ struct dentry *ext4_mount(struct file_system_type *fs_type, int flags,
 
 ```c
 struct inode *__ext4_new_inode(struct user_namespace *mnt_userns,
-			       handle_t *handle, struct inode *dir,
-			       umode_t mode, const struct qstr *qstr,
-			       __u32 goal, uid_t *owner, __u32 i_flags,
-			       int handle_type, unsigned int line_no,
-			       int nblocks)
+                   handle_t *handle, struct inode *dir,
+                   umode_t mode, const struct qstr *qstr,
+                   __u32 goal, uid_t *owner, __u32 i_flags,
+                   int handle_type, unsigned int line_no,
+                   int nblocks)
 {
-	// 在内存中创建inode
-	struct inode *inode = new_inode(sb);
+    // 在内存中创建inode
+    struct inode *inode = new_inode(sb);
 
-	// 先确定在磁盘上的group
-	if (S_ISDIR(mode))
-		// dir分配策略: 查找文件夹少空闲inode多的group
-		ret2 = find_group_orlov(sb, dir, &group, mode, qstr);
-	else
-		// file分配策略: 跟parent放到同一个flex group
-		ret2 = find_group_other(sb, dir, &group, mode);
+    // 先确定在磁盘上的group
+    if (S_ISDIR(mode))
+        // dir分配策略: 查找文件夹少空闲inode多的group
+        ret2 = find_group_orlov(sb, dir, &group, mode, qstr);
+    else
+        // file分配策略: 跟parent放到同一个flex group
+        ret2 = find_group_other(sb, dir, &group, mode);
 
-	// 加载inode-bitmap
-	struct buffer_head *inode_bitmap_bh = ext4_read_inode_bitmap(sb, group);
-	// 从bitmap查找空闲的inode
-	find_inode_bit(sb, group, inode_bitmap_bh, &ino);
+    // 加载inode-bitmap
+    struct buffer_head *inode_bitmap_bh = ext4_read_inode_bitmap(sb, group);
+    // 从bitmap查找空闲的inode
+    find_inode_bit(sb, group, inode_bitmap_bh, &ino);
 }
 ```
 
@@ -1131,39 +1131,39 @@ struct inode *__ext4_new_inode(struct user_namespace *mnt_userns,
 
 ```c
 struct inode *__ext4_iget(struct super_block *sb, unsigned long ino,
-			  ext4_iget_flags flags, const char *function,
-			  unsigned int line)
+              ext4_iget_flags flags, const char *function,
+              unsigned int line)
 {
-	// 查找已加载的inode，不存在时使用sb->s_op->alloc_inode(sb)创建
-	struct inode *inode = iget_locked(sb, ino);
-	// inode的内存表示
-	struct ext4_inode_info *ei = EXT4_I(inode);
+    // 查找已加载的inode，不存在时使用sb->s_op->alloc_inode(sb)创建
+    struct inode *inode = iget_locked(sb, ino);
+    // inode的内存表示
+    struct ext4_inode_info *ei = EXT4_I(inode);
 
-	// 加载inode-table中此inode所在的block
-	struct ext4_iloc iloc;
-	__ext4_get_inode_loc_noinmem(inode, &iloc);
-	// 解析磁盘上的inode
-	struct ext4_inode *raw_inode = ext4_raw_inode(&iloc);
+    // 加载inode-table中此inode所在的block
+    struct ext4_iloc iloc;
+    __ext4_get_inode_loc_noinmem(inode, &iloc);
+    // 解析磁盘上的inode
+    struct ext4_inode *raw_inode = ext4_raw_inode(&iloc);
 
-	// 使用raw_inode初始化inode和ei
-	inode->i_mode = le16_to_cpu(raw_inode->i_mode);
-	i_uid = (uid_t)le16_to_cpu(raw_inode->i_uid_low);
-	i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
-	for (block = 0; block < EXT4_N_BLOCKS; block++)
-		ei->i_data[block] = raw_inode->i_block[block];
+    // 使用raw_inode初始化inode和ei
+    inode->i_mode = le16_to_cpu(raw_inode->i_mode);
+    i_uid = (uid_t)le16_to_cpu(raw_inode->i_uid_low);
+    i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
+    for (block = 0; block < EXT4_N_BLOCKS; block++)
+        ei->i_data[block] = raw_inode->i_block[block];
 
-	// 设置ops
-	if (S_ISREG(inode->i_mode)) {
-		inode->i_op = &ext4_file_inode_operations;
-		inode->i_fop = &ext4_file_operations;
-		inode->i_mapping->a_ops = &ext4_aops;
-	} else if (S_ISDIR(inode->i_mode)) {
-		inode->i_op = &ext4_dir_inode_operations;
-		inode->i_fop = &ext4_dir_operations;
-	} else if (S_ISLNK(inode->i_mode)) {
-		inode->i_op = &ext4_symlink_inode_operations;
-		inode->i_mapping->a_ops = &ext4_aops;
-	}
+    // 设置ops
+    if (S_ISREG(inode->i_mode)) {
+        inode->i_op = &ext4_file_inode_operations;
+        inode->i_fop = &ext4_file_operations;
+        inode->i_mapping->a_ops = &ext4_aops;
+    } else if (S_ISDIR(inode->i_mode)) {
+        inode->i_op = &ext4_dir_inode_operations;
+        inode->i_fop = &ext4_dir_operations;
+    } else if (S_ISLNK(inode->i_mode)) {
+        inode->i_op = &ext4_symlink_inode_operations;
+        inode->i_mapping->a_ops = &ext4_aops;
+    }
 }
 ```
 
@@ -1171,24 +1171,24 @@ struct inode *__ext4_iget(struct super_block *sb, unsigned long ino,
 
 ```c
 const struct inode_operations ext4_dir_inode_operations = {
-	.create		= ext4_create,
-	.lookup		= ext4_lookup,
-	.link		= ext4_link,
-	.unlink		= ext4_unlink,
-	.symlink	= ext4_symlink,
-	.mkdir		= ext4_mkdir,
-	.rmdir		= ext4_rmdir,
-	.mknod		= ext4_mknod,
-	.tmpfile	= ext4_tmpfile,
-	.rename		= ext4_rename2,
-	.setattr	= ext4_setattr,
-	.getattr	= ext4_getattr,
-	.listxattr	= ext4_listxattr,
-	.get_acl	= ext4_get_acl,
-	.set_acl	= ext4_set_acl,
-	.fiemap         = ext4_fiemap,
-	.fileattr_get	= ext4_fileattr_get,
-	.fileattr_set	= ext4_fileattr_set,
+    .create        = ext4_create,
+    .lookup        = ext4_lookup,
+    .link        = ext4_link,
+    .unlink        = ext4_unlink,
+    .symlink    = ext4_symlink,
+    .mkdir        = ext4_mkdir,
+    .rmdir        = ext4_rmdir,
+    .mknod        = ext4_mknod,
+    .tmpfile    = ext4_tmpfile,
+    .rename        = ext4_rename2,
+    .setattr    = ext4_setattr,
+    .getattr    = ext4_getattr,
+    .listxattr    = ext4_listxattr,
+    .get_acl    = ext4_get_acl,
+    .set_acl    = ext4_set_acl,
+    .fiemap         = ext4_fiemap,
+    .fileattr_get    = ext4_fileattr_get,
+    .fileattr_set    = ext4_fileattr_set,
 };
 ```
 
@@ -1196,95 +1196,95 @@ const struct inode_operations ext4_dir_inode_operations = {
 
 ```c
 static int ext4_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
-		      struct dentry *dentry, umode_t mode)
+              struct dentry *dentry, umode_t mode)
 {
-	// 分配inode
-	struct inode *inode = __ext4_new_inode(mnt_userns, dir, S_IFDIR | mode,
-					    &dentry->d_name, ...);
-	
-	inode->i_op = &ext4_dir_inode_operations;
-	inode->i_fop = &ext4_dir_operations;
-	// 初始化存储结构: inline/新增数据块
-	ext4_init_new_dir(handle, dir, inode);
+    // 分配inode
+    struct inode *inode = __ext4_new_inode(mnt_userns, dir, S_IFDIR | mode,
+                        &dentry->d_name, ...);
+    
+    inode->i_op = &ext4_dir_inode_operations;
+    inode->i_fop = &ext4_dir_operations;
+    // 初始化存储结构: inline/新增数据块
+    ext4_init_new_dir(handle, dir, inode);
 
-	ext4_mark_inode_dirty(handle, inode);
+    ext4_mark_inode_dirty(handle, inode);
 
-	// 写入parent
-	ext4_add_entry(handle, dentry, inode);
-	{
-		if (ext4_has_inline_data(dir)) {
-			ext4_try_add_inline_entry(handle, &fname, dir, inode);
-		} else if (is_dx(dir)) {
-			// hash-tree结构: 大概是高度最多4层没有sibling指针的b+tree
-			ext4_dx_add_entry(handle, &fname, dir, inode);
-			{
-				// 计算从root开始的路径
-				struct dx_frame *frame = dx_probe(fname, dir, NULL, frames);
-				// 先尝试插入叶子节点
-				err = add_dirent_to_buf(handle, fname, dir, inode, NULL, bh);
-				if (err != -ENOSPC) {
-					return err;
-				}
-				// 如果叶子节点满了，考虑是否增加tree的高度
-				if (dx_get_count(entries) == dx_get_limit(entries)) {
-					int add_level = 1;
-					// 如果每一层都满了，应该增加tree的高度
-					while (frame > frames) {
-						if (dx_get_count((frame - 1)->entries) < dx_get_limit((frame - 1)->entries)) {
-							add_level = 0;
-							break;
-						}
-						frame--;
-					}
+    // 写入parent
+    ext4_add_entry(handle, dentry, inode);
+    {
+        if (ext4_has_inline_data(dir)) {
+            ext4_try_add_inline_entry(handle, &fname, dir, inode);
+        } else if (is_dx(dir)) {
+            // hash-tree结构: 大概是高度最多4层没有sibling指针的b+tree
+            ext4_dx_add_entry(handle, &fname, dir, inode);
+            {
+                // 计算从root开始的路径
+                struct dx_frame *frame = dx_probe(fname, dir, NULL, frames);
+                // 先尝试插入叶子节点
+                err = add_dirent_to_buf(handle, fname, dir, inode, NULL, bh);
+                if (err != -ENOSPC) {
+                    return err;
+                }
+                // 如果叶子节点满了，考虑是否增加tree的高度
+                if (dx_get_count(entries) == dx_get_limit(entries)) {
+                    int add_level = 1;
+                    // 如果每一层都满了，应该增加tree的高度
+                    while (frame > frames) {
+                        if (dx_get_count((frame - 1)->entries) < dx_get_limit((frame - 1)->entries)) {
+                            add_level = 0;
+                            break;
+                        }
+                        frame--;
+                    }
 
-					// 添加新的index-block
-					bh2 = ext4_append(handle, dir, &newblock);
-					node2 = (struct dx_node *)(bh2->b_data);
-					entries2 = node2->entries;
+                    // 添加新的index-block
+                    bh2 = ext4_append(handle, dir, &newblock);
+                    node2 = (struct dx_node *)(bh2->b_data);
+                    entries2 = node2->entries;
 
-					if (!add_level) {
-						// 当前frame已满，复制一半到新增的index-block
-						memcpy((char *) entries2, (char *) (entries + icount1), icount2 * sizeof(struct dx_entry));
-						dx_set_count(entries, icount1);
-						dx_set_count(entries2, icount2);
+                    if (!add_level) {
+                        // 当前frame已满，复制一半到新增的index-block
+                        memcpy((char *) entries2, (char *) (entries + icount1), icount2 * sizeof(struct dx_entry));
+                        dx_set_count(entries, icount1);
+                        dx_set_count(entries2, icount2);
 
-						// 新增的索引插入未满的parent
-						dx_insert_block((frame - 1), hash2, newblock);
-					} else {
-						struct dx_root *dxroot;
-						// 复制root的现有entry到新增的block
-						memcpy((char *) entries2, (char *) entries, icount * sizeof(struct dx_entry));
+                        // 新增的索引插入未满的parent
+                        dx_insert_block((frame - 1), hash2, newblock);
+                    } else {
+                        struct dx_root *dxroot;
+                        // 复制root的现有entry到新增的block
+                        memcpy((char *) entries2, (char *) entries, icount * sizeof(struct dx_entry));
 
-						// root的第一个entry指向新增的block
-						dx_set_block(entries + 0, newblock);
-						dxroot = (struct dx_root *)frames[0].bh->b_data;
-						// root的level+1
-						dxroot->info.indirect_levels += 1;
-						// restart=true说明htree发生变化，重新处理
-						restart = 1;
-					}
-				}
-				// 分隔已满的叶子节点，返回插入点
-				struct ext4_dir_entry_2 *de = do_split(handle, dir, &bh, frame, &fname->hinfo);
-				// 插入数据
-				add_dirent_to_buf(handle, fname, dir, inode, de, bh);
-			}
-		} else {
-			// 数据结构大概是ext4_dir_entry_2数组
-			blocks = dir->i_size >> sb->s_blocksize_bits;
-			for (block = 0; block < blocks; block++) {
-				ext4_read_dirblock(dir, block, DIRENT);
-				// 找到一个空闲的位置插入
-				add_dirent_to_buf(handle, &fname, dir, inode, NULL, bh);
-			}
-		}
-	}
+                        // root的第一个entry指向新增的block
+                        dx_set_block(entries + 0, newblock);
+                        dxroot = (struct dx_root *)frames[0].bh->b_data;
+                        // root的level+1
+                        dxroot->info.indirect_levels += 1;
+                        // restart=true说明htree发生变化，重新处理
+                        restart = 1;
+                    }
+                }
+                // 分隔已满的叶子节点，返回插入点
+                struct ext4_dir_entry_2 *de = do_split(handle, dir, &bh, frame, &fname->hinfo);
+                // 插入数据
+                add_dirent_to_buf(handle, fname, dir, inode, de, bh);
+            }
+        } else {
+            // 数据结构大概是ext4_dir_entry_2数组
+            blocks = dir->i_size >> sb->s_blocksize_bits;
+            for (block = 0; block < blocks; block++) {
+                ext4_read_dirblock(dir, block, DIRENT);
+                // 找到一个空闲的位置插入
+                add_dirent_to_buf(handle, &fname, dir, inode, NULL, bh);
+            }
+        }
+    }
 
-	// 实例化dentry
-	d_instantiate_new(dentry, inode);
-	if (IS_DIRSYNC(dir))
-		// sync
-		ext4_handle_sync(handle);
+    // 实例化dentry
+    d_instantiate_new(dentry, inode);
+    if (IS_DIRSYNC(dir))
+        // sync
+        ext4_handle_sync(handle);
 }
 ```
 
@@ -1293,49 +1293,49 @@ static int ext4_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
 ```c
 static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
-	struct ext4_dir_entry_2 *de;
-	// 读取dentry所在的block到page_cache
-	struct buffer_head *bh = ext4_lookup_entry(dir, dentry, &de);
-	{
-		// inline-data直接遍历inode->i_block构成的ext4_dir_entry_2数组
-		if (ext4_has_inline_data(dir)) {
-			ext4_find_inline_entry(dir, fname, res_dir, &has_inline_data);
-		} else if (is_dx(dir)) {
-			// 搜索htree
-			ext4_dx_find_entry(dir, fname, res_dir);
-			{
-				// 计算从root开始的路径
-				struct dx_frame *frame = dx_probe(fname, dir, NULL, frames);
-				do {
-					// 搜索叶子节点的ext4_dir_entry_2数组结构
-					retval = search_dirblock(bh, dir, fname, block << EXT4_BLOCK_SIZE_BITS(sb), res_dir);
-					if (retval == 1) {
-						return success;
-					}
-					// 判断是否继续
-					retval = ext4_htree_next_block(dir, fname->hinfo.hash, frame, frames, NULL);
-					{
-						// 下一个数据块的hash值
-						bhash = dx_get_hash(++(p->at));
-						// hash发生变化停止搜索
-						if ((bhash & ~1) != hash)
-							return 0;
-					}
-				} while (retval == 1)
-			}
-		} else {
-			// 每次预读最多8个block
-			ext4_bread_batch(dir, block, ra_max, false /* wait */, bh_use);
-			// 搜索每个block的ext4_dir_entry_2数组结构
-			search_dirblock(bh, dir, fname, block << EXT4_BLOCK_SIZE_BITS(sb), res_dir);
-		}
-	}
+    struct ext4_dir_entry_2 *de;
+    // 读取dentry所在的block到page_cache
+    struct buffer_head *bh = ext4_lookup_entry(dir, dentry, &de);
+    {
+        // inline-data直接遍历inode->i_block构成的ext4_dir_entry_2数组
+        if (ext4_has_inline_data(dir)) {
+            ext4_find_inline_entry(dir, fname, res_dir, &has_inline_data);
+        } else if (is_dx(dir)) {
+            // 搜索htree
+            ext4_dx_find_entry(dir, fname, res_dir);
+            {
+                // 计算从root开始的路径
+                struct dx_frame *frame = dx_probe(fname, dir, NULL, frames);
+                do {
+                    // 搜索叶子节点的ext4_dir_entry_2数组结构
+                    retval = search_dirblock(bh, dir, fname, block << EXT4_BLOCK_SIZE_BITS(sb), res_dir);
+                    if (retval == 1) {
+                        return success;
+                    }
+                    // 判断是否继续
+                    retval = ext4_htree_next_block(dir, fname->hinfo.hash, frame, frames, NULL);
+                    {
+                        // 下一个数据块的hash值
+                        bhash = dx_get_hash(++(p->at));
+                        // hash发生变化停止搜索
+                        if ((bhash & ~1) != hash)
+                            return 0;
+                    }
+                } while (retval == 1)
+            }
+        } else {
+            // 每次预读最多8个block
+            ext4_bread_batch(dir, block, ra_max, false /* wait */, bh_use);
+            // 搜索每个block的ext4_dir_entry_2数组结构
+            search_dirblock(bh, dir, fname, block << EXT4_BLOCK_SIZE_BITS(sb), res_dir);
+        }
+    }
 
-	// 根据dentry的ino加载磁盘的inode结构
-	__u32 ino = le32_to_cpu(de->inode);
-	struct inode *inode = ext4_iget(dir->i_sb, ino, EXT4_IGET_NORMAL);
-	// 使用inode初始化dentry
-	return d_splice_alias(inode, dentry);
+    // 根据dentry的ino加载磁盘的inode结构
+    __u32 ino = le32_to_cpu(de->inode);
+    struct inode *inode = ext4_iget(dir->i_sb, ino, EXT4_IGET_NORMAL);
+    // 使用inode初始化dentry
+    return d_splice_alias(inode, dentry);
 }
 ```
 
@@ -1344,14 +1344,14 @@ static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsi
 
 ```c
 const struct inode_operations ext4_file_inode_operations = {
-	.setattr	= ext4_setattr,
-	.getattr	= ext4_file_getattr,
-	.listxattr	= ext4_listxattr,
-	.get_acl	= ext4_get_acl,
-	.set_acl	= ext4_set_acl,
-	.fiemap		= ext4_fiemap,
-	.fileattr_get	= ext4_fileattr_get,
-	.fileattr_set	= ext4_fileattr_set,
+    .setattr    = ext4_setattr,
+    .getattr    = ext4_file_getattr,
+    .listxattr    = ext4_listxattr,
+    .get_acl    = ext4_get_acl,
+    .set_acl    = ext4_set_acl,
+    .fiemap        = ext4_fiemap,
+    .fileattr_get    = ext4_fileattr_get,
+    .fileattr_set    = ext4_fileattr_set,
 };
 ```
 
@@ -1359,10 +1359,10 @@ const struct inode_operations ext4_file_inode_operations = {
 
 ```c
 const struct inode_operations ext4_symlink_inode_operations = {
-	.get_link	= page_get_link,
-	.setattr	= ext4_setattr,
-	.getattr	= ext4_getattr,
-	.listxattr	= ext4_listxattr,
+    .get_link    = page_get_link,
+    .setattr    = ext4_setattr,
+    .getattr    = ext4_getattr,
+    .listxattr    = ext4_listxattr,
 };
 ```
 
@@ -1370,21 +1370,21 @@ const struct inode_operations ext4_symlink_inode_operations = {
 
 ```c
 static const struct address_space_operations ext4_aops = {
-	.readpage			= ext4_readpage,
-	.readahead			= ext4_readahead,
-	.writepage			= ext4_writepage,
-	.writepages			= ext4_writepages,
-	.write_begin		= ext4_write_begin,
-	.write_end			= ext4_write_end,
-	.set_page_dirty		= ext4_set_page_dirty,
-	.bmap				= ext4_bmap,
-	.invalidatepage		= ext4_invalidatepage,
-	.releasepage		= ext4_releasepage,
-	.direct_IO			= noop_direct_IO,
-	.migratepage		= buffer_migrate_page,
-	.is_partially_uptodate  = block_is_partially_uptodate,
-	.error_remove_page	= generic_error_remove_page,
-	.swap_activate		= ext4_iomap_swap_activate,
+    .readpage            = ext4_readpage,
+    .readahead            = ext4_readahead,
+    .writepage            = ext4_writepage,
+    .writepages            = ext4_writepages,
+    .write_begin        = ext4_write_begin,
+    .write_end            = ext4_write_end,
+    .set_page_dirty        = ext4_set_page_dirty,
+    .bmap                = ext4_bmap,
+    .invalidatepage        = ext4_invalidatepage,
+    .releasepage        = ext4_releasepage,
+    .direct_IO            = noop_direct_IO,
+    .migratepage        = buffer_migrate_page,
+    .is_partially_uptodate  = block_is_partially_uptodate,
+    .error_remove_page    = generic_error_remove_page,
+    .swap_activate        = ext4_iomap_swap_activate,
 };
 ```
 
@@ -1393,55 +1393,55 @@ static const struct address_space_operations ext4_aops = {
 ```c
 static int ext4_readpage(struct file *file, struct page *page)
 {
-	ext4_mpage_readpages(inode, NULL, page);
-	{
-		// page->index转block_in_file
-		block_in_file = next_block = (sector_t)page->index << (PAGE_SHIFT - blkbits);
-		last_block = block_in_file + nr_pages * blocks_per_page;
+    ext4_mpage_readpages(inode, NULL, page);
+    {
+        // page->index转block_in_file
+        block_in_file = next_block = (sector_t)page->index << (PAGE_SHIFT - blkbits);
+        last_block = block_in_file + nr_pages * blocks_per_page;
 
-		struct ext4_map_blocks map;
-		map.m_lblk = block_in_file;
-		map.m_len = last_block - block_in_file;
+        struct ext4_map_blocks map;
+        map.m_lblk = block_in_file;
+        map.m_len = last_block - block_in_file;
 
-		// 逻辑块转物理块
-		ext4_map_blocks(NULL, inode, &map, 0);
-		{
-			if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)) {
-				// 数据块是extent格式
-				retval = ext4_ext_map_blocks(handle, inode, map, 0);
-				{
-					// 从root开始搜索路径
-					struct ext4_ext_path *path = ext4_find_extent(inode, map->m_lblk, NULL, 0);
-					ex = path[depth].p_ext;
-					if (ex) {
-						// 搜索到的逻辑块号及其对应的物理块号和块数量
-						ext4_lblk_t ee_block = le32_to_cpu(ex->ee_block);
-						ext4_fsblk_t ee_start = ext4_ext_pblock(ex);
-						unsigned short ee_len = ext4_ext_get_actual_len(ex);
-						if (in_range(map->m_lblk, ee_block, ee_len)) {
-							// 找到了对应的物理块
-							newblock = map->m_lblk - ee_block + ee_start;
-						}
-					}
+        // 逻辑块转物理块
+        ext4_map_blocks(NULL, inode, &map, 0);
+        {
+            if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)) {
+                // 数据块是extent格式
+                retval = ext4_ext_map_blocks(handle, inode, map, 0);
+                {
+                    // 从root开始搜索路径
+                    struct ext4_ext_path *path = ext4_find_extent(inode, map->m_lblk, NULL, 0);
+                    ex = path[depth].p_ext;
+                    if (ex) {
+                        // 搜索到的逻辑块号及其对应的物理块号和块数量
+                        ext4_lblk_t ee_block = le32_to_cpu(ex->ee_block);
+                        ext4_fsblk_t ee_start = ext4_ext_pblock(ex);
+                        unsigned short ee_len = ext4_ext_get_actual_len(ex);
+                        if (in_range(map->m_lblk, ee_block, ee_len)) {
+                            // 找到了对应的物理块
+                            newblock = map->m_lblk - ee_block + ee_start;
+                        }
+                    }
 
-					// 分配新的数据块
-					newex.ee_block = cpu_to_le32(map->m_lblk);
-					cluster_offset = EXT4_LBLK_COFF(sbi, map->m_lblk);
-					get_implied_cluster_alloc(inode->i_sb, map, ex, path);
-					// 插入extent索引结构
-					ext4_ext_insert_extent(handle, inode, &path, &newex, flags);
-				}
-			} else {
-				// 数据块是传统的12+1+1+1三级间接寻址
-				retval = ext4_ind_map_blocks(handle, inode, map, 0);
-			}
-		}
+                    // 分配新的数据块
+                    newex.ee_block = cpu_to_le32(map->m_lblk);
+                    cluster_offset = EXT4_LBLK_COFF(sbi, map->m_lblk);
+                    get_implied_cluster_alloc(inode->i_sb, map, ex, path);
+                    // 插入extent索引结构
+                    ext4_ext_insert_extent(handle, inode, &path, &newex, flags);
+                }
+            } else {
+                // 数据块是传统的12+1+1+1三级间接寻址
+                retval = ext4_ind_map_blocks(handle, inode, map, 0);
+            }
+        }
 
-		// 转换的过程有3种
-		// 1. 已经加载到内存: map.m_flags & EXT4_MAP_MAPPED
-		// 2. 物理块不存在: 文件存在漏洞，page内容全部置零
-		// 3. 物理块存在但是还未加载：提交bio请求加载数据
-	}
+        // 转换的过程有3种
+        // 1. 已经加载到内存: map.m_flags & EXT4_MAP_MAPPED
+        // 2. 物理块不存在: 文件存在漏洞，page内容全部置零
+        // 3. 物理块存在但是还未加载：提交bio请求加载数据
+    }
 }
 ```
 
@@ -1449,12 +1449,12 @@ static int ext4_readpage(struct file *file, struct page *page)
 
 ```c
 const struct file_operations ext4_dir_operations = {
-	.llseek		= ext4_dir_llseek,
-	.read		= generic_read_dir,
-	.iterate_shared	= ext4_readdir,
-	.unlocked_ioctl = ext4_ioctl,
-	.fsync		= ext4_sync_file,
-	.release	= ext4_release_dir,
+    .llseek        = ext4_dir_llseek,
+    .read        = generic_read_dir,
+    .iterate_shared    = ext4_readdir,
+    .unlocked_ioctl = ext4_ioctl,
+    .fsync        = ext4_sync_file,
+    .release    = ext4_release_dir,
 };
 ```
 
@@ -1462,20 +1462,20 @@ const struct file_operations ext4_dir_operations = {
 
 ```c
 const struct file_operations ext4_file_operations = {
-	.llseek		= ext4_llseek,
-	.read_iter	= ext4_file_read_iter,
-	.write_iter	= ext4_file_write_iter,
-	.iopoll		= iomap_dio_iopoll,
-	.unlocked_ioctl = ext4_ioctl,
-	.mmap		= ext4_file_mmap,
-	.mmap_supported_flags = MAP_SYNC,
-	.open		= ext4_file_open,
-	.release	= ext4_release_file,
-	.fsync		= ext4_sync_file,
-	.get_unmapped_area = thp_get_unmapped_area,
-	.splice_read	= generic_file_splice_read,
-	.splice_write	= iter_file_splice_write,
-	.fallocate	= ext4_fallocate,
+    .llseek        = ext4_llseek,
+    .read_iter    = ext4_file_read_iter,
+    .write_iter    = ext4_file_write_iter,
+    .iopoll        = iomap_dio_iopoll,
+    .unlocked_ioctl = ext4_ioctl,
+    .mmap        = ext4_file_mmap,
+    .mmap_supported_flags = MAP_SYNC,
+    .open        = ext4_file_open,
+    .release    = ext4_release_file,
+    .fsync        = ext4_sync_file,
+    .get_unmapped_area = thp_get_unmapped_area,
+    .splice_read    = generic_file_splice_read,
+    .splice_write    = iter_file_splice_write,
+    .fallocate    = ext4_fallocate,
 };
 ```
 

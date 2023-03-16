@@ -46,10 +46,10 @@ int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it, gfp_t g
     struct tcp_out_options opts;
     if (unlikely(tcb->tcp_flags & TCPHDR_SYN)) {
         // 连接建立的选项
-		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5);
+        tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5);
         {
             // tcp_output.c/tcp_connect_init中设置
-	        // 取min(用户通过ioctl设置的值, ipv4_default_advmss)
+            // 取min(用户通过ioctl设置的值, ipv4_default_advmss)
             opts->mss = tcp_advertise_mss(sk);
             // 时间戳
             if (likely(sock_net(sk)->ipv4.sysctl_tcp_timestamps && !*md5)) {
@@ -76,9 +76,9 @@ int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it, gfp_t g
                 tp->syn_fastopen_exp = fastopen->cookie.exp ? 1 : 0;
             }
         }
-	} else {
+    } else {
         // 连接完成后的选项
-		tcp_options_size = tcp_established_options(sk, skb, &opts, &md5);
+        tcp_options_size = tcp_established_options(sk, skb, &opts, &md5);
         {
             // 时间戳选项
             if (likely(tp->rx_opt.tstamp_ok)) {
@@ -100,20 +100,20 @@ int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it, gfp_t g
 
     // 设置tcp header
     th = (struct tcphdr *)skb->data;
-	th->source		= inet->inet_sport;
-	th->dest		= inet->inet_dport;
-	th->seq			= htonl(tcb->seq);
-	th->ack_seq		= htonl(tcp_sk(sk)->rcv_nxt);
+    th->source        = inet->inet_sport;
+    th->dest        = inet->inet_dport;
+    th->seq            = htonl(tcb->seq);
+    th->ack_seq        = htonl(tcp_sk(sk)->rcv_nxt);
     // 设置header长度和flag
-	*(((__be16 *)th) + 6)	= htons(((tcp_header_size >> 2) << 12) | tcb->tcp_flags);
+    *(((__be16 *)th) + 6)    = htons(((tcp_header_size >> 2) << 12) | tcb->tcp_flags);
 
     if (likely(!(tcb->tcp_flags & TCPHDR_SYN))) {
-		th->window  = htons(tcp_select_window(sk));
+        th->window  = htons(tcp_select_window(sk));
         // 拥堵标识
-		tcp_ecn_send(sk, skb, th, tcp_header_size);
-	} else {
-		th->window	= htons(min(tp->rcv_wnd, 65535U));
-	}
+        tcp_ecn_send(sk, skb, th, tcp_header_size);
+    } else {
+        th->window    = htons(min(tp->rcv_wnd, 65535U));
+    }
 
     tcp_options_write((__be32 *)(th + 1), tp, &opts);
 
@@ -156,10 +156,10 @@ The `Identification field` value (set by the original sender) is copied to each 
 
 ```c
 /* IP flags. */
-#define IP_CE		0x8000		/* Flag: "Congestion"		*/
-#define IP_DF		0x4000		/* Flag: "Don't Fragment"	*/
-#define IP_MF		0x2000		/* Flag: "More Fragments"	*/
-#define IP_OFFSET	0x1FFF		/* "Fragment Offset" part	*/
+#define IP_CE        0x8000        /* Flag: "Congestion"        */
+#define IP_DF        0x4000        /* Flag: "Don't Fragment"    */
+#define IP_MF        0x2000        /* Flag: "More Fragments"    */
+#define IP_OFFSET    0x1FFF        /* "Fragment Offset" part    */
 ```
 
 3-bit的flags字段跟分片相关的是`DF`和`MF`.
@@ -179,7 +179,7 @@ Every IP datagram contains the Source IP Address of the sender of the datagram a
 ```c
 int ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl)
 {
-	return __ip_queue_xmit(sk, skb, fl, inet_sk(sk)->tos);
+    return __ip_queue_xmit(sk, skb, fl, inet_sk(sk)->tos);
     {
         struct rtable *rt = (struct rtable *)__sk_dst_check(sk, 0);
         if (!rt) {
@@ -194,9 +194,9 @@ int ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl)
                                         sk->sk_bound_dev_if);
             {
                 // 根据目标地址最长匹配: `netstat -nr`查看路由表
-                // Destination        Gateway            Flags           Netif 			Expire
+                // Destination        Gateway            Flags           Netif             Expire
                 // default            10.0.64.1          UGScg             en0       
-                // 192.168.1.0/24	  192.168.1.1		 UCS			   lo0	
+                // 192.168.1.0/24      192.168.1.1         UCS               lo0    
                 fib_lookup(net, fl4, res, 0);
                 return __mkroute_output(res, fl4, orig_oif, dev_out, flags);
                 {
@@ -270,7 +270,7 @@ int ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl)
                 skb_dst(skb)->output(net, sk, skb);
                 {
                     skb->dev = dev;
-	                skb->protocol = htons(ETH_P_IP);
+                    skb->protocol = htons(ETH_P_IP);
                     ip_finish_output(net, sk, skb);
                     {
                         // cgroup可以限制网络流量
@@ -343,7 +343,7 @@ int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *skb)
             neigh = __neigh_create(&arp_tbl, &daddr, dev, false);
             {
                 neigh = neigh_alloc(tbl, dev, exempt_from_gc);
-                // arp初始化neighbour: .constructor	= arp_constructor
+                // arp初始化neighbour: .constructor    = arp_constructor
                 arp_tbl->constructor(n);
                 {
                     struct net_device *dev = neigh->dev;
@@ -394,10 +394,10 @@ int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *skb)
 int dev_queue_xmit(struct sk_buff *skb)
 {
     // 选择设备队列: e1000只有一个发送队列
-	struct netdev_queue *txq = netdev_core_pick_tx(dev, skb, sb_dev);
+    struct netdev_queue *txq = netdev_core_pick_tx(dev, skb, sb_dev);
     struct Qdisc *q = rcu_dereference_bh(txq->qdisc);
     if (q->enqueue) {
-		__dev_xmit_skb(skb, q, dev, txq);
+        __dev_xmit_skb(skb, q, dev, txq);
         {
             // 队列允许在空闲时直接发送
             if (q->flags & TCQ_F_CAN_BYPASS && nolock_qdisc_is_empty(q) && qdisc_run_begin(q)) {
@@ -442,7 +442,7 @@ int dev_queue_xmit(struct sk_buff *skb)
                 }
             }
         }
-	}
+    }
 }
 ```
 
@@ -461,7 +461,7 @@ void net_tx_action(struct softirq_action *h)
         clist = sd->completion_queue;
         while (clist) {
             struct sk_buff *skb = clist;
-			clist = clist->next;
+            clist = clist->next;
             // 释放发送完成的skb
             __kfree_skb(skb);
         }
@@ -470,11 +470,11 @@ void net_tx_action(struct softirq_action *h)
     if (sd->output_queue) {
         struct Qdisc *head;
 
-		local_irq_disable();
-		head = sd->output_queue;
-		sd->output_queue = NULL;
-		sd->output_queue_tailp = &sd->output_queue;
-		local_irq_enable();
+        local_irq_disable();
+        head = sd->output_queue;
+        sd->output_queue = NULL;
+        sd->output_queue_tailp = &sd->output_queue;
+        local_irq_enable();
 
         while (head) {
             struct Qdisc *q = head;
@@ -492,15 +492,15 @@ void net_tx_action(struct softirq_action *h)
 
 ```c
 static struct pci_driver e1000_driver = {
-	.name     = e1000_driver_name,
-	.id_table = e1000_pci_tbl,
-	.probe    = e1000_probe,
-	.remove   = e1000_remove,
-	.driver = {
-		.pm = &e1000_pm_ops,
-	},
-	.shutdown = e1000_shutdown,
-	.err_handler = &e1000_err_handler
+    .name     = e1000_driver_name,
+    .id_table = e1000_pci_tbl,
+    .probe    = e1000_probe,
+    .remove   = e1000_remove,
+    .driver = {
+        .pm = &e1000_pm_ops,
+    },
+    .shutdown = e1000_shutdown,
+    .err_handler = &e1000_err_handler
 };
 
 static int __init e1000_init_module(void)
@@ -513,10 +513,10 @@ static int __init e1000_init_module(void)
 
 ```c
 static const struct net_device_ops e1000_netdev_ops = {
-	.ndo_open				= e1000_open,
-	.ndo_stop				= e1000_close,
-	.ndo_start_xmit			= e1000_xmit_frame,
-	.ndo_change_mtu			= e1000_change_mtu,
+    .ndo_open                = e1000_open,
+    .ndo_stop                = e1000_close,
+    .ndo_start_xmit            = e1000_xmit_frame,
+    .ndo_change_mtu            = e1000_change_mtu,
 };
 
 static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -551,15 +551,15 @@ int e1000_open(struct net_device *netdev)
     {
         // 初始化每个队列
         for (i = 0; i < adapter->num_tx_queues; i++) {
-		    e1000_setup_tx_resources(adapter, &adapter->tx_ring[i]);
+            e1000_setup_tx_resources(adapter, &adapter->tx_ring[i]);
             {
                 // e1000_tx_buffer用于存储skb和dma_addr_t的对应关系
                 int size = sizeof(struct e1000_tx_buffer) * txdr->count;
-	            txdr->buffer_info = vzalloc(size);
+                txdr->buffer_info = vzalloc(size);
 
                 // 按page对齐
                 txdr->size = txdr->count * sizeof(struct e1000_tx_desc);
-	            txdr->size = ALIGN(txdr->size, 4096);
+                txdr->size = ALIGN(txdr->size, 4096);
 
                 // dma-mapping
                 txdr->desc = dma_alloc_coherent(&pdev->dev, txdr->size, &txdr->dma, GFP_KERNEL);
@@ -570,14 +570,14 @@ int e1000_open(struct net_device *netdev)
     e1000_setup_all_rx_resources(adapter);
     {
         for (i = 0; i < adapter->num_rx_queues; i++) {
-		    e1000_setup_rx_resources(adapter, &adapter->rx_ring[i]);
+            e1000_setup_rx_resources(adapter, &adapter->rx_ring[i]);
             {
                 // e1000_rx_buffer用于存储skb和dma_addr_t的对应关系
                 int size = sizeof(struct e1000_rx_buffer) * rxdr->count;
-	            rxdr->buffer_info = vzalloc(size);
+                rxdr->buffer_info = vzalloc(size);
 
                 rxdr->size = rxdr->count * sizeof(struct e1000_rx_desc);
-	            rxdr->size = ALIGN(rxdr->size, 4096);
+                rxdr->size = ALIGN(rxdr->size, 4096);
 
                 // dma-mapping
                 rxdr->desc = dma_alloc_coherent(&pdev->dev, rxdr->size, &rxdr->dma, GFP_KERNEL);
@@ -594,7 +594,7 @@ int e1000_open(struct net_device *netdev)
 
     // 打开中断
     e1000_irq_enable(adapter);
-	netif_start_queue(netdev);
+    netif_start_queue(netdev);
 }
 ```
 
@@ -602,7 +602,7 @@ int e1000_open(struct net_device *netdev)
 
 ```c
 static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
-				    struct net_device *netdev)
+                    struct net_device *netdev)
 {
     // ip报文分片
     unsigned int nr_frags = skb_shinfo(skb)->nr_frags;
@@ -624,7 +624,7 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
             // 以4k为单位map skb的数据
             buffer_info->dma = dma_map_single(&pdev->dev, skb->data + offset, size, DMA_TO_DEVICE);
             len -= size;
-		    offset += size;
+            offset += size;
         }
 
         for (f = 0; f < nr_frags; f++) {
@@ -637,7 +637,7 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
                 // 以4k为单位map每个分片的数据
                 buffer_info->dma = skb_frag_dma_map(&pdev->dev, frag, offset, size, DMA_TO_DEVICE);
                 len -= size;
-			    offset += size;
+                offset += size;
             }
         }
 
@@ -656,18 +656,18 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
 static irqreturn_t e1000_intr(int irq, void *data)
 {
     /* 先禁用中断切换到轮询模式，避免高速网卡产生中断风暴 */
-	ew32(IMC, ~0);
-	E1000_WRITE_FLUSH();
+    ew32(IMC, ~0);
+    E1000_WRITE_FLUSH();
 
     // 是否首次设置NAPIF_STATE_SCHED, 如果是首次则开始轮询
     if (likely(napi_schedule_prep(&adapter->napi))) {
-		__napi_schedule(&adapter->napi);
+        __napi_schedule(&adapter->napi);
         {
             // 加入poll_list，触发tx软中断
             list_add_tail(&napi->poll_list, &sd->poll_list);
-	        __raise_softirq_irqoff(NET_RX_SOFTIRQ);
+            __raise_softirq_irqoff(NET_RX_SOFTIRQ);
         }
-	}
+    }
 }
 ```
 
@@ -679,28 +679,28 @@ static void net_rx_action(struct softirq_action *h)
     LIST_HEAD(list);
     local_irq_disable();
     // 通过修改链表头复制队列
-	list_splice_init(&sd->poll_list, &list);
-	local_irq_enable();
+    list_splice_init(&sd->poll_list, &list);
+    local_irq_enable();
 
     for (;;) {
         struct napi_struct *n = list_first_entry(&list, struct napi_struct, poll_list);
-		budget -= napi_poll(n, &repoll);
+        budget -= napi_poll(n, &repoll);
         // 限额用完或超时则结束循环
         if (unlikely(budget <= 0 ||
-			     time_after_eq(jiffies, time_limit))) {
-			sd->time_squeeze++;
-			break;
-		}
+                 time_after_eq(jiffies, time_limit))) {
+            sd->time_squeeze++;
+            break;
+        }
     }
 
     // 没处理完的跟新增的合并
     list_splice_tail_init(&sd->poll_list, &list);
-	list_splice_tail(&repoll, &list);
-	list_splice(&list, &sd->poll_list);
+    list_splice_tail(&repoll, &list);
+    list_splice(&list, &sd->poll_list);
 
     // 非空则这次触发软中断
-	if (!list_empty(&sd->poll_list))
-		__raise_softirq_irqoff(NET_RX_SOFTIRQ);
+    if (!list_empty(&sd->poll_list))
+        __raise_softirq_irqoff(NET_RX_SOFTIRQ);
 }
 ```
 
@@ -805,9 +805,9 @@ static void __netif_receive_skb_list(struct list_head *head)
 
 ```c
 static struct packet_type ip_packet_type = {
-	.type = cpu_to_be16(ETH_P_IP),
-	.func = ip_rcv,
-	.list_func = ip_list_rcv,
+    .type = cpu_to_be16(ETH_P_IP),
+    .func = ip_rcv,
+    .list_func = ip_list_rcv,
 };
 
 static int __init inet_init(void)
@@ -818,32 +818,32 @@ static int __init inet_init(void)
 
 ```c
 void ip_list_rcv(struct list_head *head, struct packet_type *pt,
-		 struct net_device *orig_dev)
+         struct net_device *orig_dev)
 {
     INIT_LIST_HEAD(&sublist);
-	list_for_each_entry_safe(skb, next, head, list) {
-		struct net_device *dev = skb->dev;
-		struct net *net = dev_net(dev);
+    list_for_each_entry_safe(skb, next, head, list) {
+        struct net_device *dev = skb->dev;
+        struct net *net = dev_net(dev);
 
-		skb_list_del_init(skb);
-		skb = ip_rcv_core(skb, net);
-		if (skb == NULL)
-			continue;
+        skb_list_del_init(skb);
+        skb = ip_rcv_core(skb, net);
+        if (skb == NULL)
+            continue;
 
         // 合并多个连续的dev相同的skb批量处理
-		if (curr_dev != dev || curr_net != net) {
-			// dev变化批量处理
-			if (!list_empty(&sublist))
-				ip_sublist_rcv(&sublist, curr_dev, curr_net);
-			INIT_LIST_HEAD(&sublist);
-			curr_dev = dev;
-			curr_net = net;
-		}
-		list_add_tail(&skb->list, &sublist);
-	}
+        if (curr_dev != dev || curr_net != net) {
+            // dev变化批量处理
+            if (!list_empty(&sublist))
+                ip_sublist_rcv(&sublist, curr_dev, curr_net);
+            INIT_LIST_HEAD(&sublist);
+            curr_dev = dev;
+            curr_net = net;
+        }
+        list_add_tail(&skb->list, &sublist);
+    }
 
-	if (!list_empty(&sublist))
-		ip_sublist_rcv(&sublist, curr_dev, curr_net);
+    if (!list_empty(&sublist))
+        ip_sublist_rcv(&sublist, curr_dev, curr_net);
         {
             // 先经过netfilter处理
             NF_HOOK_LIST(NFPROTO_IPV4, NF_INET_PRE_ROUTING, net, ...);
@@ -863,7 +863,7 @@ void ip_list_rcv(struct list_head *head, struct packet_type *pt,
                                 // 本机处理
                                 rt_dst_alloc(ip_rt_get_dev(net, res), flags | RTCF_LOCAL, ...);
                                 if (flags & RTCF_LOCAL)
-			                        rt->dst.input = ip_local_deliver;
+                                    rt->dst.input = ip_local_deliver;
                             } else {
                                 // 包转发
                                 ip_mkroute_input(skb, res, in_dev, daddr, saddr, tos, flkeys);
@@ -917,12 +917,12 @@ L3根据header中L4协议的类型派发
 
 ```c
 static struct net_protocol tcp_protocol = {
-	.early_demux	=	tcp_v4_early_demux,
-	.early_demux_handler =  tcp_v4_early_demux,
-	.handler		=	tcp_v4_rcv,
-	.err_handler	=	tcp_v4_err,
-	.no_policy		=	1,
-	.icmp_strict_tag_validation = 1,
+    .early_demux    =    tcp_v4_early_demux,
+    .early_demux_handler =  tcp_v4_early_demux,
+    .handler        =    tcp_v4_rcv,
+    .err_handler    =    tcp_v4_err,
+    .no_policy        =    1,
+    .icmp_strict_tag_validation = 1,
 };
 
 static int __init inet_init(void)
@@ -945,20 +945,20 @@ void ip_protocol_deliver_rcu(struct net *net, struct sk_buff *skb, int protocol)
 int tcp_v4_rcv(struct sk_buff *skb)
 {
     th = (const struct tcphdr *)skb->data;
-	iph = ip_hdr(skb);
+    iph = ip_hdr(skb);
     // 根据(saddr, sport, daddr, dport)查找sock
     sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source, th->dest, sdif, ...);
 
     // 各种限制和策略的检查
     if (unlikely(iph->ttl < inet_sk(sk)->min_ttl)) {
-		goto discard_and_relse;
-	}
+        goto discard_and_relse;
+    }
 
     if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
-		goto discard_and_relse;
+        goto discard_and_relse;
 
-	if (tcp_filter(sk, skb))
-		goto discard_and_relse;
+    if (tcp_filter(sk, skb))
+        goto discard_and_relse;
 
     // tcp状态机，此处只展示连接建立之后的流程
     tcp_v4_do_rcv(sk, skb);
@@ -1032,9 +1032,9 @@ With servers, however, the situation is different. They almost always use well-k
 static struct vfsmount *sock_mnt;
 
 static struct file_system_type sock_fs_type = {
-	.name =		"sockfs",
-	.init_fs_context = sockfs_init_fs_context,
-	.kill_sb =	kill_anon_super,
+    .name =        "sockfs",
+    .init_fs_context = sockfs_init_fs_context,
+    .kill_sb =    kill_anon_super,
 };
 
 static int __init sock_init(void)
@@ -1045,32 +1045,32 @@ static int __init sock_init(void)
 }
 
 static const struct super_operations sockfs_ops = {
-	.alloc_inode	= sock_alloc_inode,
-	.free_inode	    = sock_free_inode,
-	.statfs		    = simple_statfs,
+    .alloc_inode    = sock_alloc_inode,
+    .free_inode        = sock_free_inode,
+    .statfs            = simple_statfs,
 };
 
 // 初始化super_block
 static int sockfs_init_fs_context(struct fs_context *fc)
 {
-	struct pseudo_fs_context *ctx = init_pseudo(fc, SOCKFS_MAGIC);s
-	ctx->ops = &sockfs_ops;
-	ctx->dops = &sockfs_dentry_operations;
-	ctx->xattr = sockfs_xattr_handlers;
-	return 0;
+    struct pseudo_fs_context *ctx = init_pseudo(fc, SOCKFS_MAGIC);s
+    ctx->ops = &sockfs_ops;
+    ctx->dops = &sockfs_dentry_operations;
+    ctx->xattr = sockfs_xattr_handlers;
+    return 0;
 }
 
 // 创建inode
 static struct inode *sock_alloc_inode(struct super_block *sb)
 {
-	struct socket_alloc *ei = kmem_cache_alloc(sock_inode_cachep, GFP_KERNEL);
-	init_waitqueue_head(&ei->socket.wq.wait);
-	
-	ei->socket.state = SS_UNCONNECTED;
-	ei->socket.flags = 0;
+    struct socket_alloc *ei = kmem_cache_alloc(sock_inode_cachep, GFP_KERNEL);
+    init_waitqueue_head(&ei->socket.wq.wait);
+    
+    ei->socket.state = SS_UNCONNECTED;
+    ei->socket.flags = 0;
 
     // inode嵌入在socket_alloc中
-	return &ei->vfs_inode;
+    return &ei->vfs_inode;
 }
 
 ```
@@ -1081,9 +1081,9 @@ static struct inode *sock_alloc_inode(struct super_block *sb)
 static struct net_proto_family *net_families[46];
 
 static const struct net_proto_family inet_family_ops = {
-	.family = PF_INET,
-	.create = inet_create,
-	.owner	= THIS_MODULE,
+    .family = PF_INET,
+    .create = inet_create,
+    .owner    = THIS_MODULE,
 };
 
 sock_register(&inet_family_ops);
@@ -1095,89 +1095,89 @@ sock_register(&inet_family_ops);
 static struct list_head inetsw[11];
 
 struct proto tcp_prot = {
-	.name			= "TCP",
-	.close			= tcp_close,
-	.pre_connect	= tcp_v4_pre_connect,
-	.connect		= tcp_v4_connect,
-	.disconnect		= tcp_disconnect,
-	.accept			= inet_csk_accept,
-	.ioctl			= tcp_ioctl,
-	.init			= tcp_v4_init_sock,
-	.destroy		= tcp_v4_destroy_sock,
-	.shutdown		= tcp_shutdown,
-	.setsockopt		= tcp_setsockopt,
-	.getsockopt		= tcp_getsockopt,
-	.keepalive		= tcp_set_keepalive,
-	.recvmsg		= tcp_recvmsg,
-	.sendmsg		= tcp_sendmsg,
-	.sendpage		= tcp_sendpage,
-	.backlog_rcv	= tcp_v4_do_rcv,
-	.release_cb		= tcp_release_cb,
-	.hash			= inet_hash,
-	.unhash			= inet_unhash,
-	.get_port		= inet_csk_get_port
+    .name            = "TCP",
+    .close            = tcp_close,
+    .pre_connect    = tcp_v4_pre_connect,
+    .connect        = tcp_v4_connect,
+    .disconnect        = tcp_disconnect,
+    .accept            = inet_csk_accept,
+    .ioctl            = tcp_ioctl,
+    .init            = tcp_v4_init_sock,
+    .destroy        = tcp_v4_destroy_sock,
+    .shutdown        = tcp_shutdown,
+    .setsockopt        = tcp_setsockopt,
+    .getsockopt        = tcp_getsockopt,
+    .keepalive        = tcp_set_keepalive,
+    .recvmsg        = tcp_recvmsg,
+    .sendmsg        = tcp_sendmsg,
+    .sendpage        = tcp_sendpage,
+    .backlog_rcv    = tcp_v4_do_rcv,
+    .release_cb        = tcp_release_cb,
+    .hash            = inet_hash,
+    .unhash            = inet_unhash,
+    .get_port        = inet_csk_get_port
 };
 
 const struct proto_ops inet_dgram_ops = {
-	.family		   = PF_INET,
-	.release	   = inet_release,
-	.bind		   = inet_bind,
-	.connect	   = inet_dgram_connect,
-	.socketpair	   = sock_no_socketpair,
-	.accept		   = sock_no_accept,
-	.getname	   = inet_getname,
-	.poll		   = udp_poll,
-	.ioctl		   = inet_ioctl,
-	.gettstamp	   = sock_gettstamp,
-	.listen		   = sock_no_listen,
-	.shutdown	   = inet_shutdown,
-	.setsockopt	   = sock_common_setsockopt,
-	.getsockopt	   = sock_common_getsockopt,
-	.sendmsg	   = inet_sendmsg,
-	.read_sock	   = udp_read_sock,
-	.recvmsg	   = inet_recvmsg,
-	.mmap		   = sock_no_mmap,
-	.sendpage	   = inet_sendpage,
-	.set_peek_off	   = sk_set_peek_off,
+    .family           = PF_INET,
+    .release       = inet_release,
+    .bind           = inet_bind,
+    .connect       = inet_dgram_connect,
+    .socketpair       = sock_no_socketpair,
+    .accept           = sock_no_accept,
+    .getname       = inet_getname,
+    .poll           = udp_poll,
+    .ioctl           = inet_ioctl,
+    .gettstamp       = sock_gettstamp,
+    .listen           = sock_no_listen,
+    .shutdown       = inet_shutdown,
+    .setsockopt       = sock_common_setsockopt,
+    .getsockopt       = sock_common_getsockopt,
+    .sendmsg       = inet_sendmsg,
+    .read_sock       = udp_read_sock,
+    .recvmsg       = inet_recvmsg,
+    .mmap           = sock_no_mmap,
+    .sendpage       = inet_sendpage,
+    .set_peek_off       = sk_set_peek_off,
 };
 
 static struct inet_protosw inetsw_array[] =
 {
-	{
-		.type =       SOCK_STREAM,
-		.protocol =   IPPROTO_TCP,
-		.prot =       &tcp_prot,
-		.ops =        &inet_stream_ops,
-		.flags =      INET_PROTOSW_PERMANENT | INET_PROTOSW_ICSK,
-	},
-
-	{
-		.type =       SOCK_DGRAM,
-		.protocol =   IPPROTO_UDP,
-		.prot =       &udp_prot,
-		.ops =        &inet_dgram_ops,
-		.flags =      INET_PROTOSW_PERMANENT,
+    {
+        .type =       SOCK_STREAM,
+        .protocol =   IPPROTO_TCP,
+        .prot =       &tcp_prot,
+        .ops =        &inet_stream_ops,
+        .flags =      INET_PROTOSW_PERMANENT | INET_PROTOSW_ICSK,
     },
 
     {
-		.type =       SOCK_DGRAM,
-		.protocol =   IPPROTO_ICMP,
-		.prot =       &ping_prot,
-		.ops =        &inet_sockraw_ops,
-		.flags =      INET_PROTOSW_REUSE,
-	},
+        .type =       SOCK_DGRAM,
+        .protocol =   IPPROTO_UDP,
+        .prot =       &udp_prot,
+        .ops =        &inet_dgram_ops,
+        .flags =      INET_PROTOSW_PERMANENT,
+    },
 
-	{
-		.type =       SOCK_RAW,
-		.protocol =   IPPROTO_IP,	/* wild card */
-		.prot =       &raw_prot,
-		.ops =        &inet_sockraw_ops,
-		.flags =      INET_PROTOSW_REUSE,
+    {
+        .type =       SOCK_DGRAM,
+        .protocol =   IPPROTO_ICMP,
+        .prot =       &ping_prot,
+        .ops =        &inet_sockraw_ops,
+        .flags =      INET_PROTOSW_REUSE,
+    },
+
+    {
+        .type =       SOCK_RAW,
+        .protocol =   IPPROTO_IP,    /* wild card */
+        .prot =       &raw_prot,
+        .ops =        &inet_sockraw_ops,
+        .flags =      INET_PROTOSW_REUSE,
     }
 };
 
 for (q = inetsw_array; q < &inetsw_array[4]; ++q)
-	inet_register_protosw(q);
+    inet_register_protosw(q);
 ```
 
 ## 系统调用
@@ -1186,9 +1186,9 @@ for (q = inetsw_array; q < &inetsw_array[4]; ++q)
 
 ```c
 static const struct file_operations socket_file_ops = {
-	.read_iter =	sock_read_iter,
-	.write_iter =	sock_write_iter,
-	.poll =		    sock_poll
+    .read_iter =    sock_read_iter,
+    .write_iter =    sock_write_iter,
+    .poll =            sock_poll
 };
 
 int __sys_socket(int family, int type, int protocol)
@@ -1216,8 +1216,8 @@ int __sys_socket(int family, int type, int protocol)
             sock_init_data(sock, sk);
             {
                 // 默认可以放下256个skb
-                sk->sk_rcvbuf =	sysctl_rmem_default;
-	            sk->sk_sndbuf =	sysctl_wmem_default;
+                sk->sk_rcvbuf =    sysctl_rmem_default;
+                sk->sk_sndbuf =    sysctl_wmem_default;
                 sk->sk_state = TCP_CLOSE;
             }
         }
@@ -1230,7 +1230,7 @@ int __sys_socket(int family, int type, int protocol)
             file = alloc_file_pseudo(SOCK_INODE(sock), ..., &socket_file_ops);
 
             sock->file = file;
-	        file->private_data = sock;
+            file->private_data = sock;
         }
     }
 }
@@ -1253,7 +1253,7 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
             // 查找hash表
             head = &hinfo->bhash[inet_bhashfn(net, port, hinfo->bhash_size)];
             inet_bind_bucket_for_each(tb, &head->chain)
-		        if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev && tb->port == port) {
+                if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev && tb->port == port) {
                     // 端口
                     if (sk->sk_reuse == SK_FORCE_REUSE) {
                         return success;
@@ -1287,7 +1287,7 @@ int __sys_listen(int fd, int backlog)
         inet_csk_listen_start(sk, backlog);
         {
             struct inet_connection_sock *icsk = inet_csk(sk);
-	        struct inet_sock *inet = inet_sk(sk);
+            struct inet_sock *inet = inet_sk(sk);
             // 创建accept队列
             reqsk_queue_alloc(&icsk->icsk_accept_queue);
             // 修改状态
@@ -1342,7 +1342,7 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
 
 ```c
 int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
-		  int __user *upeer_addrlen, int flags)
+          int __user *upeer_addrlen, int flags)
 {
     struct file *newfile = do_accept(file, file_flags, upeer_sockaddr, upeer_addrlen, flags);
     {
@@ -1352,7 +1352,7 @@ int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
         newsock = sock_alloc();
 
         newsock->type = sock->type;
-	    newsock->ops = sock->ops;
+        newsock->ops = sock->ops;
 
         // inet_csk_accept
         sock->ops->accept(sock, newsock, sock->file->f_flags | file_flags, false);
@@ -1361,13 +1361,13 @@ int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
 
             // 如果连接队列为空，等待直到超时
             if (reqsk_queue_empty(queue)) {
-		        long timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
+                long timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
                 inet_csk_wait_for_connect(sk, timeo);
             }
 
             // 从队列里取出一个
             struct request_sock *req = reqsk_queue_remove(queue, sk);
-	        newsock = req->sk;
+            newsock = req->sk;
         }
     }
 
@@ -1392,7 +1392,7 @@ int __sys_shutdown(int fd, int how)
                  TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
                 if (tcp_close_state(sk))
                     tcp_send_fin(sk);
-	}
+    }
         }
     }
 }
@@ -1417,7 +1417,7 @@ long __sys_sendmsg(int fd, struct user_msghdr __user *msg, unsigned int flags, .
                 // 生成新的skb
                 skb = sk_stream_alloc_skb(sk, 0, sk->sk_allocation, first_skb);
                 // 插入发送队列
-			    skb_entail(sk, skb);
+                skb_entail(sk, skb);
                 // 复制数据
                 skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
             }
