@@ -508,6 +508,8 @@ typedef struct journal_header_s
     __be32        h_sequence;
 } journal_header_t;
 
+```
+
 ### Super Block
 
 The key data kept within are size of the journal, and where to find the start of the log of transactions.

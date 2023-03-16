@@ -578,13 +578,3 @@ Arguments: -8@x19 8@x20 -4@x21 8@x22 -4@x23 8@x24 -4@x0
 Location和Base指定了text段的位置，此处默认是一条nop指令，开始dtrace时会替换为brk指令  
 Arguments指定了trace时每个参数的位置
 
-
-
-
-
-
-
-
-
-
-

@@ -462,8 +462,6 @@ nmethod* CompileBroker::compile_method(methodHandle method, int osr_bci,
 
 解决问题的第一步是如何复现问题！
 
-生产环境是`x86_64`，本地是`apple m1`，暂时没法搞。
-
 
 
 
