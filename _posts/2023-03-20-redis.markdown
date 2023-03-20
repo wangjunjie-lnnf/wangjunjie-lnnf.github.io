@@ -1,0 +1,695 @@
+---
+layout: post
+title:  "redis"
+date:   2023-03-20 13:22:07 +0000
+categories: jekyll
+tags: redis
+---
+
+# redis
+
+## 启动过程
+
+核心流程
+
+```c
+int main(int argc, char **argv) {
+    // 初始化默认配置
+    initServerConfig();
+    {
+        // 读取默认参数值
+        initConfigValues();
+        // 初始化支持的命令
+        populateCommandTable();
+    }
+
+    // 初始化模块系统
+    moduleInitModulesSystem();
+
+    // 解析命令行参数
+    if (argc >= 2) {
+        // 第一个参数如果不以-则开头表示配置文件
+        if (argv[1][0] != '-') {
+            server.configfile = getAbsolutePath(argv[1]);
+        }
+
+        // 解析--key val格式的命令行参数
+        while(j < argc) {
+
+        }
+
+        // 解析合并配置文件，优先级: 配置文件 < stdin < option
+        loadServerConfig(server.configfile, config_from_stdin, options);
+    }
+
+    initServer();
+    {
+        // 初始化event-loop: server.maxclients默认10000
+        server.el = aeCreateEventLoop(server.maxclients + 128);
+        {
+            aeEventLoop *eventLoop = zmalloc(sizeof(*eventLoop));
+            eventLoop->events = zmalloc(sizeof(aeFileEvent)*setsize);
+            eventLoop->fired = zmalloc(sizeof(aeFiredEvent)*setsize);
+            aeApiCreate(eventLoop);
+            {
+                // epoll特定数据
+                aeApiState *state = zmalloc(sizeof(aeApiState));
+                state->events = zmalloc(sizeof(struct epoll_event)*eventLoop->setsize);
+                state->epfd = epoll_create(1024);
+                eventLoop->apidata = state;
+            }
+        }
+
+        listenToPort(server.port, &server.ipfd);
+        {
+            // 建立socket，开始listen指定端口
+            anetTcpServer(server.neterr, port, addr, server.tcp_backlog);
+            // 设置O_NONBLOCK标识
+            anetNonBlock(NULL, server.ipfd);
+        }
+
+        // 设置1毫秒执行一次serverCron
+        aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL);
+        {
+            aeTimeEvent *te = zmalloc(sizeof(*te));
+            // 下次出发时机
+            te->when = getMonotonicUs() + milliseconds * 1000;
+            te->timeProc = proc;
+            te->finalizerProc = finalizerProc;
+            te->clientData = clientData;
+
+            // 所有的定时任务构成双链表结构
+            te->prev = NULL;
+            te->next = eventLoop->timeEventHead;
+            if (te->next)
+                te->next->prev = te;
+
+            eventLoop->timeEventHead = te;
+        }
+
+        // 注册server socket的fd的read事件到event-loop
+        createSocketAcceptHandler(&server.ipfd, acceptTcpHandler);
+        {
+            aeCreateFileEvent(server.el, sfd->fd[j], AE_READABLE, accept_handler, NULL);
+        }
+
+        // 注册beforeSleep和afterSleep，分别在epoll前后执行
+        aeSetBeforeSleepProc(server.el, beforeSleep);
+        aeSetAfterSleepProc(server.el, afterSleep);
+
+        // lua执行环境初始化
+        scriptingInit(1);
+    }
+
+    InitServerLast();
+    {
+        // 创建3个bio线程，分别处理3种类型的任务
+        bioInit();
+        {
+            for (j = 0; j < 3; j++) {
+                void *arg = (void*)(unsigned long) j;
+                pthread_create(&thread, &attr, bioProcessBackgroundJobs, arg);
+                bio_threads[j] = thread;
+            }
+        }
+
+        initThreadedIO();
+        {
+            // 默认不创建io线程
+            if (server.io_threads_num == 1) return;
+
+            // 创建io线程处理read/write
+            for (int i = 0; i < server.io_threads_num; i++) {
+                pthread_create(&tid, NULL, IOThreadMain, (void*)(long)i);
+                io_threads[i] = tid;
+            }
+        }
+    }
+
+    loadDataFromDisk();
+    {
+        if (server.aof_state == AOF_ON) {
+            loadAppendOnlyFiles(server.aof_manifest);
+            {
+                // 支持混合持久化时前半部分是rdb格式的内存镜像，后半部分是aof格式的命令列表
+                if (fread(sig, 1, 5, fp) != 5 || memcmp(sig,"REDIS",5) != 0) {
+                    /* Not in RDB format, seek back at 0 offset. */
+                    if (fseek(fp, 0, SEEK_SET) == -1) goto readerr;
+                } else {
+                    // 加载rdb镜像
+                    rdbLoadRio(&rdb,RDBFLAGS_AOF_PREAMBLE,NULL);
+
+                    // 挨个replay每个指令log
+                    while(1) {
+
+                    }
+                }
+            }
+        } else {
+            rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
+            // 加载rdb镜像
+            rdbLoad(server.rdb_filename, &rsi, rdb_flags);
+
+            if (!iAmMaster()) {
+                // 从master的指定位置开始复制数据
+                server.master_repl_offset = rsi.repl_offset;
+            } else {
+                // 调整master的重复数据的位点
+                server.second_replid_offset = rsi.repl_offset + 1;
+                server.master_repl_offset += rsi.repl_offset;
+                server.repl_backlog->offset = server.master_repl_offset - server.repl_backlog->histlen + 1;
+                rebaseReplicationBuffer(rsi.repl_offset);
+            }
+        }
+    }
+
+    // 绑定到指定cpu
+    redisSetCpuAffinity(server.server_cpulist);
+
+    // 开始main-loop
+    aeMain(server.el);
+    {
+        eventLoop->stop = 0;
+        while (!eventLoop->stop) {
+            aeProcessEvents(eventLoop, AE_ALL_EVENTS | AE_CALL_BEFORE_SLEEP | AE_CALL_AFTER_SLEEP);
+            {
+                // 计算最早的定时器触发时机
+                tvp = usUntilEarliestTimer(eventLoop);
+                {
+                    while (te) {
+                        if (!earliest || te->when < earliest->when)
+                            earliest = te;
+                        te = te->next;
+                    }
+
+                    return (now >= earliest->when) ? 0 : earliest->when - now;
+                }
+
+                eventLoop->beforesleep(eventLoop);
+                {
+                    // 处理clients_timeout_table中超时的client
+                    // 用于支持设置timeout参数的指令
+                    handleBlockedClientsTimeout();
+
+                    // 把clients_pending_read中的任务分给io线程，直到处理完毕
+                    handleClientsWithPendingReadsUsingThreads();
+
+                    // 删除一批过期的key，在指定时间内尽量处理
+                    if (server.active_expire_enabled && server.masterhost == NULL)
+                        activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
+
+                    // 把clients_pending_write中的任务分给io线程，直到处理完毕
+                    handleClientsWithPendingWritesUsingThreads();
+                }
+
+                // 等待直到最早的定时任务到期
+                numevents = aeApiPoll(eventLoop, tvp);
+
+                eventLoop->aftersleep(eventLoop);
+
+                for (j = 0; j < numevents; j++) {
+                    int fd = eventLoop->fired[j].fd;
+                    aeFileEvent *fe = &eventLoop->events[fd];
+                    int mask = eventLoop->fired[j].mask;
+
+                    int fired = 0;
+
+                    if (fe->mask & mask & AE_READABLE) {
+                        fe->rfileProc(eventLoop, fd, fe->clientData, mask);
+                        fired++;
+                    }
+
+                    if (fe->mask & mask & AE_WRITABLE) {
+                        if (!fired || fe->wfileProc != fe->rfileProc) {
+                            fe->wfileProc(eventLoop, fd, fe->clientData, mask);
+                            fired++;
+                        }
+                    }
+                }
+
+                // 处理到期的定时任务
+                processTimeEvents(eventLoop);
+                {
+                    te = eventLoop->timeEventHead;
+                    maxId = eventLoop->timeEventNextId-1;
+                    monotime now = getMonotonicUs();
+                    while(te) {
+                        if (te->id == AE_DELETED_EVENT_ID) {
+                            // 从双链表中删除
+                            if (te->prev)
+                                te->prev->next = te->next;
+                            else
+                                eventLoop->timeEventHead = te->next;
+                            if (te->next)
+                                te->next->prev = te->prev;
+                            
+                            // 执行finalizerProc
+                            if (te->finalizerProc) {
+                                te->finalizerProc(eventLoop, te->clientData);
+                            }
+                        }
+
+                        // 已到期
+                        if (te->when <= now) {
+                            // 执行handler
+                            retval = te->timeProc(eventLoop, id, te->clientData);
+                            if (retval != AE_NOMORE) {
+                                // 重新计时
+                                te->when = now + retval * 1000;
+                            } else {
+                                // 删除
+                                te->id = AE_DELETED_EVENT_ID;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+客户端连接处理
+
+```c
+ConnectionType CT_Socket = {
+    .ae_handler = connSocketEventHandler,
+    .close = connSocketClose,
+    .write = connSocketWrite,
+    .writev = connSocketWritev,
+    .read = connSocketRead,
+    .accept = connSocketAccept,
+    .connect = connSocketConnect,
+    .set_write_handler = connSocketSetWriteHandler,
+    .set_read_handler = connSocketSetReadHandler,
+    .get_last_error = connSocketGetLastError,
+    .blocking_connect = connSocketBlockingConnect,
+    .sync_write = connSocketSyncWrite,
+    .sync_read = connSocketSyncRead,
+    .sync_readline = connSocketSyncReadLine,
+    .get_type = connSocketGetType
+};
+
+void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
+    // 获取一个client连接信息
+    anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
+
+    // 创建连接，指定协议类型
+    connection *conn = connCreateAcceptedSocket(fd);
+    {
+        conn = connCreateSocket();
+        {
+            conn = zcalloc(sizeof(connection));
+            conn->type = &CT_Socket;
+        }
+        conn->fd = fd;
+        conn->state = CONN_STATE_ACCEPTING;
+    }
+
+    acceptCommonHandler(conn, 0, cip);
+    {
+        // client表示一个客户端连接的所有状态信息
+        client *c = createClient(conn);
+        {
+            c = zmalloc(sizeof(client));
+
+            if (conn) {
+                connSetReadHandler(conn, readQueryFromClient);
+                {
+                    conn->type->set_read_handler(conn, func);
+                    {
+                        // 注册client的AE_READABLE事件
+                        aeCreateFileEvent(server.el, conn->fd, AE_READABLE, conn->type->ae_handler, conn);
+                    }
+                }
+            }
+
+            linkClient(c);
+        }
+
+        connAccept(conn, clientAcceptHandler);
+        {
+            conn->type->accept(conn, clientAcceptHandler);
+            {
+                conn->state = CONN_STATE_CONNECTED;
+                clientAcceptHandle(conn);
+            }
+        }
+    }
+}
+```
+
+命令处理
+
+```c
+// 注册client的read事件
+client *createClient(connection *conn) {
+    connSetReadHandler(conn, readQueryFromClient);
+    {
+        aeCreateFileEvent(server.el, conn->fd, AE_READABLE, conn->type->ae_handler, conn)
+    }
+}
+
+// 读取client的请求数据
+void readQueryFromClient(connection *conn) {
+    // 读取数据到c->querybuf
+    connRead(c->conn, c->querybuf + qblen, readlen);
+    {
+        read(conn->fd, buf, buf_len);
+    }
+
+    processInputBuffer(c);
+    {
+        // 解析命令类型
+        if (!c->reqtype) {
+            if (c->querybuf[c->qb_pos] == '*') {
+                c->reqtype = PROTO_REQ_MULTIBULK;
+            } else {
+                c->reqtype = PROTO_REQ_INLINE;
+            }
+        }
+
+        // 解析命令
+        if (c->reqtype == PROTO_REQ_INLINE) {
+            if (processInlineBuffer(c) != C_OK) break;
+            {
+                // 指令以换行符结尾
+                newline = strchr(c->querybuf + c->qb_pos, '\n');
+
+                // 解析指令到c->argc和c->argv
+                querylen = newline - (c->querybuf + c->qb_pos);
+                aux = sdsnewlen(c->querybuf + c->qb_pos, querylen);
+                argv = sdssplitargs(aux, &argc);
+                for (c->argc = 0, j = 0; j < argc; j++) {
+                    c->argv[c->argc] = createObject(OBJ_STRING,argv[j]);
+                    c->argc++;
+                    c->argv_len_sum += sdslen(argv[j]);
+                }
+            }
+        } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+            if (processMultibulkBuffer(c) != C_OK) break;
+        }
+
+        // 处理指令
+        processCommandAndResetClient(c);
+        {
+            processCommand(c);
+            {
+                // 查找指令列表
+                c->cmd = c->lastcmd = c->realcmd = lookupCommand(c->argv, c->argc);
+                call(c, CMD_CALL_FULL);
+                {
+                    // 执行指令
+                    c->cmd->proc(c);
+                    {
+                        //  以最简单的get命令为例
+                        robj *o = lookupKeyReadOrReply(c, c->argv[1], ...);
+                        // 响应数据
+                        addReplyBulk(c, o);
+                        {
+                            prepareClientToWrite(c);
+                            {
+                                putClientInPendingWriteQueue(c);
+                                {
+                                    c->flags |= CLIENT_PENDING_WRITE;
+                                    listAddNodeHead(server.clients_pending_write, c);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 每次在进入epoll之前发送响应数据
+void beforeSleep(struct aeEventLoop *eventLoop) {
+
+    handleClientsWithPendingWritesUsingThreads();
+    {
+        if (server.io_threads_num == 1) {
+            // 直接由主线程处理
+            return handleClientsWithPendingWrites();
+            {
+                listRewind(server.clients_pending_write, &li);
+                while((ln = listNext(&li))) {
+                    client *c = listNodeValue(ln);
+                    c->flags &= ~CLIENT_PENDING_WRITE;
+                    listDelNode(server.clients_pending_write, ln);
+
+                    // 发送响应数据
+                    writeToClient(c, 0);
+                    {
+                        connWrite(c->conn, c->buf + c->sentlen, c->bufpos - c->sentlen);
+                        {
+                            write(conn->fd, data, data_len);
+                        }
+
+                        // 发送完毕取消write event，减少epoll需要轮询的fd数量
+                        if (!clientHasPendingReplies(c)) {
+                            connSetWriteHandler(c->conn, NULL);
+                            {
+                                aeDeleteFileEvent(server.el, conn->fd, AE_WRITABLE);
+                            }
+                        }
+                    }
+
+                    // 没发送完注册write handler
+                    if (clientHasPendingReplies(c)) {
+                        installClientWriteHandler(c);
+                        {
+                            connSetWriteHandlerWithBarrier(c->conn, sendReplyToClient, ae_barrier);
+                            {
+                                aeCreateFileEvent(server.el, conn->fd, AE_WRITABLE, conn->type->ae_handler,conn);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+}
+
+// epoll检测到write事件时发送响应数据
+void sendReplyToClient(connection *conn) {
+    client *c = connGetPrivateData(conn);
+    writeToClient(c, 1);
+}
+
+```
+
+## 常用数据结构
+
+### hash
+
+以`hset`命令为例
+
+```c
+void hsetCommand(client *c) {
+    // 初始创建的hash位list-pack格式
+    robj *o = hashTypeLookupWriteOrCreate(c, c->argv[1]);
+    hashTypeSet(o, c->argv[i]->ptr, c->argv[i+1]->ptr, HASH_SET_COPY);
+    {
+        if (o->encoding == OBJ_ENCODING_LISTPACK) {
+            // list-pack是LV格式，L根据长度变长编码
+            zl = o->ptr;
+            fptr = lpFirst(zl);
+            if (fptr != NULL) {
+                fptr = lpFind(zl, fptr, (unsigned char*)field, sdslen(field), 1);
+                if (fptr != NULL) {
+                    update = 1;
+                    lpReplace(zl, &vptr, (unsigned char*)value, sdslen(value));
+                }
+            }
+            // 插入
+            if (!update) {
+                zl = lpAppend(zl, (unsigned char*)field, sdslen(field));
+                zl = lpAppend(zl, (unsigned char*)value, sdslen(value));
+            }
+        } else if (o->encoding == OBJ_ENCODING_HT) {
+            // 数组加单链表模式
+            dictEntry *de = dictFind(o->ptr, field);
+            {
+                 h = dictHashKey(d, key);
+                 idx = h & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
+                 he = d->ht_table[table][idx];
+                 while(he) {
+                    if (key==he->key || dictCompareKeys(d, key, he->key))
+                        return he;
+                    he = he->next;
+                }
+            }
+
+            if (de) {
+                sdsfree(dictGetVal(de));
+                dictGetVal(de) = sdsdup(value);
+            } else {
+                dictAdd(o->ptr, sdsdup(field), sdsdup(value));
+            }
+        }
+    }
+}
+```
+
+### list
+
+以`lpush`命令为例
+
+```c
+void lpushCommand(client *c) {
+    pushGenericCommand(c, LIST_HEAD, 0);
+    {
+        robj *lobj = lookupKeyWrite(c->db, c->argv[1]);
+        if (!lobj) {
+            lobj = createQuicklistObject();
+        }
+
+        listTypePush(lobj, c->argv[j], where);
+        {
+            int pos = (where == LIST_HEAD) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
+            quicklistPush(subject->ptr, value->ptr, sdslen(value->ptr), pos);
+            {
+                quicklistPushHead(quicklist, value, sz);
+                {
+                    quicklistNode *node = quicklistCreateNode();
+                    // 每个链接节点都是list-pack格式
+                    node->entry = lpPrepend(lpNew(0), value, sz);
+
+                    // 双链表结构
+                    quicklistNode *old_node = quicklist->head;
+                    quicklistNode *new_node = node;
+                    _quicklistInsertNodeBefore(quicklist, old_node, new_node);
+                    {
+                        new_node->next = old_node;
+                        if (old_node) {
+                            new_node->prev = old_node->prev;
+                            if (old_node->prev)
+                                old_node->prev->next = new_node;
+                            old_node->prev = new_node;
+                        }
+                        if (quicklist->head == old_node)
+                            quicklist->head = new_node;
+
+                        quicklist->len++;
+                    }
+
+                    quicklist->count++;
+                    // 每个list-pack节点存储的元素个数
+                    quicklist->head->count++;
+                }
+            }
+        }
+    }
+}
+```
+
+### set
+
+以`sadd`命令为例
+
+```c
+void saddCommand(client *c) {
+    setTypeAdd(set, c->argv[j]->ptr);
+    {
+        if (subject->encoding == OBJ_ENCODING_HT) {
+            // hash-table结构
+            dict *ht = subject->ptr;
+            dictEntry *de = dictAddRaw(ht,value,NULL);
+            if (de) {
+                dictSetKey(ht,de,sdsdup(value));
+                dictSetVal(ht,de,NULL);
+                return 1;
+            }
+        } else if (subject->encoding == OBJ_ENCODING_INTSET) {
+            if (isSdsRepresentableAsLongLong(value,&llval) == C_OK) {
+                subject->ptr = intsetAdd(subject->ptr, llval, &success);
+            } else {
+                // 类型转换
+                setTypeConvert(subject, OBJ_ENCODING_HT);
+                dictAdd(subject->ptr, sdsdup(value), NULL);
+            }
+        }
+    }
+}
+```
+
+### sorted-set
+
+以`zadd xxx score member`命令为例
+
+```c
+// 为什么要存储两遍？有的命令未提供当前的score值，无法直接查询skiplist！！！
+typedef struct zset {
+    dict *dict;         // 存储key和score的关系
+    zskiplist *zsl;     // 按score和key排序
+} zset;
+
+void zaddCommand(client *c) {
+    zaddGenericCommand(c, ZADD_IN_NONE);
+    {
+        robj *key = c->argv[1];
+        robj *zobj = lookupKeyWrite(c->db, key);
+        if (zobj == NULL) {
+            if (server.zset_max_listpack_value < sdslen(c->argv[scoreidx+1]->ptr)){
+                zobj = createZsetObject();
+            } else {
+                zobj = createZsetListpackObject();
+            }
+        }
+
+        zsetAdd(zobj, score, ele, flags, &retflags, &newscore);
+        {
+            if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
+                // key和score都是LV格式
+            } 
+
+            if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+                // hash结构存储key和score: 先查询当前的score
+                de = dictFind(zs->dict, ele);
+                if (de != NULL) {
+                    if (score != curscore) {
+                        znode = zslUpdateScore(zs->zsl, curscore, ele, score);
+                        {
+                            // skiplist结构存储score和key，按score排序
+                            // 利用当前的score查询节点
+                            x = zsl->header;
+                            for (i = zsl->level-1; i >= 0; i--) {
+                                while (x->level[i].forward &&
+                                        (x->level[i].forward->score < curscore ||
+                                            (x->level[i].forward->score == curscore &&
+                                            sdscmp(x->level[i].forward->ele, ele) < 0)))
+                                {
+                                    x = x->level[i].forward;
+                                }
+                                update[i] = x;
+                            }
+
+                            x = x->level[0].forward;
+
+                            if ((x->backward == NULL || x->backward->score < newscore) &&
+                                (x->level[0].forward == NULL || x->level[0].forward->score > newscore))
+                            {
+                                // 更新skiplist
+                                x->score = newscore;
+                                return x;
+                            }
+                        }
+
+                        // 更新hash
+                        dictGetVal(de) = &znode->score;
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+## sentinal
+
+
+
+## cluster
+
