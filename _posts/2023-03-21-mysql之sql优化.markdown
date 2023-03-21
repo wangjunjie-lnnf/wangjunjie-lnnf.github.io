@@ -1,0 +1,521 @@
+---
+layout: post
+title:  "mysql之sql优化"
+date:   2023-03-21 15:22:07 +0000
+categories: jekyll
+tags: mysql
+---
+
+# 启动过程
+
+```c++
+int mysqld_main(int argc, char **argv)
+{
+    // 加载my.cnf
+    load_defaults(MYSQL_CONFIG_NAME, load_default_groups, &argc, &argv, &argv_alloc);
+
+    init_server_components();
+    {
+        // 数据字典初始化
+        dd::init(...);
+        bootstrap::run_bootstrap_thread(..., &upgrade_57::do_pre_checks_and_initialize_dd);
+        {
+            handle_bootstrap_args args;
+            args.m_thd = thd;
+            args.m_bootstrap_handler = boot_handler;
+            args.m_file_name = file_name;
+            args.m_file = file;
+
+            mysql_thread_create(key_thread_bootstrap, ..., handle_bootstrap, &args);
+            {
+                handle_bootstrap_args *args = args;
+                THD *thd = args->m_thd;
+                Global_THD_manager *thd_manager = Global_THD_manager::get_instance();
+                thd_manager->add_thd(thd);
+                args->m_bootstrap_handler(thd);
+                {
+                    bootstrap::DDSE_dict_init(thd, ..., d->get_target_dd_version());
+                    {
+                        handlerton *ddse = ha_resolve_by_legacy_type(thd, DB_TYPE_INNODB);
+                        // innobase_hton->ddse_dict_init = innobase_ddse_dict_init;
+                        ddse->ddse_dict_init(dict_init_mode, version, &ddse_tables, &ddse_tablespaces);
+                    }
+                }
+            }
+        }
+    }
+
+    network_init();
+    {
+        // 创建Mysqld_socket_listener
+        Mysqld_socket_listener *mysqld_socket_listener = 
+                new (std::nothrow) Mysqld_socket_listener(bind_addresses_info, mysqld_port,
+                                                          ..., 
+                                                          back_log, mysqld_port_timeout, unix_sock_name);
+        mysqld_socket_acceptor = new (std::nothrow) 
+                                Connection_acceptor<Mysqld_socket_listener>(mysqld_socket_listener);
+
+        mysqld_socket_acceptor->init_connection_acceptor();
+        {
+            m_listener->setup_listener();
+            {
+                // 监听端口
+                TCP_socket tcp_socket(bind_address_info.address, ..., m_tcp_port, ...);
+                MYSQL_SOCKET mysql_socket = tcp_socket.get_listener_socket();
+                m_socket_vector.emplace_back(mysql_socket, ...);
+
+                // 加入poll列表
+                setup_connection_events(m_socket_vector);
+                {
+                    for (const auto &socket_element : socket_vector)
+                        add_socket_to_listener(socket_element.m_socket);
+                        {
+                            m_poll_info.m_fds.emplace_back(pollfd{listen_socket, POLLIN, 0});
+                        }
+                }
+            }
+        }
+    }
+
+    // 开始接受连接
+    mysqld_socket_acceptor->connection_event_loop();
+    {
+        Connection_handler_manager *mgr = Connection_handler_manager::get_instance();
+        while (!connection_events_loop_aborted()) {
+            // 启动acceotor接受连接
+            Channel_info *channel_info = m_listener->listen_for_connection_event();
+            {
+                const Listen_socket *listen_socket = get_listen_socket();
+                accept_connection(listen_socket->m_socket, &connect_sock);
+                channel_info = new (std::nothrow) Channel_info_tcpip_socket(connect_sock, ...);
+            }
+
+            if (channel_info != nullptr) 
+                mgr->process_new_connection(channel_info);
+                {
+                    // 默认使用线程池处理请求
+                    m_connection_handler->add_connection(channel_info);
+                    {
+                        // 有idle线程时加入队列
+                        if(!check_idle_thread_and_enqueue_connection(channel_info)) {
+                            return false;
+                        }
+                        // 创建新线程
+                        mysql_thread_create(..., handle_connection, (void *)channel_info);
+                        {
+                            for (;;) {
+                                THD *thd = init_new_thd(channel_info);
+                                MYSQL_SOCKET socket = thd->get_protocol_classic()->get_vio()->mysql_socket;
+                                mysql_socket_set_thread_owner(socket);
+                                thd_manager->add_thd(thd);
+
+                                // 登陆验证
+                                if (thd_prepare_connection(thd))
+                                    handler_manager->inc_aborted_connects();
+                                else {
+                                    // 循环处理sql
+                                    while (thd_connection_alive(thd)) {
+                                        if (do_command(thd)) break;
+                                    }
+                                    end_connection(thd);
+                                }
+                                close_connection(thd, 0, false, false);
+
+                                // 等待从队列里取连接
+                                channel_info = Per_thread_connection_handler::block_until_new_connection();
+                                if (channel_info == nullptr) break;
+                            }
+                        }
+                    }
+                }
+        }
+    }
+}
+
+// innodb初始化
+static bool innobase_ddse_dict_init(...)
+{
+    innobase_init_files(dict_init_mode, tablespaces);
+    {
+        /* Start the InnoDB server. */
+        srv_start(false);
+        {
+            // 扫描data目录下的 *.ibd, *.ibu, undo_xxx文件
+            fil_scan_for_tablespaces();
+
+            // 初始化AIO: ibuf/log/read/write
+            os_aio_init(srv_n_read_io_threads, srv_n_write_io_threads);
+
+            // buf_pool初始化
+            buf_pool_init(srv_buf_pool_size, srv_buf_pool_instances);
+
+            recv_sys_init();
+            trx_sys_create();
+            lock_sys_create(srv_lock_table_size);
+
+            // 创建io线程: 0处理ibuf, 1处理log, 剩余的处理read/write
+            for (ulint t = 0; t < srv_n_file_io_threads; ++t) {
+                thread = os_thread_create(io_ibuf_thread_key, 0, io_handler_thread, t);
+                thread.start();
+            }
+
+            // 创建并启动page_cleaner线程
+            buf_flush_page_cleaner_init();
+
+            srv_sys_space.open_or_create(false, ..., &flushed_lsn);
+
+            fil_open_system_tablespace_files();
+
+            recv_recovery_from_checkpoint_start(*log_sys, flushed_lsn);
+
+            /* Initialize the change buffer. */
+            dict_boot();
+
+            recv_apply_hashed_log_recs(*log_sys, ...);
+
+            buf_flush_sync_all_buf_pools();
+
+            srv_undo_tablespaces_init(false);
+
+            trx_purge_sys_mem_create();
+
+            srv_open_tmp_tablespace(create_new_db, &srv_tmp_space);
+
+            /* Create the thread which watches the timeouts for lock waits */
+            srv_threads.m_lock_wait_timeout = os_thread_create(
+                srv_lock_timeout_thread_key, 0, lock_wait_timeout_thread);
+            srv_threads.m_lock_wait_timeout.start();
+        }
+    }
+}
+
+```
+
+# sql处理
+
+```c++
+bool do_command(THD *thd) {
+    // 指令解析: length(3B) + seq(1B) + cmd(1B) + data(nB)
+    thd->get_protocol()->get_command(&com_data, &command);
+    // 指令派发
+    dispatch_command(thd, &com_data, command);
+    {
+        thd->set_command(command);
+
+        switch (command) {
+            case COM_INIT_DB:
+                break;
+            case COM_REGISTER_SLAVE:
+                break;
+            case COM_RESET_CONNECTION:
+                break;
+            case COM_STMT_EXECUTE:
+                break;
+            case COM_STMT_PREPARE:
+                break;
+            case COM_QUERY:
+            {
+                // 保存sql到thd
+                alloc_query(thd, com_data->com_query.query, com_data->com_query.length);
+
+                // 准备解析sql
+                Parser_state parser_state;
+                parser_stte.init(thd, thd->query().str, thd->query().length);
+
+                dispatch_sql_command(thd, &parser_state);
+                {
+                    lex_start(thd);
+                    {
+                        LEX *lex = thd->lex;
+                        lex->thd = thd;
+                        lex->reset();
+                        // 创建最外层的query_block
+                        lex->new_top_level_query();
+                        lex->m_current_query_block = lex->query_block;
+                    }
+
+                    // 基于yacc解析sql
+                    parse_sql(thd, parser_state, ...);
+                    {
+                        thd->sql_parser();
+                        {
+                            Parse_tree_root *root = nullptr;
+                            // 基于yacc的sql语法分析
+                            MYSQLparse(this, &root);
+                            // sql语义分析
+                            lex->make_sql_cmd(root);
+                        }
+                    }
+
+                    mysql_execute_command(thd, true);
+                    {
+                        LEX *const lex = thd->lex;
+                        Query_block *const query_block = lex->query_block;
+
+                        // 开启事务
+                        launch_hook_trans_begin(thd, all_tables);
+                        
+                        // sql命令派发
+                        switch (lex->sql_command) {
+                            case SQLCOM_PREPARE: {
+                                break;
+                            }
+                            case SQLCOM_EXECUTE: {
+                                break;
+                            }
+                            case SQLCOM_SLAVE_START: {
+                                break;
+                            }
+
+                            // insert/update/delete/create
+                            case SQLCOM_INSERT: 
+                            case SQLCOM_INSERT_SELECT:
+                            case SQLCOM_DELETE: 
+                            case SQLCOM_UPDATE:
+                            case SQLCOM_CREATE_TABLE: 
+                            case SQLCOM_CREATE_INDEX: {
+                                lex->m_sql_cmd->execute(thd);
+                                break;
+                            }
+                            case SQLCOM_SELECT: {
+                                lex->m_sql_cmd->execute(thd);
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // sql带分号分别处理
+                while (parser_state.m_lip.found_semicolon != nullptr) {
+                    const char *beginning_of_next_stmt = parser_state.m_lip.found_semicolon;
+                    thd->set_query(beginning_of_next_stmt, length);
+                    dispatch_sql_command(thd, &parser_state);
+                }
+            }
+                break;
+        }
+
+        log_slow_statement(thd);
+
+        thd->reset_query();
+        thd->set_command(COM_SLEEP);
+    }
+}
+
+// 执行dml语句
+bool Sql_cmd_dml::execute(THD *thd) {
+    lex = thd->lex;
+
+    if (!is_prepared()) {
+        if (prepare(thd)) goto err;
+        {
+            // 权限检查
+            if (precheck(thd)) goto err;
+            open_tables_for_query(thd, lex->query_tables, ...);
+
+            if (prepare_inner(thd)) goto err;
+            {
+                if (lex->is_explain()) {
+                    result = new (thd->mem_root) Query_result_send();
+                } else {
+                    if (sql_command_code() == SQLCOM_SELECT)
+                        result = new (thd->mem_root) Query_result_send();
+                }
+
+                Query_expression *const unit = lex->unit;
+                // 不包含union即simple
+                if (unit->is_simple()) {
+                    Query_block *const select = unit->first_query_block();
+                    select->set_query_result(result);
+                    // sql预处理: 简化sql便于后续处理
+                    select->prepare(thd, ...)l;
+                    {
+                        Query_expression *const unit = master_query_expression();
+                        // 多表join: a left join b join c
+                        // c表在结果集中可为null
+                        if (!top_join_list.empty()) 
+                            propagate_nullability(&top_join_list, false);
+
+                        // 把*替换为字段列表
+                        if (with_wild && setup_wild(thd)) return true;
+
+                        // 汇总结果集字段信息
+                        setup_fields(thd, thd->want_privilege, /*allow_sum_func=*/true,
+                                     /*split_sum_funcs=*/true, /*column_update=*/false,
+                                     insert_field_list, &fields, base_ref_items)
+                        
+                        // Set up join conditions and WHERE clause
+                        if (setup_conds(thd)) return true;
+
+                        // Set up the GROUP BY clause
+                        int all_fields_count = fields.size();
+                        if (group_list.elements && setup_group(thd)) return true;
+
+                        // Setup the HAVING clause
+                        if (m_having_cond) {
+                            m_having_cond->fix_fields(thd, &m_having_cond);
+                        }
+
+                        // Set up the ORDER BY clause
+                        if (order_list.elements) {
+                            if (setup_order(thd, base_ref_items, get_table_list(), &fields, order_list.first))
+                            return true;
+                        }
+
+                        // Resolve OFFSET and LIMIT clauses
+                        if (resolve_limits(thd)) return true;
+
+                        if (unit->item && this != unit->fake_query_block) {
+                            // 判断子查询是否可转为simi-join或衍生表
+                            if (resolve_subquery(thd)) return true;
+                        }
+
+                        if (query_result() && query_result()->prepare(thd, fields, unit)) return true;
+
+                        // 只查询和semi-join处理
+                        if (has_sj_candidates() && flatten_subqueries(thd)) return true;
+
+                        if (outer_query_block() == nullptr ||
+                            ((parent_lex->sql_command == SQLCOM_SET_OPTION ||
+                              parent_lex->sql_command == SQLCOM_END) &&
+                             outer_query_block()->outer_query_block() == nullptr)) {
+                            if (apply_local_transforms(thd, true)) return true;
+                        }
+                    }
+                } else {
+                    unit->prepare(thd, result, ..., SELECT_NO_UNLOCK, 0);
+                    {
+                        // 去重或全局排序分组则需要临时表
+                        m_union_needs_tmp_table = union_distinct != nullptr ||
+                                global_parameters()->order_list.elements > 0 ||
+                                ((thd->lex->sql_command == SQLCOM_INSERT_SELECT ||
+                                thd->lex->sql_command == SQLCOM_REPLACE_SELECT) &&
+                                thd->lex->unit == this);
+                        
+                        if (is_union() && !m_union_needs_tmp_table) {
+                            union_result = new (thd->mem_root) Query_result_union_direct(sel_result, last_query_block);
+                            fake_query_block = nullptr;
+                            instantiate_tmp_table = false;
+                        } else {
+                            union_result = new (thd->mem_root) Query_result_union();
+                            instantiate_tmp_table = true;
+                        }
+
+                        for (Query_block *sl = first_query_block(); sl; sl = sl->next_query_block()) {
+                            sl->set_query_result(union_result);
+                            thd->lex->set_current_query_block(sl);
+                            // 递归prepare
+                            sl->prepare(thd, insert_field_list);
+                        }
+
+                        // 为union创建临时表
+                        union_result->create_result_table(thd, types, ...);
+                        if (fake_query_block != nullptr) {
+                            thd->lex->set_current_query_block(fake_query_block);
+                            if (prepare_fake_query_block(thd)) return true;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // sql已经预处理
+        open_tables_for_query(thd, lex->query_tables, 0);
+        if (check_privileges(thd)) goto err;
+    }
+
+    // handler::ha_external_lock(...)通知存储引擎操作类型(R/W)
+    lock_tables(thd, lex->query_tables, lex->table_count, 0);
+
+    // 执行sql
+    execute_inner(thd);
+    {
+        Query_expression *unit = lex->unit;
+        // 生成物理执行计划
+        unit->optimize(thd, /*materialize_destination=*/nullptr,
+                            /*create_iterators=*/true, 
+                            /*finalize_access_paths=*/true);
+        {
+            for (Query_block *query_block = first_query_block(); 
+                 query_block != nullptr;
+                 query_block = query_block->next_query_block()) {
+
+                if (set_limit(thd, query_block)) return true;
+
+                if (query_block->optimize(thd, finalize_access_paths)) return true;
+                {
+                    JOIN *const join = new (thd->mem_root) JOIN(thd, this);
+                    if (join->optimize(finalize_access_paths)) return true;
+                    {
+
+                    }
+
+                    // 递归优化
+                    for (Query_expression *query_expression = first_inner_query_expression();
+                        query_expression;
+                        query_expression = query_expression->next_query_expression()) {
+                        // Derived tables and const subqueries are already optimized
+                        if (!query_expression->is_optimized())
+                            query_expression->optimize(thd, /*materialize_destination=*/nullptr,
+                                                            /*create_iterators=*/false,
+                                                            /*finalize_access_paths=*/true);
+                    }
+                }
+
+                // 递归累计预估结果集
+                estimated_rowcount += query_block->is_implicitly_grouped() 
+                                        ? 1 
+                                        : query_block->join->best_rowcount;
+                estimated_cost += query_block->join->best_read;
+
+                if (query_result() != nullptr) {
+                    query_result()->estimated_rowcount = estimated_rowcount;
+                    query_result()->estimated_cost = estimated_cost;
+                }
+            }
+
+            if (union_result && m_union_needs_tmp_table) {
+                if (instantiate_tmp_table(thd, table)) return true;
+                if (table->hash_field) table->file->ha_index_init(0, false);
+            }
+
+            // fake_query_block用于存储union的全局参数
+            if (fake_query_block) {
+                thd->lex->set_current_query_block(fake_query_block);
+                if (set_limit(thd, fake_query_block)) return true;
+                fake_query_block->optimize(thd, /*finalize_access_paths=*/true);
+            }
+
+            // 创建物理执行计划: m_root_access_path
+            create_access_paths(thd);
+
+            // 通过iterator连接各个access_path构成物理执行计划
+            if (create_iterators) {
+                JOIN *join;
+                if (!is_union()) {
+                    join = first_query_block()->join;
+                } else if (fake_query_block != nullptr) {
+                    join = fake_query_block->join;
+                } else {
+                    join = nullptr;
+                }
+                m_root_iterator = CreateIteratorFromAccessPath(
+                    thd, m_root_access_path, join, /*eligible_for_batch_mode=*/true);
+            }
+        }
+        
+        // Calculate the current statement cost.
+        accumulate_statement_cost(lex);
+
+        // 执行物理计划
+        if (lex->is_explain()) {
+            if (explain_query(thd, thd, unit)) return true;
+        } else {
+            if (unit->execute(thd)) return true;
+            {
+                ExecuteIteratorQuery(thd);
+            }
+        }
+    }
+}
+```
