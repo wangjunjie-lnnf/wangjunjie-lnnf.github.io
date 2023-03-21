@@ -1,0 +1,611 @@
+---
+layout: post
+title:  "kafka"
+date:   2023-03-21 19:22:07 +0000
+categories: jekyll
+tags: kafka
+---
+
+# kafka
+
+## boot
+
+```scala
+def main(args: Array[String]): Unit = {
+    val serverProps = getPropsFromArgs(args)
+    {
+        val props = Utils.loadProps(args(0))
+    }
+
+    val server = buildServer(serverProps)
+    {
+        val config = KafkaConfig.fromProps(props, false)
+    
+        // process.roles参数决定元数据存储是zk或kraft
+        if (config.requiresZookeeper) {
+            new KafkaServer(
+                config,
+                Time.SYSTEM,
+                threadNamePrefix = None,
+                enableForwarding = false
+            )
+        } else {
+            new KafkaRaftServer(
+                config,
+                Time.SYSTEM,
+                threadNamePrefix = None
+            )
+        }
+    }
+
+    server.startup()
+    {
+        // 和zk建立连接, 创建目录
+        initZkClient(time)
+
+        /* 从zk获取topic(/topics/xxx)或broker(/brokers/xxx)的配置 */
+        configRepository = new ZkConfigRepository(new AdminZkClient(zkClient))
+
+        /* zk路径: /cluster/id */
+        _clusterId = getOrGenerateClusterId(zkClient)
+
+        // 加载meta.properties, initialOfflineDirs为不包含meta.properties的dir
+        val (preloadedBrokerMetadataCheckpoint, initialOfflineDirs) =
+          BrokerMetadataCheckpoint.getBrokerMetadataAndOfflineDirs(config.logDirs, ignoreMissing = true)
+
+        // 同步zk中的配置/brokers/{brokerId}和/brokers/<default>
+        config.dynamicConfig.initialize(Some(zkClient))
+
+        /* 基于ScheduledThreadPoolExecutor，调度定时任务 */
+        kafkaScheduler = new KafkaScheduler(config.backgroundThreads)
+        kafkaScheduler.startup()
+
+        _logManager = LogManager(config, initialOfflineDirs, ...)
+        logManager.startup(zkClient.getAllTopicsInCluster())
+        {
+            // 数据恢复
+            loadLogs(defaultConfig, topicConfigOverrides)
+
+            scheduler.schedule("kafka-log-retention", cleanupLogs _, ...)
+            scheduler.schedule("kafka-log-flusher", flushDirtyLogs _, ...)
+            scheduler.schedule("kafka-recovery-point-checkpoint", checkpointLogRecoveryOffsets _, ...)
+            scheduler.schedule("kafka-log-start-offset-checkpoint", checkpointLogStartOffsets _, ...)
+            scheduler.schedule("kafka-delete-logs", deleteLogs _, ...)
+
+            if (cleanerConfig.enableCleaner) {
+                _cleaner = new LogCleaner(cleanerConfig, liveLogDirs, currentLogs, logDirFailureChannel, time = time)
+                _cleaner.startup()
+            }
+        }
+        
+        // 维护每个分区的状态，由controller发送更新通知
+        metadataCache = MetadataCache.zkMetadataCache(config.brokerId, ...)
+
+        // 缓存并发送通过sendRequest(...)发送的请求
+        clientToControllerChannelManager = BrokerToControllerChannelManager(controllerNodeProvider = controllerNodeProvider, ...)
+        clientToControllerChannelManager.start()
+        
+        socketServer = new SocketServer(config, ...);
+        {
+            // 接受client连接
+            val dataPlaneAcceptors = new ConcurrentHashMap[EndPoint, DataPlaneAcceptor]()
+            // 请求队列
+            val dataPlaneRequestChannel = new RequestChannel(maxQueuedRequests, ...)
+
+            // 每个监听地址创建一个acceptor以及一组io线程和一个请求队列
+            config.dataPlaneListeners.foreach(createDataPlaneAcceptorAndProcessors)
+            {
+                val dataPlaneAcceptor = createDataPlaneAcceptor(endpoint, ..., dataPlaneRequestChannel)
+                {
+                    val serverChannel = openServerSocket(endPoint.host, endPoint.port, listenBacklogSize)
+                    val thread = KafkaThread.nonDaemon(this)
+                    processors.foreach(_.start())
+                    thread.start()
+                }
+
+                dataPlaneAcceptor.configure(parsedConfigs)
+                {
+                    addProcessors(configs.get(KafkaConfig.NumNetworkThreadsProp).asInstanceOf[Int])
+                    {
+                        for (_ <- 0 until toCreate) {
+                            val processor = newProcessor(socketServer.nextProcessorId(), ...)
+                            // listenerProcessors用于处理新的client连接
+                            listenerProcessors += processor
+                            // requestChannel用于请求队列、把响应信息加入到processor的响应队列
+                            requestChannel.addProcessor(processor)
+                        }
+                    }
+                }
+                dataPlaneAcceptors.put(endpoint, dataPlaneAcceptor)
+            }
+        }
+
+        _replicaManager = createReplicaManager(isShuttingDown)
+        replicaManager.startup()
+        {
+            scheduler.schedule("isr-expiration", maybeShrinkIsr _, ...)
+            scheduler.schedule("shutdown-idle-replica-alter-log-dirs-thread", shutdownIdleReplicaAlterLogDirsThread _, ...)
+            logDirFailureHandler = new LogDirFailureHandler("LogDirFailureHandler", haltBrokerOnFailure)
+            logDirFailureHandler.start()
+        }
+
+        val brokerInfo = createBrokerInfo
+        val brokerEpoch = zkClient.registerBroker(brokerInfo)
+
+        // 处理各种event
+        _kafkaController = new KafkaController(config, zkClient, ...)
+        kafkaController.startup()
+        {
+            eventManager.put(Startup)
+            eventManager.start()
+            {
+                dequeued.process(processor);
+                {
+                    processor.process(event)
+                    {
+                        event match {
+                            case ReplicaLeaderElection(partitions, electionType, electionTrigger, callback) =>
+                                processReplicaLeaderElection(partitions, electionType, electionTrigger, callback)
+                            case LeaderAndIsrResponseReceived(response, brokerId) =>
+                                processLeaderAndIsrResponseReceived(response, brokerId)
+                        }
+                    }
+                }
+            }
+        }
+
+        groupCoordinator = GroupCoordinator(config, replicaManager, ...)
+        groupCoordinator.startup(() => zkClient.getTopicPartitionCount(Topic.GROUP_METADATA_TOPIC_NAME)
+                                               .getOrElse(config.offsetsTopicPartitions))
+
+        val fetchManager = new FetchManager(...)
+
+        // 请求处理线程
+        dataPlaneRequestProcessor = createKafkaApis(socketServer.dataPlaneRequestChannel)
+        dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, 
+                    socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, config.numIoThreads, ...)
+
+        // 认证成功之后开始接受连接
+        socketServer.enableRequestProcessing(...)
+        _brokerState = BrokerState.RUNNING
+    }
+
+    server.awaitShutdown()
+}
+```
+
+## 请求处理
+
+![kafka-network](/assets/images/2023-03-21/kafka-net.png)
+
+```scala
+
+// acceptor线程
+class DataPlaneAcceptor(...) {
+
+    val nioSelector = NSelector.open()
+    val serverChannel = openServerSocket(endPoint.host, endPoint.port, listenBacklogSize)
+
+    override def run(): Unit = {
+        // 注册OP_ACCEPT事件
+        serverChannel.register(nioSelector, SelectionKey.OP_ACCEPT)
+        
+        while (shouldRun.get()) {
+            acceptNewConnections()
+            {
+                nioSelector.select(500)
+                val keys = nioSelector.selectedKeys()
+                val iter = keys.iterator()
+                while (iter.hasNext && shouldRun.get()) {
+                    if (key.isAcceptable) {
+                        accept(key).foreach { socketChannel =>
+                            do {
+                                // 轮流使用processor线程
+                                processor = synchronized {
+                                    currentProcessorIndex = currentProcessorIndex % processors.length
+                                    processors(currentProcessorIndex)
+                                }
+                                // 由processor处理
+                            } while (!assignNewConnection(socketChannel, processor, ...))
+                        }
+                    }
+                }
+            }
+
+            closeThrottledConnections()
+        }
+    }
+}
+
+// 网络IO线程
+class Processor(...) {
+
+    override def run(): Unit = {
+        while (shouldRun.get()) {
+            // 注册请求socket的OP_READ事件到selector
+            configureNewConnections()
+            {
+                selector.register(connectionId(channel.socket), channel)
+                {
+                    registerChannel(id, socketChannel, SelectionKey.OP_READ);
+                }
+            }
+
+            processNewResponses()
+            {
+                while ({currentResponse = dequeueResponse(); currentResponse != null}) {
+                    currentResponse match {
+                        case response: SendResponse =>
+                            sendResponse(response, response.responseSend)
+                            {
+                                selector.send(new NetworkSend(connectionId, responseSend))
+                                {
+                                    String connectionId = send.destinationId();
+                                    KafkaChannel channel = openOrClosingChannelOrFail(connectionId);
+                                    channel.setSend(send);
+                                    {
+                                        this.transportLayer.addInterestOps(SelectionKey.OP_WRITE);
+                                    }
+                                }
+                            }
+                    }
+                }
+            }
+
+            // 读请求到completedReceives，发送写请求
+            poll()
+            {
+                selector.poll(pollTimeout)
+                {
+                    nioSelector.select(timeoutMs);
+                    pollSelectionKeys(readyKeys, false, endSelect);
+                    {
+                        // 一次只读取一个请求
+                        if (channel.ready() 
+                            && (key.isReadable() || channel.hasBytesBuffered()) 
+                            && !hasCompletedReceive(channel)) {
+                            attemptRead(channel);
+                            {
+                                long bytesReceived = channel.read();
+                                if (bytesReceived != 0) {
+                                    // 等待一个完整的数据包接收完成，前4字节表示数据包长度
+                                    // 完整的数据包放入completedReceives
+                                    NetworkReceive receive = channel.maybeCompleteReceive();
+                                    if (receive != null) {
+                                        addToCompletedReceives(channel, receive, currentTimeMs);
+                                    }
+                                }
+                            }
+                        }
+
+                        // 发送数据
+                        attemptWrite(key, channel, nowNanos);
+                        {
+                            if (channel.hasSend() && channel.ready() && key.isWritable()) {
+                                write(channel);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 把completedReceives上的请求发送到requestChannel
+            processCompletedReceives()
+            {
+                selector.completedReceives.forEach { receive =>
+                    openOrClosingChannel(receive.source) match {
+                        case Some(channel) =>
+                            val header = parseRequestHeader(receive.payload)
+                            val context = new RequestContext(header, connectionId, ...)
+                            val req = new RequestChannel.Request(processor = id, context = context, ...)
+                            // 接收完成的请求放到requestChannel
+                            requestChannel.sendRequest(req)
+                    }
+                }
+            }
+
+            // respond发送完成调用onComplete
+            processCompletedSends()
+            {
+                selector.completedSends.forEach { send =>
+                    val response = inflightResponses.remove(send.destinationId)
+                    response.onComplete.foreach(onComplete => onComplete(send))
+                }
+            }
+
+            processDisconnected()
+            closeExcessConnections()
+        }
+    }
+
+}
+
+// 请求处理线程
+class KafkaRequestHandler(...) {
+
+    def run(): Unit = {
+        while (!stopped) {
+            val req = requestChannel.receiveRequest(300)
+            req match {
+                case request: RequestChannel.Request =>
+                    apis.handle(request, requestLocal)
+                    {
+                        request.header.apiKey match {
+                            case ApiKeys.PRODUCE => handleProduceRequest(request, requestLocal)
+                            case ApiKeys.FETCH => handleFetchRequest(request)
+                            case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
+                            case ApiKeys.METADATA => handleTopicMetadataRequest(request)
+                            case ApiKeys.LEADER_AND_ISR => handleLeaderAndIsrRequest(request)
+                            case ApiKeys.STOP_REPLICA => handleStopReplicaRequest(request)
+                            case ApiKeys.UPDATE_METADATA => handleUpdateMetadataRequest(request, requestLocal)
+                            case ApiKeys.CONTROLLED_SHUTDOWN => handleControlledShutdownRequest(request)
+                            case ApiKeys.OFFSET_COMMIT => handleOffsetCommitRequest(request, requestLocal)
+                            case ApiKeys.OFFSET_FETCH => handleOffsetFetchRequest(request)
+                            case ApiKeys.FIND_COORDINATOR => handleFindCoordinatorRequest(request)
+                            case ApiKeys.JOIN_GROUP => handleJoinGroupRequest(request, requestLocal)
+                            case ApiKeys.HEARTBEAT => handleHeartbeatRequest(request)
+                            case ApiKeys.LEAVE_GROUP => handleLeaveGroupRequest(request)
+                            case ApiKeys.SYNC_GROUP => handleSyncGroupRequest(request, requestLocal)
+                            case ApiKeys.DESCRIBE_GROUPS => handleDescribeGroupRequest(request)
+                            case ApiKeys.LIST_GROUPS => handleListGroupsRequest(request)
+                            case ApiKeys.SASL_HANDSHAKE => handleSaslHandshakeRequest(request)
+                            case ApiKeys.API_VERSIONS => handleApiVersionsRequest(request)
+                            case ApiKeys.CREATE_TOPICS => maybeForwardToController(request, handleCreateTopicsRequest)
+                            case ApiKeys.DELETE_TOPICS => maybeForwardToController(request, handleDeleteTopicsRequest)
+                            case ApiKeys.DELETE_RECORDS => handleDeleteRecordsRequest(request)
+                            case ApiKeys.INIT_PRODUCER_ID => handleInitProducerIdRequest(request, requestLocal)
+                            case ApiKeys.OFFSET_FOR_LEADER_EPOCH => handleOffsetForLeaderEpochRequest(request)
+                            case ApiKeys.ADD_PARTITIONS_TO_TXN => handleAddPartitionToTxnRequest(request, requestLocal)
+                            case ApiKeys.ADD_OFFSETS_TO_TXN => handleAddOffsetsToTxnRequest(request, requestLocal)
+                            case ApiKeys.END_TXN => handleEndTxnRequest(request, requestLocal)
+                            case ApiKeys.WRITE_TXN_MARKERS => handleWriteTxnMarkersRequest(request, requestLocal)
+                            case ApiKeys.TXN_OFFSET_COMMIT => handleTxnOffsetCommitRequest(request, requestLocal)
+                            case ApiKeys.DESCRIBE_ACLS => handleDescribeAcls(request)
+                            case ApiKeys.CREATE_ACLS => maybeForwardToController(request, handleCreateAcls)
+                            case ApiKeys.DELETE_ACLS => maybeForwardToController(request, handleDeleteAcls)
+                            case ApiKeys.ALTER_CONFIGS => handleAlterConfigsRequest(request)
+                            case ApiKeys.DESCRIBE_CONFIGS => handleDescribeConfigsRequest(request)
+                            case ApiKeys.ALTER_REPLICA_LOG_DIRS => handleAlterReplicaLogDirsRequest(request)
+                            case ApiKeys.DESCRIBE_LOG_DIRS => handleDescribeLogDirsRequest(request)
+                            case ApiKeys.SASL_AUTHENTICATE => handleSaslAuthenticateRequest(request)
+                            case ApiKeys.CREATE_PARTITIONS => maybeForwardToController(request, handleCreatePartitionsRequest)
+                            case ApiKeys.CREATE_DELEGATION_TOKEN => maybeForwardToController(request, handleCreateTokenRequest)
+                            case ApiKeys.RENEW_DELEGATION_TOKEN => maybeForwardToController(request, handleRenewTokenRequest)
+                            case ApiKeys.EXPIRE_DELEGATION_TOKEN => maybeForwardToController(request, handleExpireTokenRequest)
+                            case ApiKeys.DESCRIBE_DELEGATION_TOKEN => handleDescribeTokensRequest(request)
+                            case ApiKeys.DELETE_GROUPS => handleDeleteGroupsRequest(request, requestLocal)
+                            case ApiKeys.ELECT_LEADERS => maybeForwardToController(request, handleElectLeaders)
+                            case ApiKeys.INCREMENTAL_ALTER_CONFIGS => handleIncrementalAlterConfigsRequest(request)
+                            case ApiKeys.ALTER_PARTITION_REASSIGNMENTS => maybeForwardToController(request, handleAlterPartitionReassignmentsRequest)
+                            case ApiKeys.LIST_PARTITION_REASSIGNMENTS => maybeForwardToController(request, handleListPartitionReassignmentsRequest)
+                            case ApiKeys.OFFSET_DELETE => handleOffsetDeleteRequest(request, requestLocal)
+                            case ApiKeys.DESCRIBE_CLIENT_QUOTAS => handleDescribeClientQuotasRequest(request)
+                            case ApiKeys.ALTER_CLIENT_QUOTAS => maybeForwardToController(request, handleAlterClientQuotasRequest)
+                            case ApiKeys.DESCRIBE_USER_SCRAM_CREDENTIALS => handleDescribeUserScramCredentialsRequest(request)
+                            case ApiKeys.ALTER_USER_SCRAM_CREDENTIALS => maybeForwardToController(request, handleAlterUserScramCredentialsRequest)
+                            case ApiKeys.ALTER_PARTITION => handleAlterPartitionRequest(request)
+                            case ApiKeys.UPDATE_FEATURES => maybeForwardToController(request, handleUpdateFeatures)
+                            case ApiKeys.ENVELOPE => handleEnvelope(request, requestLocal)
+                            case ApiKeys.DESCRIBE_CLUSTER => handleDescribeCluster(request)
+                            case ApiKeys.DESCRIBE_PRODUCERS => handleDescribeProducersRequest(request)
+                            case ApiKeys.UNREGISTER_BROKER => forwardToControllerOrFail(request)
+                            case ApiKeys.DESCRIBE_TRANSACTIONS => handleDescribeTransactionsRequest(request)
+                            case ApiKeys.LIST_TRANSACTIONS => handleListTransactionsRequest(request)
+                            case ApiKeys.ALLOCATE_PRODUCER_IDS => handleAllocateProducerIdsRequest(request)
+                            case ApiKeys.DESCRIBE_QUORUM => forwardToControllerOrFail(request)
+                            case _ => throw new IllegalStateException(s"No handler for request api key ${request.header.apiKey}")
+                        }
+                    }
+            }
+        }
+    }
+}
+
+```
+
+## log管理
+
+```scala
+
+// log恢复
+def loadLogs(defaultConfig: LogConfig, topicConfigOverrides: Map[String, LogConfig]): Unit = {
+    for (dir <- liveLogDirs) {
+        // 每个dir启动一个线程池
+        val pool = Executors.newFixedThreadPool(numRecoveryThreadsPerDataDir,
+        new LogRecoveryThreadFactory(logDirAbsolutePath))
+        threadPools.append(pool)
+
+        // 文件.kafka_cleanshutdown标记上次正常关闭
+        val cleanShutdownFile = new File(dir, LogLoader.CleanShutdownFile)
+        if (cleanShutdownFile.exists) {
+            Files.deleteIfExists(cleanShutdownFile.toPath)
+        }
+
+        var recoveryPoints = Map[TopicPartition, Long]()
+        // 读取文件recovery-point-offset-checkpoint
+        // 文件行格式: topic partition offset
+        recoveryPoints = this.recoveryPointCheckpoints(dir).read()
+
+        var logStartOffsets = Map[TopicPartition, Long]()
+        // 读取文件log-start-offset-checkpoint
+        // 文件行格式: topic partition offset
+        logStartOffsets = this.logStartOffsetCheckpoints(dir).read()
+
+        // 文件夹命名格式: {topic}-{partition}[.xxx]
+        val logsToLoad = Option(dir.listFiles).getOrElse(Array.empty).filter(logDir =>
+            logDir.isDirectory && UnifiedLog.parseTopicPartitionName(logDir).topic != KafkaRaftServer.MetadataTopic)
+
+        // 每个分区一个线程
+        val jobsForDir = logsToLoad.map { logDir =>
+            val runnable: Runnable = () => {
+                // 恢复一个{topic}-{partition}的数据
+                log = Some(loadLog(logDir, hadCleanShutdown, recoveryPoints, logStartOffsets,
+                    defaultConfig, topicConfigOverrides, numRemainingSegments))
+                {
+                    // create the log directory if it doesn't exist
+                    Files.createDirectories(dir.toPath)
+
+                    // 读取文件leader-epoch-checkpoint
+                    // 文件格式: epoch offset
+                    val leaderEpochCache = UnifiedLog.maybeCreateLeaderEpochCache(dir, topicPartition, ...)
+                    // 加载记录producer状态的{offset}.snapshot文件
+                    val producerStateManager = new ProducerStateManager(topicPartition, dir, ...)
+
+                    val offsets = new LogLoader(dir, topicPartition, ...).load()
+                    {
+                        val swapFiles = removeTempFilesAndCollectSwapFiles()
+                        {
+                            for (file <- dir.listFiles if file.isFile) {
+                                if (filename.endsWith(DeletedFileSuffix) && !filename.endsWith(Snapshots.DELETE_SUFFIX)) {
+                                    // 删除xxx.deleted，xxx非.checkpoint
+                                    Files.deleteIfExists(file.toPath)
+                                } else if (filename.endsWith(CleanedFileSuffix)) {
+                                    // 查找{offset}.log.cleaned最小的offset
+                                    minCleanedFileOffset = Math.min(offsetFromFile(file), minCleanedFileOffset)
+                                    cleanedFiles += file
+                                } else if (filename.endsWith(SwapFileSuffix)) {
+                                    // 收集{offset}.log.swap文件
+                                    swapFiles += file
+                                }
+                            }
+
+                            // Delete all .swap files whose base offset is greater than the minimum .cleaned segment offset.
+                            val (invalidSwapFiles, validSwapFiles) = swapFiles.partition(file => offsetFromFile(file) >= minCleanedFileOffset)
+                            invalidSwapFiles.foreach { file =>
+                                Files.deleteIfExists(file.toPath)
+                            }
+
+                            cleanedFiles.foreach { file =>
+                                Files.deleteIfExists(file.toPath)
+                            }
+
+                            validSwapFiles
+                        }
+
+                        // 计算{offset}.log.swap文件offset范围
+                        swapFiles.filter(f => UnifiedLog.isLogFile(new File(CoreUtils.replaceSuffix(f.getPath, SwapFileSuffix, ""))))
+                        .foreach { f =>
+                            val baseOffset = offsetFromFile(f)
+                            // 读取每个swap文件
+                            val segment = LogSegment.open(f.getParentFile, baseOffset = baseOffset, ..., fileSuffix = UnifiedLog.SwapFileSuffix)
+                            minSwapFileOffset = Math.min(segment.baseOffset, minSwapFileOffset)
+                            // 从索引查找最后一个offset
+                            maxSwapFileOffset = Math.max(segment.readNextOffset, maxSwapFileOffset)
+                        }
+
+                        for (file <- dir.listFiles if file.isFile) {
+                            if (!file.getName.endsWith(SwapFileSuffix)) {
+                                val offset = offsetFromFile(file)
+                                // 删除所有包含在swap文件中的非swap文件
+                                if (offset >= minSwapFileOffset && offset < maxSwapFileOffset) {
+                                    file.delete()
+                                }
+                            }
+                        }
+
+                        // Third pass: rename all swap files.
+                        for (file <- dir.listFiles if file.isFile) {
+                            if (file.getName.endsWith(SwapFileSuffix)) {
+                                file.renameTo(new File(CoreUtils.replaceSuffix(file.getPath, UnifiedLog.SwapFileSuffix, "")))
+                            }
+                        }
+
+                        // 读取所有segment文件
+                        loadSegmentFiles()
+                        {
+                            for (file <- dir.listFiles.sortBy(_.getName) if file.isFile) {
+                                // 删除没有对应log文件的索引文件
+                                // {offset}.index/{offset}.txnindex/{offset}.timeindex
+                                if (isIndexFile(file)) {
+                                    val offset = offsetFromFile(file)
+                                    val logFile = UnifiedLog.logFile(dir, offset)
+                                    if (!logFile.exists) {
+                                        Files.deleteIfExists(file.toPath)
+                                    }
+                                } else if (isLogFile(file)) {
+                                    val baseOffset = offsetFromFile(file)
+                                    val segment = LogSegment.open(dir = dir, baseOffset = baseOffset, ...)
+                                    segments.add(segment)
+                                }
+                            }
+                        }
+
+                        // TODO
+                    }
+
+                    val localLog = new LocalLog(dir, config, segments, 
+                                    offsets.recoveryPoint, offsets.nextOffsetMetadata, ...)
+
+                    new UnifiedLog(offsets.logStartOffset, localLog, ...)
+                }
+            }
+            runnable
+        }
+
+        jobs += jobsForDir.map(pool.submit)
+    }
+
+    // 等待log恢复完毕
+    for (dirJobs <- jobs) {
+        dirJobs.foreach(_.get)
+    }
+    threadPools.foreach(_.shutdown())
+}
+
+// log相关定时任务
+scheduler.schedule("kafka-log-retention", cleanupLogs _, ...)
+scheduler.schedule("kafka-log-flusher", flushDirtyLogs _, ...)
+
+scheduler.schedule("kafka-recovery-point-checkpoint", checkpointLogRecoveryOffsets _, ...)
+{
+    val recoveryOffsets = logsToCheckpoint.map { case (tp, log) => tp -> log.recoveryPoint }
+    checkpoint.write(recoveryOffsets)
+    {
+        checkpointFile.write(entries.toSeq.asJava)
+        {
+            try (FileOutputStream fileOutputStream = new FileOutputStream(tempPath.toFile());
+                 BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(fileOutputStream, UTF_8))) {
+                // Write the version
+                writer.write(Integer.toString(version));
+                writer.newLine();
+
+                // Write the entries count
+                writer.write(Integer.toString(entries.size()));
+                writer.newLine();
+
+                // Write each entry on a new line.
+                for (T entry : entries) {
+                    writer.write(formatter.toString(entry));
+                    writer.newLine();
+                }
+
+                writer.flush();
+                fileOutputStream.getFD().sync();
+            }
+
+            Utils.atomicMoveWithFallback(tempPath, absolutePath);
+        }
+    }
+}
+
+scheduler.schedule("kafka-log-start-offset-checkpoint", checkpointLogStartOffsets _, ...)
+{
+    val logStartOffsets = logsToCheckpoint.collect {
+        case (tp, log) if log.logStartOffset > log.logSegments.head.baseOffset => tp -> log.logStartOffset
+    }
+    checkpoint.write(logStartOffsets)
+}
+
+scheduler.schedule("kafka-delete-logs", deleteLogs _, ...)
+
+if (cleanerConfig.enableCleaner) {
+    _cleaner = new LogCleaner(cleanerConfig, liveLogDirs, currentLogs, logDirFailureChannel, time = time)
+    _cleaner.startup()
+}
+
+```
+
+
+## 生产
+
+## 消费
