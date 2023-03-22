@@ -1,0 +1,763 @@
+---
+layout: post
+title:  "kernel之任务调度"
+date:   2023-03-22 10:22:07 +0000
+categories: jekyll
+tags: kernel sched
+---
+
+# 初始化
+
+## cpu初始化
+
+`qemu`参数`-machine type=virt,dumpdtb=/path/to/aarch64.dtb`可以`dump`出生成的设备树信息  
+然后通过`dtc -o aarch64.dts -O dts -I dtb aarch64.dtb`把`dtb`转成文本格式  
+使用`qemu`参数`-cpu cortex-a72 -smp cpus=4`生成的`dts`文件如下  
+
+```dts
+/ {
+    cpus {
+		#size-cells = <0x00>;
+		#address-cells = <0x01>;
+
+		cpu-map {
+			socket0 {
+				cluster0 {
+					core0 {
+						cpu = <0x8004>;
+					};
+					core1 {
+						cpu = <0x8003>;
+					};
+					core2 {
+						cpu = <0x8002>;
+					};
+					core3 {
+						cpu = <0x8001>;
+					};
+				};
+			};
+		};
+
+		cpu@0 {
+			phandle = <0x8004>;
+			reg = <0x00>;
+			enable-method = "psci";
+			compatible = "arm,cortex-a72";
+			device_type = "cpu";
+		};
+
+		cpu@1 {
+			phandle = <0x8003>;
+			reg = <0x01>;
+			enable-method = "psci";
+			compatible = "arm,cortex-a72";
+			device_type = "cpu";
+		};
+
+		cpu@2 {
+			phandle = <0x8002>;
+			reg = <0x02>;
+			enable-method = "psci";
+			compatible = "arm,cortex-a72";
+			device_type = "cpu";
+		};
+
+		cpu@3 {
+			phandle = <0x8001>;
+			reg = <0x03>;
+			enable-method = "psci";
+			compatible = "arm,cortex-a72";
+			device_type = "cpu";
+		};
+	};
+}
+```
+
+kernel启动时会解析dts文件获取cpu信息
+
+```c
+
+static unsigned int cpu_count = 1;
+u64 __cpu_logical_map[NR_CPUS];
+
+const struct cpu_operations cpu_psci_ops = {
+	.name		= "psci",
+	.cpu_init	= cpu_psci_cpu_init,
+	.cpu_prepare	= cpu_psci_cpu_prepare,
+	.cpu_boot	= cpu_psci_cpu_boot,
+#ifdef CONFIG_HOTPLUG_CPU
+	.cpu_can_disable = cpu_psci_cpu_can_disable,
+	.cpu_disable	= cpu_psci_cpu_disable,
+	.cpu_die	= cpu_psci_cpu_die,
+	.cpu_kill	= cpu_psci_cpu_kill,
+#endif
+};
+
+asmlinkage void start_kernel(void)
+{
+    setup_arch(&command_line);
+    {
+        smp_init_cpus();
+        {
+            // 解析device-tree中的cpu信息
+            of_parse_and_init_cpus();
+            {
+                for_each_of_cpu_node(dn) {
+                    of_get_next_cpu_node(NULL);
+                    {
+                        if (!prev)
+                            node = of_find_node_by_path("/cpus");
+
+                        if (prev)
+                            next = prev->sibling;
+                        else if (node) {
+                            next = node->child;
+                        }
+                        for (; next; next = next->sibling) {
+                            of_node_get(next);
+                        }
+                    }
+
+                    // 获取cpu-id
+                    u64 hwid = of_get_cpu_mpidr(dn);
+                    // 有效cpu位图
+                    set_cpu_logical_map(cpu_count, hwid);
+                    early_map_cpu_to_node(cpu_count, of_node_to_nid(dn));
+                    // cpu数量
+                    cpu_count++;
+                }
+            }
+
+            for (i = 1; i < nr_cpu_ids; i++) {
+                if (cpu_logical_map(i) != INVALID_HWID) {
+                    smp_cpu_setup(i);
+                    {
+                        init_cpu_ops(cpu);
+                        {
+                            // 读取设备树中cpu的enable-method属性，值为psci
+                            const char *enable_method = cpu_read_enable_method(cpu);
+                            // 匹配cpu_operations注册表
+                            cpu_ops[cpu] = cpu_get_ops(enable_method);
+                        }
+
+                        // cpu初始化
+                        (cpu_ops[cpu])->cpu_init(cpu);
+                        set_cpu_possible(cpu, true);
+                    }
+                }
+            }
+        }
+    }
+
+    setup_nr_cpu_ids();
+    {
+        // 查找cpu位图的最后一个1的位置
+        nr_cpu_ids = find_last_bit(cpumask_bits(cpu_possible_mask), NR_CPUS) + 1;
+    }
+}
+
+```
+
+## 调度队列初始化
+
+```c
+
+DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+static DEFINE_PER_CPU(struct task_struct *, idle_threads);
+
+asmlinkage void start_kernel(void)
+{
+    sched_init();
+    {
+
+        init_rt_bandwidth(&def_rt_bandwidth, global_rt_period(), global_rt_runtime());
+	    init_dl_bandwidth(&def_dl_bandwidth, global_rt_period(), global_rt_runtime());
+
+        for_each_possible_cpu(i) {
+            struct rq *rq = cpu_rq(i);
+            rq->nr_running = 0;
+		    rq->calc_load_active = 0;
+
+            init_cfs_rq(&rq->cfs);
+            init_rt_rq(&rq->rt);
+            init_dl_rq(&rq->dl);
+        }
+
+        set_load_weight(&init_task, false);
+        {
+            int prio = p->static_prio - MAX_RT_PRIO;
+            load->weight = scale_load(sched_prio_to_weight[prio]);
+		    load->inv_weight = sched_prio_to_wmult[prio];
+        }
+
+        // 设置init_task为boot-cpu的idle任务
+        // 目前没有其他任务, 所以会一直执行init_task直到完成初始化
+        init_idle(current, smp_processor_id());
+        {
+            struct rq *rq = cpu_rq(cpu);
+            idle->__state = TASK_RUNNING;
+            rq->idle = idle;
+            idle->sched_class = &idle_sched_class;
+        }
+
+        idle_thread_set_boot_cpu();
+        {
+            per_cpu(idle_threads, smp_processor_id()) = current;
+        }
+
+        init_sched_fair_class();
+        {
+            // rebalance多个cpu的任务队列
+            open_softirq(SCHED_SOFTIRQ, run_rebalance_domains);
+        }
+
+        scheduler_running = 1;
+    }
+
+    arch_call_rest_init();
+    {
+        rest_init();
+        {
+            // 启动内核线程完成后续初始化
+            pid = kernel_thread(kernel_init, NULL, CLONE_FS);
+            {
+                // 等待init_task进入idle状态
+                wait_for_completion(&kthreadd_done);
+
+                kernel_init_freeable();
+                {
+                    smp_init();
+                    {
+                        idle_threads_init();
+                        {
+                            // fork(init_task)作为非boot-cpu的idle任务
+                            for_each_possible_cpu(cpu) {
+                                if (cpu != boot_cpu)
+                                    idle_init(cpu);
+                            }
+                        }
+                    }
+                }
+            }
+
+            system_state = SYSTEM_SCHEDULING;
+
+            // boot完成，init_task开始进入idle状态
+            complete(&kthreadd_done);
+
+            // 所有的cpu最终都会走到这里
+            schedule_preempt_disabled();
+            {
+                schedule();
+                {
+                    do {
+                        __schedule(SM_NONE);
+                    } while (need_resched());
+                }
+            }
+
+            cpu_startup_entry(CPUHP_ONLINE);
+            {
+                while (1)
+		            do_idle();
+            }
+        }
+    }
+}
+
+```
+
+## 时钟中断
+
+```dts
+/ {
+    // 全局的中断控制器
+	interrupt-parent = <0x8005>;
+
+    // 中断控制器
+    intc@8000000 {
+		phandle = <0x8005>;
+		reg = <0x00 0x8000000 0x00 0x10000 0x00 0x8010000 0x00 0x10000>;
+		compatible = "arm,cortex-a15-gic";
+		ranges;
+		#size-cells = <0x02>;
+		#address-cells = <0x02>;
+		interrupt-controller;
+		#interrupt-cells = <0x03>;
+
+		v2m@8020000 {
+			phandle = <0x8006>;
+			reg = <0x00 0x8020000 0x00 0x1000>;
+			msi-controller;
+			compatible = "arm,gic-v2m-frame";
+		};
+	};
+
+    // 时钟设备
+    timer {
+		interrupts = <0x01 0x0d 0xf04 0x01 0x0e 0xf04 0x01 0x0b 0xf04 0x01 0x0a 0xf04>;
+		always-on;
+		compatible = "arm,armv8-timer\0arm,armv7-timer";
+	};
+}
+```
+
+```c
+
+// 声明支持的时钟设备到__timer_of_table
+TIMER_OF_DECLARE(armv7_arch_timer, "arm,armv7-timer", arch_timer_of_init);
+TIMER_OF_DECLARE(armv8_arch_timer, "arm,armv8-timer", arch_timer_of_init);
+
+asmlinkage void start_kernel(void)
+{
+    time_init();
+    {
+        timer_probe();
+        {
+            // 解析dt中的时钟设备, 匹配__timer_of_table表
+            for_each_matching_node_and_match(np, __timer_of_table, &match) {
+                // #sched#3.1c init_func_ret
+                init_func_ret = match->data;
+                init_func_ret(np);
+                {
+                    // 解析dt中的时钟中断硬件irq, 映射到gic的irq
+                    for (i = ARCH_TIMER_PHYS_SECURE_PPI; i < ARCH_TIMER_MAX_TIMER_PPI; i++) {
+                        // 返回gic映射之后的irq
+                        irq = of_irq_get(np, i);
+                        arch_timer_ppi[i] = irq;
+                    }
+
+                    // 选择irq
+		            arch_timer_uses_ppi = arch_timer_select_ppi();
+
+                    // 注册timer中断
+                    arch_timer_register();
+                    {
+                        request_percpu_irq(ppi, arch_timer_handler_virt, "arch_timer", arch_timer_evt);
+                        {
+                            // evt表示触发时钟中断的时钟设备
+                            timer_handler(ARCH_TIMER_VIRT_ACCESS, evt);
+                            {
+                                evt->event_handler(evt);
+                            }
+                        }
+
+                        /* Register and immediately configure the timer on the boot CPU */
+                        cpuhp_setup_state(CPUHP_AP_ARM_ARCH_TIMER_STARTING,
+                            "clockevents/arm/arch_timer:starting",
+                            arch_timer_starting_cpu, arch_timer_dying_cpu);
+                        {
+                            // 设置时钟中断的handler
+                            __arch_timer_setup(ARCH_TIMER_TYPE_CP15, clk);
+                            {
+                                dev->event_handler = tick_handle_periodic;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void tick_handle_periodic(struct clock_event_device *dev)
+{
+    tick_periodic(cpu);
+    {
+        do_timer(1);
+        update_process_times(user_mode(get_irq_regs()));
+        {
+            account_process_tick(p, user_tick);
+            {
+                cputime = TICK_NSEC;
+                if (user_tick)
+                    // 累加p->utime
+                    account_user_time(p, cputime);
+                else if ((p != this_rq()->idle) || (irq_count() != HARDIRQ_OFFSET))
+                    // 累加p->stime
+                    account_system_time(p, HARDIRQ_OFFSET, cputime);
+                else
+                    account_idle_time(cputime);
+            }
+
+            scheduler_tick();
+            {
+                curr->sched_class->task_tick(rq, curr, 0);
+            }
+        }
+    }
+}
+
+// cfs调度器
+static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
+{
+    for_each_sched_entity(se) {
+		cfs_rq = cfs_rq_of(se);
+		entity_tick(cfs_rq, se, queued);
+        {
+            update_curr(cfs_rq);
+            {
+                // 真实耗时
+                delta_exec = now - curr->exec_start;
+                // 累积实际耗时
+	            curr->sum_exec_runtime += delta_exec;
+                // 实际耗时根据weight加权
+	            curr->vruntime += calc_delta_fair(delta_exec, curr);
+            }
+
+            // running状态的任务有多个则考虑是否切换
+            if (cfs_rq->nr_running > 1)
+		        check_preempt_tick(cfs_rq, curr);
+                {
+                    // 计算一个周期内加权之后的平均时长
+                    ideal_runtime = sched_slice(cfs_rq, curr);
+                    delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+
+                    // 实际运行时长超过平均值则切换
+                    if (delta_exec > ideal_runtime) {
+                        resched_curr(rq_of(cfs_rq));
+                        return;
+                    }
+
+                    // 查找队列中vruntime最小的task
+                    se = __pick_first_entity(cfs_rq);
+	                delta = curr->vruntime - se->vruntime;
+
+                    // vruntime差值超过平均值
+                    if (delta > ideal_runtime)
+		                resched_curr(rq_of(cfs_rq));
+                        {
+                            set_tsk_need_resched(curr);
+                            {
+                                // 设置切换标识
+                                set_tsk_thread_flag(tsk, TIF_NEED_RESCHED);
+                            }
+                        }
+                }
+        }
+	}
+}
+```
+
+## 调度时机
+
+```c
+// 中断、系统调用退回user时
+static void noinstr el0_interrupt(struct pt_regs *regs,
+				  void (*handler)(struct pt_regs *))
+{
+	do_interrupt_handler(regs, handler);
+	exit_to_user_mode(regs);
+    {
+        prepare_exit_to_user_mode(regs);
+        {
+            flags = READ_ONCE(current_thread_info()->flags);
+            if (unlikely(flags & _TIF_WORK_MASK))
+                do_notify_resume(regs, flags);
+                {
+                    if (thread_flags & _TIF_NEED_RESCHED) {
+                        schedule();
+                    }
+                }
+        }
+    }
+}
+
+// 中断退回kernel时
+static void noinstr el1_interrupt(struct pt_regs *regs,
+				  void (*handler)(struct pt_regs *))
+{
+    do_interrupt_handler(regs, handler);
+
+    // 支持CONFIG_PREEMPTION且preempt_count==0才允许抢占kernel代码
+    if (IS_ENABLED(CONFIG_PREEMPTION) &&
+	    current_thread_info()->preempt_count == 0)
+		arm64_preempt_schedule_irq();
+        {
+            preempt_schedule_irq();
+            {
+                do {
+                    preempt_disable();
+                    local_irq_enable();
+                    __schedule(SM_PREEMPT);
+                    local_irq_disable();
+                    sched_preempt_enable_no_resched();
+                } while (need_resched());
+            }
+        }
+}
+
+// 编译时打开CONFIG_PREEMPTION则在调用到preempt_enable()时检查任务切换
+#define preempt_enable() \
+do { \
+	barrier(); \
+	if (unlikely(preempt_count_dec_and_test())) \
+		__preempt_schedule(); \
+} while (0)
+
+asmlinkage __visible void __sched notrace preempt_schedule(void)
+{
+    // preempt_count==0且允许中断
+    if (likely(!preemptible()))
+		return;
+    
+    preempt_schedule_common();
+    {
+        do {
+            preempt_disable_notrace();
+            preempt_latency_start(1);
+            __schedule(SM_PREEMPT);
+            preempt_latency_stop(1);
+            preempt_enable_no_resched_notrace();
+        } while (need_resched());
+    }
+}
+```
+
+## 任务调度
+
+```c
+/*
+ * __schedule() is the main scheduler function.
+ *
+ * The main means of driving the scheduler and thus entering this function are:
+ *
+ *   1. Explicit blocking: mutex, semaphore, waitqueue, etc.
+ *
+ *   2. TIF_NEED_RESCHED flag is checked on interrupt and userspace return paths. 
+ *      For example, see arch/x86/entry_64.S.
+ *
+ *      To drive preemption between tasks, the scheduler sets the flag in timer
+ *      interrupt handler scheduler_tick().
+ *
+ *   3. Wakeups don't really cause entry into schedule(). They add a
+ *      task to the run-queue and that's it.
+ *
+ *      Now, if the new task added to the run-queue preempts the current
+ *      task, then the wakeup sets TIF_NEED_RESCHED and schedule() gets
+ *      called on the nearest possible occasion:
+ *
+ *       - If the kernel is preemptible (CONFIG_PREEMPTION=y):
+ *
+ *         - in syscall or exception context, at the next outmost preempt_enable(). 
+ *           (this might be as soon as the wake_up()'s spin_unlock()!)
+ *
+ *         - in IRQ context, return from interrupt-handler to preemptible context
+ *
+ *       - If the kernel is not preemptible (CONFIG_PREEMPTION is not set)
+ *         then at the next:
+ *
+ *          - cond_resched() call
+ *          - explicit schedule() call
+ *          - return from syscall or exception to user-space
+ *          - return from interrupt-handler to user-space
+ *
+ * WARNING: must be called with preemption disabled!
+ */
+static void __sched notrace __schedule(unsigned int sched_mode)
+{
+    cpu = smp_processor_id();
+	rq = cpu_rq(cpu);
+	prev = rq->curr;
+
+    // 选出下一个待执行的任务
+    next = pick_next_task(rq, prev, &rf);
+    {
+        // 把prev放回队列
+        put_prev_task_balance(rq, prev, rf);
+        {
+            prev->sched_class->put_prev_task(rq, prev);
+        }
+
+        // 按调度队列的优先级选出一个待执行的任务
+        for_each_class(class) {
+            p = class->pick_next_task(rq);
+            if (p)
+                return p;
+	    }
+    }
+
+    // 清除标识
+    clear_tsk_need_resched(prev);
+    clear_preempt_need_resched();
+
+    if (prev != next) {
+        // 切换待执行任务
+        rq = context_switch(rq, prev, next, &rf);
+        {
+            // 切换页表
+            if (!next->mm) {                            // to kernel
+                // 所有task陷入内核后都是用内核的页表
+                next->active_mm = prev->active_mm;
+                if (prev->mm)                           // from user
+                    mmgrab(prev->active_mm);
+                else
+                    prev->active_mm = NULL;
+            } else {   
+                // 切换到next的用户空间页表
+                switch_mm_irqs_off(prev->active_mm, next->mm, next);
+                {
+                    __switch_mm(next);
+                    {
+                        check_and_switch_context(next);
+                        {
+                            cpu_switch_mm(mm->pgd, mm);
+                            {
+                                cpu_do_switch_mm(virt_to_phys(pgd),mm);
+                                {
+                                    unsigned long ttbr1 = read_sysreg(ttbr1_el1);
+	                                unsigned long ttbr0 = phys_to_ttbr(pgd_phys);
+
+                                    /* Set ASID in TTBR1 since TCR.A1 is set */
+                                    ttbr1 &= ~TTBR_ASID_MASK;
+                                    ttbr1 |= FIELD_PREP(TTBR_ASID_MASK, asid);
+
+                                    write_sysreg(ttbr1, ttbr1_el1);
+                                    isb();
+                                    write_sysreg(ttbr0, ttbr0_el1);
+                                    isb();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 切换寄存器
+            switch_to(prev, next, prev);
+            {
+                __switch_to(prev, next);
+                {
+                    // 汇编代码
+                    cpu_switch_to(prev, next);
+                }
+            }
+
+	        barrier();
+        }
+    } else {
+        // 只有一个任务可以执行，太闲了，看看别的cpu是否很忙
+        __balance_callbacks(rq);
+    }
+}
+
+/*
+ * Register switch for AArch64. The callee-saved registers need to be saved
+ * and restored. On entry:
+ *   x0 = previous task_struct (must be preserved across the switch)
+ *   x1 = next task_struct
+ * Previous and next are guaranteed not to be the same.
+ * 切换寄存器的汇编代码
+ */
+SYM_FUNC_START(cpu_switch_to)
+	mov	x10, #THREAD_CPU_CONTEXT
+	add	x8, x0, x10
+	mov	x9, sp
+	stp	x19, x20, [x8], #16		// store callee-saved registers
+	stp	x21, x22, [x8], #16
+	stp	x23, x24, [x8], #16
+	stp	x25, x26, [x8], #16
+	stp	x27, x28, [x8], #16
+	stp	x29, x9, [x8], #16
+	str	lr, [x8]
+	add	x8, x1, x10
+	ldp	x19, x20, [x8], #16		// restore caller-saved registers
+	ldp	x21, x22, [x8], #16
+	ldp	x23, x24, [x8], #16
+	ldp	x25, x26, [x8], #16
+	ldp	x27, x28, [x8], #16
+	ldp	x29, x9, [x8], #16
+	ldr	lr, [x8]
+	mov	sp, x9
+	msr	sp_el0, x1              // 设置current
+	scs_save x0
+	scs_load x1
+	ret
+SYM_FUNC_END(cpu_switch_to)
+```
+
+## 调度类
+
+```c
+// 所有支持的调度类
+#define SCHED_DATA				    \
+	__begin_sched_classes = .;		\
+	*(__idle_sched_class)			\
+	*(__fair_sched_class)			\
+	*(__rt_sched_class)			    \
+	*(__dl_sched_class)			    \
+	*(__stop_sched_class)			\
+	__end_sched_classes = .;
+
+#define sched_class_highest (__end_sched_classes - 1)
+#define sched_class_lowest  (__begin_sched_classes - 1)
+
+// 按优先级遍历指定范围
+#define for_class_range(class, _from, _to) \
+	for (class = (_from); class != (_to); class--)
+
+// 按优先级遍历
+#define for_each_class(class) \
+	for_class_range(class, sched_class_highest, sched_class_lowest)
+
+// 公平调度器
+DEFINE_SCHED_CLASS(fair) = {
+
+	.enqueue_task		= enqueue_task_fair,
+	.dequeue_task		= dequeue_task_fair,
+	.yield_task			= yield_task_fair,
+	.yield_to_task		= yield_to_task_fair,
+
+	.check_preempt_curr	= check_preempt_wakeup,
+
+	.pick_next_task		= __pick_next_task_fair,
+	.put_prev_task		= put_prev_task_fair,
+	.set_next_task      = set_next_task_fair,
+
+	.balance			= balance_fair,
+	.pick_task			= pick_task_fair,
+	.select_task_rq		= select_task_rq_fair,
+	.migrate_task_rq	= migrate_task_rq_fair,
+
+	.rq_online			= rq_online_fair,
+	.rq_offline			= rq_offline_fair,
+
+	.task_dead			= task_dead_fair,
+	.set_cpus_allowed	= set_cpus_allowed_common,
+
+	.task_tick			= task_tick_fair,
+	.task_fork			= task_fork_fair,
+
+	.prio_changed		= prio_changed_fair,
+	.switched_from		= switched_from_fair,
+	.switched_to		= switched_to_fair,
+
+	.get_rr_interval	= get_rr_interval_fair,
+
+	.update_curr		= update_curr_fair,
+};
+
+// 选择下一个任务
+static struct task_struct *__pick_next_task_fair(struct rq *rq)
+{
+	return pick_next_task_fair(rq, NULL, NULL);
+    {
+        // 结构是red-black-tree, 按vruntime排序
+        se = pick_next_entity(cfs_rq, NULL);
+        {
+            return __pick_first_entity(cfs_rq);
+            {
+                return rb_first_cached(&cfs_rq->tasks_timeline);
+            }
+        }
+
+		set_next_entity(cfs_rq, se);
+        {
+            cfs_rq->curr = se;
+            se->prev_sum_exec_runtime = se->sum_exec_runtime;
+        }
+    }
+}
+
+```
