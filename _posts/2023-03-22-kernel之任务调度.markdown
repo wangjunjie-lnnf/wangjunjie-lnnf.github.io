@@ -17,60 +17,60 @@ tags: kernel sched
 ```dts
 / {
     cpus {
-		#size-cells = <0x00>;
-		#address-cells = <0x01>;
+        #size-cells = <0x00>;
+        #address-cells = <0x01>;
 
-		cpu-map {
-			socket0 {
-				cluster0 {
-					core0 {
-						cpu = <0x8004>;
-					};
-					core1 {
-						cpu = <0x8003>;
-					};
-					core2 {
-						cpu = <0x8002>;
-					};
-					core3 {
-						cpu = <0x8001>;
-					};
-				};
-			};
-		};
+        cpu-map {
+            socket0 {
+                cluster0 {
+                    core0 {
+                        cpu = <0x8004>;
+                    };
+                    core1 {
+                        cpu = <0x8003>;
+                    };
+                    core2 {
+                        cpu = <0x8002>;
+                    };
+                    core3 {
+                        cpu = <0x8001>;
+                    };
+                };
+            };
+        };
 
-		cpu@0 {
-			phandle = <0x8004>;
-			reg = <0x00>;
-			enable-method = "psci";
-			compatible = "arm,cortex-a72";
-			device_type = "cpu";
-		};
+        cpu@0 {
+            phandle = <0x8004>;
+            reg = <0x00>;
+            enable-method = "psci";
+            compatible = "arm,cortex-a72";
+            device_type = "cpu";
+        };
 
-		cpu@1 {
-			phandle = <0x8003>;
-			reg = <0x01>;
-			enable-method = "psci";
-			compatible = "arm,cortex-a72";
-			device_type = "cpu";
-		};
+        cpu@1 {
+            phandle = <0x8003>;
+            reg = <0x01>;
+            enable-method = "psci";
+            compatible = "arm,cortex-a72";
+            device_type = "cpu";
+        };
 
-		cpu@2 {
-			phandle = <0x8002>;
-			reg = <0x02>;
-			enable-method = "psci";
-			compatible = "arm,cortex-a72";
-			device_type = "cpu";
-		};
+        cpu@2 {
+            phandle = <0x8002>;
+            reg = <0x02>;
+            enable-method = "psci";
+            compatible = "arm,cortex-a72";
+            device_type = "cpu";
+        };
 
-		cpu@3 {
-			phandle = <0x8001>;
-			reg = <0x03>;
-			enable-method = "psci";
-			compatible = "arm,cortex-a72";
-			device_type = "cpu";
-		};
-	};
+        cpu@3 {
+            phandle = <0x8001>;
+            reg = <0x03>;
+            enable-method = "psci";
+            compatible = "arm,cortex-a72";
+            device_type = "cpu";
+        };
+    };
 }
 ```
 
@@ -82,15 +82,15 @@ static unsigned int cpu_count = 1;
 u64 __cpu_logical_map[NR_CPUS];
 
 const struct cpu_operations cpu_psci_ops = {
-	.name		= "psci",
-	.cpu_init	= cpu_psci_cpu_init,
-	.cpu_prepare	= cpu_psci_cpu_prepare,
-	.cpu_boot	= cpu_psci_cpu_boot,
+    .name        = "psci",
+    .cpu_init    = cpu_psci_cpu_init,
+    .cpu_prepare    = cpu_psci_cpu_prepare,
+    .cpu_boot    = cpu_psci_cpu_boot,
 #ifdef CONFIG_HOTPLUG_CPU
-	.cpu_can_disable = cpu_psci_cpu_can_disable,
-	.cpu_disable	= cpu_psci_cpu_disable,
-	.cpu_die	= cpu_psci_cpu_die,
-	.cpu_kill	= cpu_psci_cpu_kill,
+    .cpu_can_disable = cpu_psci_cpu_can_disable,
+    .cpu_disable    = cpu_psci_cpu_disable,
+    .cpu_die    = cpu_psci_cpu_die,
+    .cpu_kill    = cpu_psci_cpu_kill,
 #endif
 };
 
@@ -172,12 +172,12 @@ asmlinkage void start_kernel(void)
     {
 
         init_rt_bandwidth(&def_rt_bandwidth, global_rt_period(), global_rt_runtime());
-	    init_dl_bandwidth(&def_dl_bandwidth, global_rt_period(), global_rt_runtime());
+        init_dl_bandwidth(&def_dl_bandwidth, global_rt_period(), global_rt_runtime());
 
         for_each_possible_cpu(i) {
             struct rq *rq = cpu_rq(i);
             rq->nr_running = 0;
-		    rq->calc_load_active = 0;
+            rq->calc_load_active = 0;
 
             init_cfs_rq(&rq->cfs);
             init_rt_rq(&rq->rt);
@@ -188,7 +188,7 @@ asmlinkage void start_kernel(void)
         {
             int prio = p->static_prio - MAX_RT_PRIO;
             load->weight = scale_load(sched_prio_to_weight[prio]);
-		    load->inv_weight = sched_prio_to_wmult[prio];
+            load->inv_weight = sched_prio_to_wmult[prio];
         }
 
         // 设置init_task为boot-cpu的idle任务
@@ -260,7 +260,7 @@ asmlinkage void start_kernel(void)
             cpu_startup_entry(CPUHP_ONLINE);
             {
                 while (1)
-		            do_idle();
+                    do_idle();
             }
         }
     }
@@ -273,33 +273,33 @@ asmlinkage void start_kernel(void)
 ```dts
 / {
     // 全局的中断控制器
-	interrupt-parent = <0x8005>;
+    interrupt-parent = <0x8005>;
 
     // 中断控制器
     intc@8000000 {
-		phandle = <0x8005>;
-		reg = <0x00 0x8000000 0x00 0x10000 0x00 0x8010000 0x00 0x10000>;
-		compatible = "arm,cortex-a15-gic";
-		ranges;
-		#size-cells = <0x02>;
-		#address-cells = <0x02>;
-		interrupt-controller;
-		#interrupt-cells = <0x03>;
+        phandle = <0x8005>;
+        reg = <0x00 0x8000000 0x00 0x10000 0x00 0x8010000 0x00 0x10000>;
+        compatible = "arm,cortex-a15-gic";
+        ranges;
+        #size-cells = <0x02>;
+        #address-cells = <0x02>;
+        interrupt-controller;
+        #interrupt-cells = <0x03>;
 
-		v2m@8020000 {
-			phandle = <0x8006>;
-			reg = <0x00 0x8020000 0x00 0x1000>;
-			msi-controller;
-			compatible = "arm,gic-v2m-frame";
-		};
-	};
+        v2m@8020000 {
+            phandle = <0x8006>;
+            reg = <0x00 0x8020000 0x00 0x1000>;
+            msi-controller;
+            compatible = "arm,gic-v2m-frame";
+        };
+    };
 
     // 时钟设备
     timer {
-		interrupts = <0x01 0x0d 0xf04 0x01 0x0e 0xf04 0x01 0x0b 0xf04 0x01 0x0a 0xf04>;
-		always-on;
-		compatible = "arm,armv8-timer\0arm,armv7-timer";
-	};
+        interrupts = <0x01 0x0d 0xf04 0x01 0x0e 0xf04 0x01 0x0b 0xf04 0x01 0x0a 0xf04>;
+        always-on;
+        compatible = "arm,armv8-timer\0arm,armv7-timer";
+    };
 }
 ```
 
@@ -329,7 +329,7 @@ asmlinkage void start_kernel(void)
                     }
 
                     // 选择irq
-		            arch_timer_uses_ppi = arch_timer_select_ppi();
+                    arch_timer_uses_ppi = arch_timer_select_ppi();
 
                     // 注册timer中断
                     arch_timer_register();
@@ -393,22 +393,22 @@ void tick_handle_periodic(struct clock_event_device *dev)
 static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 {
     for_each_sched_entity(se) {
-		cfs_rq = cfs_rq_of(se);
-		entity_tick(cfs_rq, se, queued);
+        cfs_rq = cfs_rq_of(se);
+        entity_tick(cfs_rq, se, queued);
         {
             update_curr(cfs_rq);
             {
                 // 真实耗时
                 delta_exec = now - curr->exec_start;
                 // 累积实际耗时
-	            curr->sum_exec_runtime += delta_exec;
+                curr->sum_exec_runtime += delta_exec;
                 // 实际耗时根据weight加权
-	            curr->vruntime += calc_delta_fair(delta_exec, curr);
+                curr->vruntime += calc_delta_fair(delta_exec, curr);
             }
 
             // running状态的任务有多个则考虑是否切换
             if (cfs_rq->nr_running > 1)
-		        check_preempt_tick(cfs_rq, curr);
+                check_preempt_tick(cfs_rq, curr);
                 {
                     // 计算一个周期内加权之后的平均时长
                     ideal_runtime = sched_slice(cfs_rq, curr);
@@ -422,11 +422,11 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 
                     // 查找队列中vruntime最小的task
                     se = __pick_first_entity(cfs_rq);
-	                delta = curr->vruntime - se->vruntime;
+                    delta = curr->vruntime - se->vruntime;
 
                     // vruntime差值超过平均值
                     if (delta > ideal_runtime)
-		                resched_curr(rq_of(cfs_rq));
+                        resched_curr(rq_of(cfs_rq));
                         {
                             set_tsk_need_resched(curr);
                             {
@@ -436,7 +436,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
                         }
                 }
         }
-	}
+    }
 }
 ```
 
@@ -445,10 +445,10 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 ```c
 // 中断、系统调用退回user时
 static void noinstr el0_interrupt(struct pt_regs *regs,
-				  void (*handler)(struct pt_regs *))
+                  void (*handler)(struct pt_regs *))
 {
-	do_interrupt_handler(regs, handler);
-	exit_to_user_mode(regs);
+    do_interrupt_handler(regs, handler);
+    exit_to_user_mode(regs);
     {
         prepare_exit_to_user_mode(regs);
         {
@@ -466,14 +466,14 @@ static void noinstr el0_interrupt(struct pt_regs *regs,
 
 // 中断退回kernel时
 static void noinstr el1_interrupt(struct pt_regs *regs,
-				  void (*handler)(struct pt_regs *))
+                  void (*handler)(struct pt_regs *))
 {
     do_interrupt_handler(regs, handler);
 
     // 支持CONFIG_PREEMPTION且preempt_count==0才允许抢占kernel代码
     if (IS_ENABLED(CONFIG_PREEMPTION) &&
-	    current_thread_info()->preempt_count == 0)
-		arm64_preempt_schedule_irq();
+        current_thread_info()->preempt_count == 0)
+        arm64_preempt_schedule_irq();
         {
             preempt_schedule_irq();
             {
@@ -491,16 +491,16 @@ static void noinstr el1_interrupt(struct pt_regs *regs,
 // 编译时打开CONFIG_PREEMPTION则在调用到preempt_enable()时检查任务切换
 #define preempt_enable() \
 do { \
-	barrier(); \
-	if (unlikely(preempt_count_dec_and_test())) \
-		__preempt_schedule(); \
+    barrier(); \
+    if (unlikely(preempt_count_dec_and_test())) \
+        __preempt_schedule(); \
 } while (0)
 
 asmlinkage __visible void __sched notrace preempt_schedule(void)
 {
     // preempt_count==0且允许中断
     if (likely(!preemptible()))
-		return;
+        return;
     
     preempt_schedule_common();
     {
@@ -558,8 +558,8 @@ asmlinkage __visible void __sched notrace preempt_schedule(void)
 static void __sched notrace __schedule(unsigned int sched_mode)
 {
     cpu = smp_processor_id();
-	rq = cpu_rq(cpu);
-	prev = rq->curr;
+    rq = cpu_rq(cpu);
+    prev = rq->curr;
 
     // 选出下一个待执行的任务
     next = pick_next_task(rq, prev, &rf);
@@ -575,7 +575,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
             p = class->pick_next_task(rq);
             if (p)
                 return p;
-	    }
+        }
     }
 
     // 清除标识
@@ -607,7 +607,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
                                 cpu_do_switch_mm(virt_to_phys(pgd),mm);
                                 {
                                     unsigned long ttbr1 = read_sysreg(ttbr1_el1);
-	                                unsigned long ttbr0 = phys_to_ttbr(pgd_phys);
+                                    unsigned long ttbr0 = phys_to_ttbr(pgd_phys);
 
                                     /* Set ASID in TTBR1 since TCR.A1 is set */
                                     ttbr1 &= ~TTBR_ASID_MASK;
@@ -634,7 +634,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
                 }
             }
 
-	        barrier();
+            barrier();
         }
     } else {
         // 只有一个任务可以执行，太闲了，看看别的cpu是否很忙
@@ -651,29 +651,29 @@ static void __sched notrace __schedule(unsigned int sched_mode)
  * 切换寄存器的汇编代码
  */
 SYM_FUNC_START(cpu_switch_to)
-	mov	x10, #THREAD_CPU_CONTEXT
-	add	x8, x0, x10
-	mov	x9, sp
-	stp	x19, x20, [x8], #16		// store callee-saved registers
-	stp	x21, x22, [x8], #16
-	stp	x23, x24, [x8], #16
-	stp	x25, x26, [x8], #16
-	stp	x27, x28, [x8], #16
-	stp	x29, x9, [x8], #16
-	str	lr, [x8]
-	add	x8, x1, x10
-	ldp	x19, x20, [x8], #16		// restore caller-saved registers
-	ldp	x21, x22, [x8], #16
-	ldp	x23, x24, [x8], #16
-	ldp	x25, x26, [x8], #16
-	ldp	x27, x28, [x8], #16
-	ldp	x29, x9, [x8], #16
-	ldr	lr, [x8]
-	mov	sp, x9
-	msr	sp_el0, x1              // 设置current
-	scs_save x0
-	scs_load x1
-	ret
+    mov    x10, #THREAD_CPU_CONTEXT
+    add    x8, x0, x10
+    mov    x9, sp
+    stp    x19, x20, [x8], #16        // store callee-saved registers
+    stp    x21, x22, [x8], #16
+    stp    x23, x24, [x8], #16
+    stp    x25, x26, [x8], #16
+    stp    x27, x28, [x8], #16
+    stp    x29, x9, [x8], #16
+    str    lr, [x8]
+    add    x8, x1, x10
+    ldp    x19, x20, [x8], #16        // restore caller-saved registers
+    ldp    x21, x22, [x8], #16
+    ldp    x23, x24, [x8], #16
+    ldp    x25, x26, [x8], #16
+    ldp    x27, x28, [x8], #16
+    ldp    x29, x9, [x8], #16
+    ldr    lr, [x8]
+    mov    sp, x9
+    msr    sp_el0, x1              // 设置current
+    scs_save x0
+    scs_load x1
+    ret
 SYM_FUNC_END(cpu_switch_to)
 ```
 
@@ -681,67 +681,67 @@ SYM_FUNC_END(cpu_switch_to)
 
 ```c
 // 所有支持的调度类
-#define SCHED_DATA				    \
-	__begin_sched_classes = .;		\
-	*(__idle_sched_class)			\
-	*(__fair_sched_class)			\
-	*(__rt_sched_class)			    \
-	*(__dl_sched_class)			    \
-	*(__stop_sched_class)			\
-	__end_sched_classes = .;
+#define SCHED_DATA                    \
+    __begin_sched_classes = .;        \
+    *(__idle_sched_class)            \
+    *(__fair_sched_class)            \
+    *(__rt_sched_class)                \
+    *(__dl_sched_class)                \
+    *(__stop_sched_class)            \
+    __end_sched_classes = .;
 
 #define sched_class_highest (__end_sched_classes - 1)
 #define sched_class_lowest  (__begin_sched_classes - 1)
 
 // 按优先级遍历指定范围
 #define for_class_range(class, _from, _to) \
-	for (class = (_from); class != (_to); class--)
+    for (class = (_from); class != (_to); class--)
 
 // 按优先级遍历
 #define for_each_class(class) \
-	for_class_range(class, sched_class_highest, sched_class_lowest)
+    for_class_range(class, sched_class_highest, sched_class_lowest)
 
 // 公平调度器
 DEFINE_SCHED_CLASS(fair) = {
 
-	.enqueue_task		= enqueue_task_fair,
-	.dequeue_task		= dequeue_task_fair,
-	.yield_task			= yield_task_fair,
-	.yield_to_task		= yield_to_task_fair,
+    .enqueue_task        = enqueue_task_fair,
+    .dequeue_task        = dequeue_task_fair,
+    .yield_task            = yield_task_fair,
+    .yield_to_task        = yield_to_task_fair,
 
-	.check_preempt_curr	= check_preempt_wakeup,
+    .check_preempt_curr    = check_preempt_wakeup,
 
-	.pick_next_task		= __pick_next_task_fair,
-	.put_prev_task		= put_prev_task_fair,
-	.set_next_task      = set_next_task_fair,
+    .pick_next_task        = __pick_next_task_fair,
+    .put_prev_task        = put_prev_task_fair,
+    .set_next_task      = set_next_task_fair,
 
-	.balance			= balance_fair,
-	.pick_task			= pick_task_fair,
-	.select_task_rq		= select_task_rq_fair,
-	.migrate_task_rq	= migrate_task_rq_fair,
+    .balance            = balance_fair,
+    .pick_task            = pick_task_fair,
+    .select_task_rq        = select_task_rq_fair,
+    .migrate_task_rq    = migrate_task_rq_fair,
 
-	.rq_online			= rq_online_fair,
-	.rq_offline			= rq_offline_fair,
+    .rq_online            = rq_online_fair,
+    .rq_offline            = rq_offline_fair,
 
-	.task_dead			= task_dead_fair,
-	.set_cpus_allowed	= set_cpus_allowed_common,
+    .task_dead            = task_dead_fair,
+    .set_cpus_allowed    = set_cpus_allowed_common,
 
-	.task_tick			= task_tick_fair,
-	.task_fork			= task_fork_fair,
+    .task_tick            = task_tick_fair,
+    .task_fork            = task_fork_fair,
 
-	.prio_changed		= prio_changed_fair,
-	.switched_from		= switched_from_fair,
-	.switched_to		= switched_to_fair,
+    .prio_changed        = prio_changed_fair,
+    .switched_from        = switched_from_fair,
+    .switched_to        = switched_to_fair,
 
-	.get_rr_interval	= get_rr_interval_fair,
+    .get_rr_interval    = get_rr_interval_fair,
 
-	.update_curr		= update_curr_fair,
+    .update_curr        = update_curr_fair,
 };
 
 // 选择下一个任务
 static struct task_struct *__pick_next_task_fair(struct rq *rq)
 {
-	return pick_next_task_fair(rq, NULL, NULL);
+    return pick_next_task_fair(rq, NULL, NULL);
     {
         // 结构是red-black-tree, 按vruntime排序
         se = pick_next_entity(cfs_rq, NULL);
@@ -752,7 +752,7 @@ static struct task_struct *__pick_next_task_fair(struct rq *rq)
             }
         }
 
-		set_next_entity(cfs_rq, se);
+        set_next_entity(cfs_rq, se);
         {
             cfs_rq->curr = se;
             se->prev_sum_exec_runtime = se->sum_exec_runtime;
