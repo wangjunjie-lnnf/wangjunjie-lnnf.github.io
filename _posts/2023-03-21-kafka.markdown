@@ -530,7 +530,17 @@ def loadLogs(defaultConfig: LogConfig, topicConfigOverrides: Map[String, LogConf
                             }
                         }
 
-                        // TODO
+                        val (newRecoveryPoint: Long, nextOffset: Long) = recoverLog()
+                        {
+                            
+                        }
+
+                        leaderEpochCache.foreach(_.truncateFromEnd(nextOffset))
+                        val newLogStartOffset = math.max(logStartOffsetCheckpoint, segments.firstSegment.get.baseOffset)
+                        leaderEpochCache.foreach(_.truncateFromStart(logStartOffsetCheckpoint))
+
+                        // 加载{offset}.snapshot文件
+                        producerStateManager.removeStraySnapshots(segments.baseOffsets.toSeq)
                     }
 
                     val localLog = new LocalLog(dir, config, segments, 
@@ -605,7 +615,756 @@ if (cleanerConfig.enableCleaner) {
 
 ```
 
-
 ## 生产
 
+### client
+
+```scala
+object ConsoleProducer {
+
+    def main(args: Array[String]): Unit = {
+        val config = new ProducerConfig(args)
+        val props = producerProps(config)
+        {
+            props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, config.bootstrapServer)
+            // producer标识
+            props.put(ProducerConfig.CLIENT_ID_CONFIG, "console-producer")
+            props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer")
+            props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer")
+        
+            // 异步发送等待最大时长
+            props.put(ProducerConfig.LINGER_MS_CONFIG, config.sendTimeoutOpt)
+            // ack: -1、0、1，默认-1
+            props.put(ProducerConfig.ACKS_CONFIG, config.requestRequiredAcksOpt)
+            // ack timeout
+            props.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, config.requestTimeoutMsOpt)
+            // 重试次数
+            props.put(ProducerConfig.RETRIES_CONFIG, config.messageSendMaxRetriesOpt)
+            // 重试间隔
+            props.put(ProducerConfig.RETRY_BACKOFF_MS_CONFIG, config.retryBackoffMsOpt)
+            // tcp send buf
+            props.put(ProducerConfig.SEND_BUFFER_CONFIG, config.socketBufferSizeOpt)
+            // 发送给server之前暂存message的内存
+            props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, config.maxMemoryBytesOpt)
+            // batch消息条数
+            props.put(ProducerConfig.BATCH_SIZE_CONFIG, config.batchSizeOpt)
+            // batch消息大小/每个分区
+            props.put(ProducerConfig.BATCH_SIZE_CONFIG, config.maxPartitionMemoryBytesOpt)
+            // metadata刷新毫秒数
+            props.put(ProducerConfig.METADATA_MAX_AGE_CONFIG, config.metadataExpiryMsOpt)
+            // 发送请求最大阻塞时长
+            props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, config.maxBlockMsOpt)
+        }
+
+        val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
+
+        send(producer, record, config.sync)
+        {
+            if (sync)
+                producer.send(record).get()
+                {
+                    producer.send(record, null)
+                }
+            else
+                producer.send(record, new ErrorLoggingCallback(...))
+        }
+    }
+}
+```
+
+```java
+public class KafkaProducer<K, V> implements Producer<K, V> {
+
+    private ProducerConfig producerConfig;
+    private Partitioner partitioner;
+
+    KafkaProducer(ProducerConfig config, ...) {
+        String transactionalId = config.getString(ProducerConfig.TRANSACTIONAL_ID_CONFIG);
+
+        // 消息分区
+        this.partitioner = config.getConfiguredInstance(
+                    ProducerConfig.PARTITIONER_CLASS_CONFIG,
+                    Partitioner.class,
+                    Collections.singletonMap(ProducerConfig.CLIENT_ID_CONFIG, clientId));
+        {
+            Object o = Utils.newInstance(config.get(ProducerConfig.PARTITIONER_CLASS_CONFIG), Partitioner.class);
+            if (o instanceof Configurable)
+                ((Configurable) o).configure(configPairs);
+        }
+
+        // 消息拦截器： onSend(...) & onAcknowledgement(...)
+        List<ProducerInterceptor<K, V>> interceptorList = (List) config.getConfiguredInstances(
+                    ProducerConfig.INTERCEPTOR_CLASSES_CONFIG,
+                    ProducerInterceptor.class,
+                    Collections.singletonMap(ProducerConfig.CLIENT_ID_CONFIG, clientId));
+        this.interceptors = new ProducerInterceptors<>(interceptorList);
+
+        // 在内存中累加消息
+        this.accumulator = new RecordAccumulator(
+                    batchSize,
+                    lingerMs(config),
+                    retryBackoffMs,
+                    deliveryTimeoutMs,
+                    partitionerConfig,
+                    new BufferPool(this.totalMemorySize, batchSize, ...));
+        
+        List<InetSocketAddress> addresses = config.getList(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG);
+
+        // 元数据缓存
+        this.metadata = new ProducerMetadata(retryBackoffMs,
+                        config.getLong(ProducerConfig.METADATA_MAX_AGE_CONFIG),
+                        config.getLong(ProducerConfig.METADATA_MAX_IDLE_CONFIG), ...);
+        this.metadata.bootstrap(addresses);
+
+        this.sender = newSender(logContext, kafkaClient, this.metadata);
+        {
+            int maxInflightRequests = producerConfig.getInt(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION);
+            int requestTimeoutMs = producerConfig.getInt(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG);
+
+            KafkaClient client = new NetworkClient(new Selector(...), 
+                metadata,
+                clientId,
+                maxInflightRequests,
+                producerConfig.getLong(ProducerConfig.RECONNECT_BACKOFF_MS_CONFIG),
+                producerConfig.getLong(ProducerConfig.RECONNECT_BACKOFF_MAX_MS_CONFIG),
+                producerConfig.getInt(ProducerConfig.SEND_BUFFER_CONFIG),
+                producerConfig.getInt(ProducerConfig.RECEIVE_BUFFER_CONFIG),
+                requestTimeoutMs,
+                producerConfig.getLong(ProducerConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG),
+                producerConfig.getLong(ProducerConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG), ...);
+        }
+
+        this.ioThread = new KafkaThread(ioThreadName, this.sender, true);
+        this.ioThread.start();
+    }
+
+    // 发送消息
+    public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback) {
+        // 发送之前先经过拦截器处理
+        ProducerRecord<K, V> interceptedRecord = this.interceptors.onSend(record);
+        return doSend(interceptedRecord, callback);
+        {
+            byte[] serializedKey = keySerializer.serialize(record.topic(), record.headers(), record.key());
+            byte[] serializedValue = valueSerializer.serialize(record.topic(), record.headers(), record.value());
+            
+            // 计算分区
+            int partition = partition(record, serializedKey, serializedValue, cluster);
+            {
+                // 消息指定分区
+                if (record.partition() != null)
+                    return record.partition();
+
+                // 自定义分区
+                if (partitioner != null) {
+                    return partitioner.partition(record.topic(), record.key(), serializedKey, record.value(), serializedValue, cluster);
+                }
+
+                // 默认按hash(key)分区
+                if (serializedKey != null) {
+                    return BuiltInPartitioner.partitionForKey(serializedKey, cluster.partitionsForTopic(record.topic()).size());
+                }
+            }
+
+            int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(compressionType, serializedKey, serializedValue, headers);
+            if (size > maxRequestSize || size > totalMemorySize)
+                throw new RecordTooLargeException(...);
+            
+            long timestamp = record.timestamp() == null ? nowMs : record.timestamp();
+
+            RecordAccumulator.RecordAppendResult result = accumulator.append(record.topic(), 
+                    partition, timestamp, serializedKey, serializedValue, headers, ...);
+            {
+                TopicInfo topicInfo = topicInfoMap.computeIfAbsent(topic, k -> new TopicInfo(logContext, k, batchSize));
+                Deque<ProducerBatch> dq = topicInfo.batches.computeIfAbsent(effectivePartition, k -> new ArrayDeque<>());
+                RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callbacks, dq, nowMs);
+                {
+                    ProducerBatch last = deque.peekLast();
+                    return last.tryAppend(timestamp, key, value, headers, callback, nowMs);
+                    {
+                        // 当前批次内存不足
+                        if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
+                            return null;
+                        }
+
+                        this.recordsBuilder.append(timestamp, key, value, headers);
+                        {
+                            // offset每次加1
+                            appendWithOffset(offset, false, timestamp, key, value, headers);
+                            {
+                                appendDefaultRecord(offset, timestamp, key, value, headers);
+                                {
+                                    // 与批次第一条记录的差值: offset表示记录条数
+                                    int offsetDelta = (int) (offset - baseOffset);
+                                    long timestampDelta = timestamp - baseTimestamp;
+
+                                    // 记录格式
+                                    int sizeInBytes = DefaultRecord.writeTo(appendStream, offsetDelta, timestampDelta, key, value, headers);
+                                    {
+                                        int sizeInBytes = sizeOfBodyInBytes(offsetDelta, timestampDelta, key, value, headers);
+                                        ByteUtils.writeVarint(sizeInBytes, out);
+
+                                        byte attributes = 0; // there are no used record attributes at the moment
+                                        out.write(attributes);
+
+                                        ByteUtils.writeVarlong(timestampDelta, out);
+                                        ByteUtils.writeVarint(offsetDelta, out);
+
+                                        if (key == null) {
+                                            ByteUtils.writeVarint(-1, out);
+                                        } else {
+                                            int keySize = key.remaining();
+                                            ByteUtils.writeVarint(keySize, out);
+                                            Utils.writeTo(out, key, keySize);
+                                        }
+
+                                        if (value == null) {
+                                            ByteUtils.writeVarint(-1, out);
+                                        } else {
+                                            int valueSize = value.remaining();
+                                            ByteUtils.writeVarint(valueSize, out);
+                                            Utils.writeTo(out, value, valueSize);
+                                        }
+
+                                        if (headers == null)
+                                            throw new IllegalArgumentException("Headers cannot be null");
+
+                                        ByteUtils.writeVarint(headers.length, out);
+
+                                        for (Header header : headers) {
+                                            String headerKey = header.key();
+                                            if (headerKey == null)
+                                                throw new IllegalArgumentException("Invalid null header key found in headers");
+
+                                            byte[] utf8Bytes = Utils.utf8(headerKey);
+                                            ByteUtils.writeVarint(utf8Bytes.length, out);
+                                            out.write(utf8Bytes);
+
+                                            byte[] headerValue = header.value();
+                                            if (headerValue == null) {
+                                                ByteUtils.writeVarint(-1, out);
+                                            } else {
+                                                ByteUtils.writeVarint(headerValue.length, out);
+                                                out.write(headerValue);
+                                            }
+                                        }
+
+                                        return ByteUtils.sizeOfVarint(sizeInBytes) + sizeInBytes;
+                                    }
+                                    
+                                    recordWritten(offset, timestamp, sizeInBytes);
+                                    {
+                                        numRecords += 1;
+                                        uncompressedRecordsSizeInBytes += size;
+                                        lastOffset = offset;
+                                    }
+                                }
+                            }
+                        }
+
+                        return new FutureRecordMetadata(this.produceFuture, this.recordCount, timestamp, ...);
+                    }   
+                }
+
+                if (appendResult != null) {
+                    return appendResult;
+                }
+
+                // 当前批次已满，开启新的批次
+                buffer = free.allocate(size, maxTimeToBlock);
+                return appendNewBatch(topic, effectivePartition, dq, timestamp, key, value, headers, callbacks, buffer, nowMs);
+                {
+                    MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, apiVersions.maxUsableProduceMagic());
+                    ProducerBatch batch = new ProducerBatch(new TopicPartition(topic, partition), recordsBuilder, nowMs);
+                    dq.addLast(batch);
+                }
+            }
+
+            // 之前的批次已满，创建新的批次，再次尝试
+            if (result.abortForNewBatch) {
+                result = accumulator.append(record.topic(), partition, timestamp, serializedKey, serializedValue, headers, ...);
+            }
+
+            // 开始发送
+            if (result.batchIsFull || result.newBatchCreated) {
+                this.sender.wakeup();
+            }
+
+            return result.future;
+        }
+    }
+
+}
+
+// 发送线程
+public class Sender implements Runnable {
+
+    @Override
+    public void run() {
+        while (running) {
+            runOnce();
+            {
+                long currentTimeMs = time.milliseconds();
+                long pollTimeout = sendProducerData(currentTimeMs);
+                {
+                    // 更新元数据
+                    Cluster cluster = metadata.fetch();
+                    // get the list of partitions with data ready to send
+                    RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
+                    if (!result.unknownLeaderTopics.isEmpty()) {
+                        for (String topic : result.unknownLeaderTopics)
+                            this.metadata.add(topic, now);
+                        
+                        this.metadata.requestUpdate();
+                    }
+
+                    Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
+                    
+                    // 加入inflight列表
+                    addToInflightBatches(batches);
+                    {
+                        for (List<ProducerBatch> batchList : batches.values()) {
+                            for (ProducerBatch batch : batchList) {
+                                List<ProducerBatch> inflightBatchList = inFlightBatches.get(batch.topicPartition);
+                                inflightBatchList.add(batch);
+                            }
+                        }
+                    }
+
+                    // 保证消息顺序: 每个partition只能有一个inflight的消息
+                    if (guaranteeMessageOrder) {
+                        for (List<ProducerBatch> batchList : batches.values()) {
+                            for (ProducerBatch batch : batchList)
+                                this.accumulator.mutePartition(batch.topicPartition);
+                        }
+                    }
+
+                    // 检查inflight的消息是否过期: ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG
+                    List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
+                    // 检查未发送的消息是否过期: ProducerConfig.LINGER_MS_CONFIG
+                    List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
+                    expiredBatches.addAll(expiredInflightBatches);
+
+                    // 只是打印TimeoutException
+                    for (ProducerBatch expiredBatch : expiredBatches) {
+                        if (expiredBatch.completeExceptionally(topLevelException, recordExceptions)) {
+                            maybeRemoveAndDeallocateBatch(expiredBatch);
+                        }
+                    }
+
+                    // 发送消息
+                    sendProduceRequests(batches, now);
+                    {
+                        sendProduceRequest(now, entry.getKey(), acks, requestTimeoutMs, entry.getValue());
+                        {
+                            Map<TopicPartition, ProducerBatch> recordsByPartition = new HashMap<>(batches.size());
+                            for (ProducerBatch batch : batches) {
+                                TopicPartition tp = batch.topicPartition;
+                                recordsByPartition.put(tp, batch);
+                            }
+
+                            ProduceRequest.Builder requestBuilder = ProduceRequest.forMagic(minUsedMagic,
+                                new ProduceRequestData()
+                                        .setAcks(acks)
+                                        .setTimeoutMs(timeout)
+                                        .setTransactionalId(transactionalId)
+                                        .setTopicData(tpd));
+
+                            ClientRequest clientRequest = client.newClientRequest(nodeId, requestBuilder, now, acks != 0, requestTimeoutMs, callback);
+                            client.send(clientRequest, now);
+                            {
+                                doSend(request, false, now);
+                                {
+                                    // 检查inflight请求个数
+                                    if (!canSendRequest(nodeId, now))
+                                        throw new IllegalStateException(...);
+                                    
+                                    String destination = clientRequest.destination();
+                                    RequestHeader header = clientRequest.makeHeader(request.version());
+                                    Send send = request.toSend(header);
+                                    InFlightRequest inFlightRequest = new InFlightRequest(
+                                            clientRequest,
+                                            header,
+                                            isInternalRequest,
+                                            request,
+                                            send,
+                                            now);
+                                    this.inFlightRequests.add(inFlightRequest);
+                                    selector.send(new NetworkSend(clientRequest.destination(), send));
+                                }
+                            }
+                        }
+                    }
+
+                    // 下一个批次过期时间
+                    return pollTimeout = Math.min(pollTimeout, this.accumulator.nextExpiryTimeMs() - now);
+                }
+
+                client.poll(pollTimeout, currentTimeMs);
+                {
+                    // 接收响应信息
+                    this.selector.poll(Utils.min(timeout, metadataTimeout, defaultRequestTimeoutMs));
+
+                    long updatedNow = this.time.milliseconds();
+                    List<ClientResponse> responses = new ArrayList<>();
+
+                    // 处理ack，inflight转完成
+                    handleCompletedSends(responses, updatedNow);
+                    handleCompletedReceives(responses, updatedNow);
+                    handleDisconnections(responses, updatedNow);
+                    handleConnections();
+                    handleInitiateApiVersionRequests(updatedNow);
+                    handleTimedOutConnections(responses, updatedNow);
+                    handleTimedOutRequests(responses, updatedNow);
+                    completeResponses(responses);
+                }
+            }
+        }
+
+        while (this.accumulator.hasUndrained() || this.client.inFlightRequestCount() > 0) {
+            runOnce();
+        }
+    }
+}
+```
+
+### server
+
+```scala
+
+class KafkaApis(...) {
+
+    override def handle(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
+
+        handleProduceRequest(request, requestLocal)
+        {
+            val produceRequest = request.body[ProduceRequest]
+
+            replicaManager.appendRecords(
+                timeout = produceRequest.timeout.toLong,
+                requiredAcks = produceRequest.acks,
+                internalTopicsAllowed = internalTopicsAllowed,
+                origin = AppendOrigin.Client,
+                entriesPerPartition = authorizedRequestInfo,
+                requestLocal = requestLocal,
+                responseCallback = sendResponseCallback,
+                recordConversionStatsCallback = processingStatsCallback)
+            {
+                val localProduceResults = appendToLocalLog(..., requiredAcks, requestLocal)
+                {
+                    entriesPerPartition.map { case (topicPartition, records) =>
+                        val partition = getPartitionOrException(topicPartition)
+                        partition.appendRecordsToLeader(records, origin, requiredAcks, requestLocal)
+                        {
+                            // 写入leader分区
+                            leaderLog.appendAsLeader(records, leaderEpoch = this.leaderEpoch, ...)
+                            {
+                                // 产生新的segment
+                                maybeRoll(validRecords.sizeInBytes, appendInfo)
+
+                                // 幂等producer保存最近5个批次的元数据用于判断重复
+                                val maybeDuplicate = analyzeAndValidateProducerState(logOffsetMetadata, validRecords, origin)
+                                {
+                                    // 幂等生产者必须配置producerId
+                                    if (batch.hasProducerId) {
+                                        // 重复条件: (producerId, producerEpoch, firstSeq, lastSeq)
+                                        maybeLastEntry.flatMap(_.findDuplicateBatch(batch)).foreach { duplicate =>
+                                            return (updatedProducers, completedTxns.toList, Some(duplicate))
+                                        }
+                                    }
+                                }
+
+                                localLog.append(appendInfo.lastOffset, appendInfo.maxTimestamp, appendInfo.offsetOfMaxTimestamp, validRecords)
+                                {
+                                    segments.activeSegment.append(...);
+                                    {
+                                        val physicalPosition = log.sizeInBytes()
+
+                                        // append the messages
+                                        log.append(records)
+
+                                        // 每生产indexIntervalBytes这么多消息就插入一条索引记录
+                                        // append an entry to the index (if needed)
+                                        if (bytesSinceLastIndexEntry > indexIntervalBytes) {
+
+                                            // 最大的offset所在的batch在文件中的位置
+                                            offsetIndex.append(largestOffset, physicalPosition)
+                                            {
+                                                // 相对于segment的第一个log的偏移量
+                                                val relativeOffset = largestOffset - baseOffset
+                                                mmap.putInt(relativeOffset)
+                                                mmap.putInt(position)
+                                            }
+
+                                            // 时间戳递增，记录时间戳对应的记录的offset
+                                            timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestampSoFar)
+                                            {
+                                                if (maxTimestampSoFar > lastEntry.timestamp) {
+                                                    mmap.putLong(maxTimestampSoFar)
+                                                    mmap.putInt(relativeOffset(offsetOfMaxTimestampSoFar))
+                                                }
+                                            }
+
+                                            bytesSinceLastIndexEntry = 0
+                                        }
+                                        bytesSinceLastIndexEntry += records.sizeInBytes
+                                    }
+                                }
+
+                                updateHighWatermarkWithLogEndOffset()
+                            }
+
+                            // HW=high-watermark，表示所有replica都取走的最大消息
+                            // 如果ISR=1，直接更新HW
+                            maybeIncrementLeaderHW(leaderLog)
+                        }
+                    }
+                }
+                
+                // HW变化时检查ack=all的生产请求是否满足
+                actionQueue.add {
+                  () =>
+                    localProduceResults.foreach {
+                        case (topicPartition, result) =>
+                        val requestKey = TopicPartitionOperationKey(topicPartition)
+                        // #replica#3.3 HighWatermark发生变化，判断延迟操作是否满足
+                        result.info.leaderHwChange match {
+                            case LeaderHwChange.Increased =>
+                            // some delayed operations may be unblocked after HW changed
+                            delayedProducePurgatory.checkAndComplete(requestKey)
+                            delayedFetchPurgatory.checkAndComplete(requestKey)
+                            delayedDeleteRecordsPurgatory.checkAndComplete(requestKey)
+                        }
+                    }
+                }
+
+                // ack=-1延迟响应
+                if (delayedProduceRequestRequired(requiredAcks, entriesPerPartition, localProduceResults)) {
+                    // create delayed produce operation
+                    val produceMetadata = ProduceMetadata(requiredAcks, produceStatus)
+                    // 延迟生产
+                    val delayedProduce = new DelayedProduce(timeout, produceMetadata, this, responseCallback, delayedProduceLock)
+                    // key = {topic}-{partition}
+                    val producerRequestKeys = entriesPerPartition.keys.map(TopicPartitionOperationKey(_)).toSeq
+                    delayedProducePurgatory.tryCompleteElseWatch(delayedProduce, producerRequestKeys)
+
+                } else {
+                    // we can respond immediately
+                    val produceResponseStatus = produceStatus.map { case (k, status) => k -> status.responseStatus }
+                    responseCallback(produceResponseStatus)
+                }
+            }
+        }
+
+    }
+
+}
+
+```
+
 ## 消费
+
+### client
+
+```scala
+
+object ConsoleConsumer {
+
+    def main(args: Array[String]): Unit = {
+        val conf = new ConsumerConfig(args)
+
+        run(conf)
+        {
+            val timeoutMs = conf.timeoutMs.toLong
+            val consumer = new KafkaConsumer(consumerProps(conf), new ByteArrayDeserializer, new ByteArrayDeserializer)
+            {
+                List<ConsumerInterceptor<K, V>> interceptorList = (List) config.getConfiguredInstances(
+                    ConsumerConfig.INTERCEPTOR_CLASSES_CONFIG,
+                    ConsumerInterceptor.class,
+                    Collections.singletonMap(ConsumerConfig.CLIENT_ID_CONFIG, clientId));
+                this.interceptors = new ConsumerInterceptors<>(interceptorList);
+
+                this.keyDeserializer = config.getConfiguredInstance(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
+                this.keyDeserializer.configure(config.originals(Collections.singletonMap(ConsumerConfig.CLIENT_ID_CONFIG, clientId)), true);
+
+                this.valueDeserializer = config.getConfiguredInstance(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, Deserializer.class);
+                this.valueDeserializer.configure(config.originals(Collections.singletonMap(ConsumerConfig.CLIENT_ID_CONFIG, clientId)), false);
+
+                OffsetResetStrategy offsetResetStrategy = OffsetResetStrategy.valueOf(config.getString(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG));
+                this.subscriptions = new SubscriptionState(..., offsetResetStrategy);
+
+                List<InetSocketAddress> addresses = ClientUtils.parseAndValidateAddresses(...);
+
+                ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config, time, logContext);
+                NetworkClient netClient = new NetworkClient(new Selector(...), ...);
+                this.client = new ConsumerNetworkClient(netClient, ...);
+
+                this.coordinator = new ConsumerCoordinator(groupRebalanceConfig, this.client, ...);
+                this.fetcher = new Fetcher<>(this.client, ...);
+            }
+
+            val consumerWrapper = new ConsumerWrapper(Option(conf.topicArg), None, None, Option(conf.includedTopicsArg), consumer, timeoutMs)
+            process(conf.maxMessages, ..., consumerWrapper, ...)
+            {
+                consumerWrapper.receive();
+                {
+                    while (!recordIter.hasNext) {
+                        // 取下一批
+                        recordIter = consumer.poll(Duration.ofMillis(timeoutMs)).iterator
+                        {
+                            Fetch<K, V> fetch = pollForFetches(timer);
+                            {
+                                fetcher.sendFetches();
+                                {
+                                    final FetchRequest.Builder request = FetchRequest.Builder
+                                        .forConsumer(maxVersion, this.maxWaitMs, this.minBytes, data.toSend())
+                                        .isolationLevel(isolationLevel)
+                                        .setMaxBytes(this.maxBytes)
+                                        .metadata(data.metadata())
+                                        .removed(data.toForget())
+                                        .replaced(data.toReplace())
+                                        .rackId(clientRackId);
+
+                                    RequestFuture<ClientResponse> future = client.send(fetchTarget, request);
+                                    future.addListener(...);
+                                }
+
+                                return fetcher.collectFetch();
+                            }
+
+                            return this.interceptors.onConsume(new ConsumerRecords<>(fetch.records()));
+                        }
+                    }
+
+                    recordIter.next
+                }
+            }
+        }
+    }
+
+}
+
+```
+
+### server
+
+```scala
+
+class KafkaApis(...) {
+
+    override def handle(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
+        handleFetchRequest(request)
+        {
+            val versionId = request.header.apiVersion
+            val clientId = request.header.clientId
+            val fetchRequest = request.body[FetchRequest]
+
+            val params = FetchParams(
+                requestVersion = versionId,
+                replicaId = fetchRequest.replicaId,
+                maxWaitMs = fetchRequest.maxWait,
+                minBytes = fetchMinBytes,
+                maxBytes = fetchMaxBytes,
+                // 隔离等级：FetchLogEnd/FetchTxnCommitted/FetchHighWatermark
+                isolation = FetchIsolation(fetchRequest),
+                clientMetadata = clientMetadata
+            )
+
+            // call the replica manager to fetch messages from the local replica
+            replicaManager.fetchMessages(
+                params = params,
+                fetchInfos = interesting,
+                quota = replicationQuota(fetchRequest),
+                responseCallback = processResponseCallback)
+            {
+                val logReadResults = readFromLocalLog(params, fetchInfos, quota, readFromPurgatory = false)
+                {
+                    readPartitionInfo.foreach { case (tp, fetchInfo) =>
+                        read(tp, fetchInfo, limitBytes, minOneMessage)
+                        {
+                            val offset = fetchInfo.fetchOffset
+                            val partitionFetchSize = fetchInfo.maxBytes
+                            val followerLogStartOffset = fetchInfo.logStartOffset
+
+                            val preferredReadReplica = params.clientMetadata.flatMap(
+                                metadata => findPreferredReadReplica(partition, metadata, params.replicaId, fetchInfo.fetchOffset, fetchTimeMs))
+                                {
+                                    // 副本选择策略
+                                    replicaSelector.select(partition.topicPartition, clientMetadata, partitionInfo)
+                                }
+
+                            if (preferredReadReplica.isDefined) {
+                                partition.fetchOffsetSnapshot(fetchInfo.currentLeaderEpoch, fetchOnlyFromLeader = false)
+                            } else {
+                                partition.fetchRecords(...)
+                                {
+                                    if (fetchParams.isFromFollower) {
+                                        readFromLocalLog(localLog)
+                                    } else {
+                                        readFromLocalLog(localLog)
+                                        {
+                                            localLog.read(fetchOffset, maxBytes, ...)
+                                            {
+                                                val maxOffsetMetadata = isolation match {
+                                                    case FetchLogEnd => localLog.logEndOffsetMetadata
+                                                    case FetchHighWatermark => fetchHighWatermarkMetadata
+                                                    case FetchTxnCommitted => fetchLastStableOffsetMetadata
+                                                }
+
+                                                localLog.read(startOffset, maxLength, minOneMessage, maxOffsetMetadata, ...)
+                                                {
+                                                    // 先定位到segment
+                                                    var segmentOpt = segments.floorSegment(startOffset)
+                                                    val segment = segmentOpt.get
+                                                    val baseOffset = segment.baseOffset
+
+                                                    segment.read(startOffset, maxLength, maxPosition, minOneMessage)
+                                                    {
+                                                        // 查找索引中的文件位置
+                                                        val startOffsetAndSize = translateOffset(startOffset)
+                                                        val startPosition = startOffsetAndSize.position
+                                                        val offsetMetadata = LogOffsetMetadata(startOffset, this.baseOffset, startPosition)
+                                                        FetchDataInfo(offsetMetadata, log.slice(startPosition, fetchSize), ...)
+                                                        {
+                                                            // FileRecords: 只记录fd和位置信息，实际发送数据时zero-copy
+                                                            return new FileRecords(file, channel, startPosition, startPosition + availableBytes, true);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                        }
+                    }
+                }
+
+                // respond immediately if 1) fetch request does not want to wait
+                //                        2) fetch request does not require any data
+                //                        3) has enough data to respond
+                //                        4) some error happens while reading data
+                //                        5) we found a diverging epoch
+                //                        6) has a preferred read replica
+                if (params.maxWaitMs <= 0 || fetchInfos.isEmpty || bytesReadable >= params.minBytes 
+                    || errorReadingData || hasDivergingEpoch || hasPreferredReadReplica) {
+                    responseCallback(fetchPartitionData)
+                } else {
+                    // 等到累积一定量的数据或超时再响应
+                    val delayedFetch = new DelayedFetch(
+                        params = params,
+                        fetchPartitionStatus = fetchPartitionStatus,
+                        replicaManager = this,
+                        quota = quota,
+                        responseCallback = responseCallback
+                    )
+
+                    delayedFetchPurgatory.tryCompleteElseWatch(delayedFetch, delayedFetchKeys)
+                }
+            }
+        }
+    }
+
+}
+
+```
