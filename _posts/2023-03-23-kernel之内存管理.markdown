@@ -8,6 +8,22 @@ tags: kernel memory
 
 # 初始化
 
+buddy系统建立之前从memblock分配内存，buddy系统建立完成后所有的内存分配都是基于buddy系统
+
+![buddy](/assets/images/2023-03-24/buddy.png)
+
+物理内存最顶层的结构是numa，numa由多个node构成
+
+![numa](/assets/images/2023-03-24/numa.png)
+
+每个node都有自己的内存，切分成多个zone
+
+![zone](/assets/images/2023-03-24/zone.png)
+
+每个zone内的内存组织成freelist
+
+![freelist](/assets/images/2023-03-24/freelist.png)
+
 ```dts
 / {
     #size-cells = <0x02>;
@@ -302,21 +318,310 @@ asmlinkage void start_kernel(void)
             }
         }
     }
-
-    
-
-
 }
 ```
 
+# 内存分配
 
-# buddy
+## buddy
 
+### 内存分配
 
-# slab
+```c
 
+unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order)
+{
+	struct page *page = alloc_pages(gfp_mask & ~__GFP_HIGHMEM, order);
+	return (unsigned long) page_address(page);
+}
 
-# vmalloc
+struct page *alloc_pages(gfp_t gfp, unsigned order)
+{
+    page = __alloc_pages(gfp, order, ...);
+    {
+        // 设置alloc_context: migratetype、nodemask、zonelist
+        prepare_alloc_pages(gfp, order, preferred_nid, nodemask, &ac, &alloc_gfp, &alloc_flags)
 
+        // 快速路径: 直接从freelist分配
+        page = get_page_from_freelist(alloc_gfp, order, alloc_flags, &ac);
+        {
+            page = rmqueue(ac->preferred_zoneref->zone, zone, order, gfp_mask, ...);
+            {
+            retry:
+                page = __rmqueue(zone, order, migratetype, alloc_flags);
+                {
+                    page = __rmqueue_smallest(zone, order, migratetype);
+                    {
+                        // 从当前order开始查找
+                        for (current_order = order; current_order < MAX_ORDER; ++current_order) {
+                            area = &(zone->free_area[current_order]);
+                            page = get_page_from_free_area(area, migratetype);
+                            if (!page)
+                                continue;
+                            del_page_from_free_list(page, zone, current_order);
 
-# malloc
+                            // 高order拆分
+                            expand(zone, page, order, current_order, migratetype);
+
+                            set_pcppage_migratetype(page, migratetype);
+                            return page;
+                        }
+                    }
+
+	                if (unlikely(!page)) {
+                        // 从fallback列表分配
+                        if(__rmqueue_fallback(zone, order, migratetype, alloc_flags))
+                            goto retry;
+                    }
+                }
+            }
+        }
+        if (likely(page))
+            goto out;
+
+        // freelist内存不足或碎片化
+        page = __alloc_pages_slowpath(alloc_gfp, order, &ac);
+        {
+            // 唤醒内核线程交换不活跃的page到交换空间
+            wake_all_kswapds(order, gfp_mask, ac);
+
+            // try again
+            page = get_page_from_freelist(gfp_mask, order, alloc_flags, ac);
+	        if (page)
+                return page;
+
+            // 尝试回收内存: page_cache、slab
+            page = __alloc_pages_direct_reclaim(gfp_mask, order, alloc_flags, ...);
+            if (page)
+                return page;
+            
+            // 尝试碎片整理
+            page = __alloc_pages_direct_compact(gfp_mask, order, alloc_flags, ...);
+            if (page)
+                return page;
+
+            // oom killer
+            page = __alloc_pages_may_oom(gfp_mask, order, ac, &did_some_progress);
+            {
+                out_of_memory(&oc);
+                {
+                    select_bad_process(oc);
+                    {
+                        // 遍历每个task，根据规则计算得分
+                        struct task_struct *p;
+                        for_each_process(p)
+                            res = oom_evaluate_task(p, oc);
+                            {
+                                points = oom_badness(task, oc->totalpages);
+                                {
+                                    // 占用内存和交换空间越多分越高
+                                    points = get_mm_rss(p->mm) + get_mm_counter(p->mm, MM_SWAPENTS) +
+			                                 mm_pgtables_bytes(p->mm) / PAGE_SIZE;
+                                    
+                                    adj = (long)p->signal->oom_score_adj;
+                                    adj *= totalpages / 1000;
+	                                points += adj;
+                                }
+
+                                // 选择得分最高的
+                                if (points < oc->chosen_points)
+                                    goto next;
+                                oc->chosen = task;
+	                            oc->chosen_points = points;
+                            }
+
+                            if (res)
+                                break;
+                    }
+
+                    if (oc->chosen && oc->chosen != (void *)-1UL)
+		                oom_kill_process(oc, ...);
+                }
+            }
+        }
+    }
+}
+
+```
+
+### 内存释放
+
+```c
+void free_pages(unsigned long addr, unsigned int order)
+{
+    __free_pages(virt_to_page((void *)addr), order);
+    {
+        if (put_page_testzero(page))
+            // 引用计数归0
+            free_the_page(page, order);
+            {
+                __free_one_page(page, pfn, zone, order, migratetype, ...);
+                {
+                    while (order < max_order) {
+                        // 找到buddy
+                        buddy_pfn = __find_buddy_pfn(pfn, order);
+		                buddy = page + (buddy_pfn - pfn);
+
+                        if (!page_is_buddy(page, buddy, order))
+			                goto done_merging;
+
+                        // 把buddy先删除
+                        del_page_from_free_list(buddy, zone, order);
+                        combined_pfn = buddy_pfn & pfn;
+                        page = page + (combined_pfn - pfn);
+                        pfn = combined_pfn;
+                        // 合并之后order增加
+                        order++;
+                    }
+
+                    // 设置order重新加到freelist
+                    set_buddy_order(page, order);
+                    add_to_free_list(page, zone, order, migratetype);
+                }
+            }
+    }
+}
+```
+
+## slab
+
+### 分配内存
+
+```c
+static void *kmalloc(size_t size, gfp_t flags)
+{
+    __kmalloc(size, flags);
+    {
+        // 查找匹配的kmem_cache
+        struct kmem_cache *s = kmalloc_slab(size, flags);
+
+        // 从对象池中分配
+        slab_alloc(s, flags, _RET_IP_, size);
+        {
+
+        }
+    }
+}
+```
+
+### 释放内存
+
+```c
+void kfree(const void *x)
+{
+    struct page *page = virt_to_head_page(x)
+    slab_free(page->slab_cache, page, object, ...);
+    {
+
+    }
+}
+```
+
+## vmalloc
+
+### 分配内存
+
+```c
+void *vmalloc(unsigned long size)
+{
+    __vmalloc_node(size, 1, GFP_KERNEL, ...);
+    {
+        __vmalloc_node_range(size, align, VMALLOC_START, VMALLOC_END, gfp_mask, ...);
+        {
+            // 分配线性地址
+            struct vm_struct *area = __get_vm_area_node(real_size, align, shift, ...);
+
+            return __vmalloc_area_node(area, gfp_mask, prot, shift, node);
+            {
+                // 递归分配物理内存
+                if (array_size > PAGE_SIZE) {
+                    area->pages = __vmalloc_node(array_size, 1, nested_gfp, node, ...);
+                } else {
+                    area->pages = kmalloc_node(array_size, nested_gfp, node);
+                }
+
+                // 映射线性地址
+                vmap_pages_range(addr, addr + size, prot, area->pages, page_shift);
+                {
+                    for (i = 0; i < nr; i += 1U << (page_shift - PAGE_SHIFT)) {
+                        vmap_range_noflush(addr, addr + (1UL << page_shift), ...);
+                        {
+                            // 添加页表项
+                            start = addr;
+                            pgd = pgd_offset_k(addr);
+                            do {
+                                next = pgd_addr_end(addr, end);
+                                err = vmap_p4d_range(pgd, addr, next, phys_addr, ...);
+                            } while (pgd++, phys_addr += (next - addr), addr = next, addr != end);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### 释放内存
+
+```c
+void vfree(const void *addr)
+{
+    __vfree(addr);
+    {
+        __vunmap(addr, 1);
+        {
+            struct vm_struct *area = find_vm_area(addr);
+            vm_remove_mappings(area, deallocate_pages);
+            {
+                remove_vm_area(area->addr);
+                {
+                    // 查找红黑树
+                    struct vmap_area *va = __find_vmap_area((unsigned long)addr);
+                    free_unmap_vmap_area(va);
+                    {
+                        // 移除页表项
+                        vunmap_range_noflush(va->va_start, va->va_end);
+                        {
+                            pgd = pgd_offset_k(addr);
+                            do {
+                                next = pgd_addr_end(addr, end);
+                                if (pgd_bad(*pgd))
+                                    mask |= PGTBL_PGD_MODIFIED;
+                                if (pgd_none_or_clear_bad(pgd))
+                                    continue;
+                                vunmap_p4d_range(pgd, addr, next, &mask);
+                            } while (pgd++, addr = next, addr != end);
+                        }
+                    }
+                }
+            }
+
+            // 释放物理内存页
+            unsigned int page_order = vm_area_page_order(area);
+            for (i = 0; i < area->nr_pages; i += 1U << page_order) {
+                struct page *page = area->pages[i];
+                __free_pages(page, page_order);
+            }
+        }
+    }
+}
+```
+
+# 用户空间内存分配
+
+## malloc
+
+```c
+
+void * __libc_malloc(size_t bytes)
+{
+
+}
+
+void __libc_free(void *mem)
+{
+
+}
+
+```
