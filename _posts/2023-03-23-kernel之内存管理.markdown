@@ -6,4 +6,317 @@ categories: jekyll
 tags: kernel memory
 ---
 
-# usdt
+# 初始化
+
+```dts
+/ {
+    #size-cells = <0x02>;
+	#address-cells = <0x02>;
+
+    psci {
+		migrate = <0xc4000005>;
+		cpu_on = <0xc4000003>;
+		cpu_off = <0x84000002>;
+		cpu_suspend = <0xc4000001>;
+		method = "hvc";
+		compatible = "arm,psci-1.0\0arm,psci-0.2\0arm,psci";
+	};
+
+    memory@40000000 {
+		reg = <0x00 0x40000000 0x00 0x8000000>;
+		device_type = "memory";
+	};
+}
+```
+
+```c
+
+// 这块内存直接打包在vmlinux镜像中
+static struct memblock_region memblock_memory_init_regions[128] __initdata_memblock;
+static struct memblock_region memblock_reserved_init_regions[385] __initdata_memblock;
+
+// buddy系统建立之前用于分配内存
+struct memblock memblock __initdata_memblock = {
+	.memory.regions		= memblock_memory_init_regions,
+	.memory.cnt		    = 1,	/* empty dummy entry */
+	.memory.max		    = INIT_MEMBLOCK_REGIONS,
+	.memory.name		= "memory",
+
+	.reserved.regions	= memblock_reserved_init_regions,
+	.reserved.cnt		= 1,	/* empty dummy entry */
+	.reserved.max		= INIT_MEMBLOCK_RESERVED_REGIONS,
+	.reserved.name		= "reserved",
+
+	.bottom_up		    = false,
+	.current_limit		= MEMBLOCK_ALLOC_ANYWHERE,
+};
+
+asmlinkage void start_kernel(void)
+{
+    setup_arch(&command_line);
+    {
+        setup_machine_fdt(__fdt_pointer);
+        {
+            // 解析device-tree获取物理内存信息
+            early_init_dt_scan(dt_virt)
+            {
+                early_init_dt_scan_nodes();
+                {
+                    early_init_dt_scan_root();
+                    {
+                        dt_root_size_cells = of_get_flat_dt_prop(node, "#size-cells", NULL);
+                        dt_root_addr_cells = of_get_flat_dt_prop(node, "#address-cells", NULL);
+                    }
+
+                    // 扫描memory类型的node
+                    early_init_dt_scan_memory();
+                    {
+                        reg = of_get_flat_dt_prop(node, "reg", &l);
+
+                        // base = 0x40000000
+                        base = dt_mem_next_cell(dt_root_addr_cells, &reg);
+                        // size = 0x8000000
+		                size = dt_mem_next_cell(dt_root_size_cells, &reg);
+
+                        early_init_dt_add_memory_arch(base, size);
+                        {
+                            // 注册到memblock中
+                            memblock_add(base, size);
+                        }
+                    }
+                }
+            }
+        }
+
+        // reserve已经占用的内存
+        arm64_memblock_init();
+        {
+            // 保留initrd占用的内存
+            u64 base = phys_initrd_start & PAGE_MASK;
+		    u64 size = PAGE_ALIGN(phys_initrd_start + phys_initrd_size) - base;
+            memblock_remove(base, size);
+			memblock_add(base, size);
+			memblock_reserve(base, size);
+
+            // 保留kernel自身占用的内存
+            memblock_reserve(__pa_symbol(_stext), _end - _stext);
+
+            early_init_fdt_scan_reserved_mem();
+            {
+                // 从dt中查找reserved-memory节点
+                of_scan_flat_dt(__fdt_scan_reserved_mem, NULL);
+                // 插入memblock.reserved
+                fdt_init_reserved_mem();
+            }
+        }
+
+        bootmem_init();
+        {
+            // memblock中空闲物理内存的上下边界
+            min = PFN_UP(memblock_start_of_DRAM());
+	        max = PFN_DOWN(memblock_end_of_DRAM());
+
+            max_pfn = max_low_pfn = max;
+	        min_low_pfn = min;
+
+            // 确定每个memblock所属的node
+	        arch_numa_init();
+
+            // 确定每个zone的边界
+            zone_sizes_init(min, max);
+            {
+                // 从acpi或dt中解析dma信息
+                zone_dma_bits = min3(32U, dt_zone_dma_bits, acpi_zone_dma_bits);
+                arm64_dma_phys_limit = max_zone_phys(zone_dma_bits);
+                max_zone_pfns[ZONE_DMA] = PFN_DOWN(arm64_dma_phys_limit);
+
+                // 最大4G
+                max_zone_pfns[ZONE_DMA32] = PFN_DOWN(max_zone_phys(32));
+                if (!arm64_dma_phys_limit)
+		            arm64_dma_phys_limit = dma32_phys_limit;
+
+                // 剩余的所有内存
+                max_zone_pfns[ZONE_NORMAL] = max;
+
+                // 初始化pg_data_t结构: 每个pg_data_t表示numa的一个node
+                // 每个pg_data_t可能包含多个zone
+                free_area_init(max_zone_pfns);
+                {
+                    for_each_online_node(nid) {
+                        pg_data_t *pgdat = NODE_DATA(nid);
+
+		                free_area_init_node(nid);
+                        {
+                            get_pfn_range_for_nid(nid, &start_pfn, &end_pfn);
+                            pgdat->node_id = nid;
+                            pgdat->node_start_pfn = start_pfn;
+
+                            free_area_init_core(pgdat);
+                            {
+                                // 初始化每个node的每个zone
+                                init_currently_empty_zone(zone, zone->zone_start_pfn, size);
+                                {
+                                    zone_init_free_lists(zone);
+                                    {
+                                        // order范围[0, 10]表示一次可以连续分配的内存页数为[1, 1024]
+                                        // t表示迁移类型，决定内存回收时的行为
+                                        for_each_migratetype_order(order, t) {
+                                            INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
+                                            zone->free_area[order].nr_free = 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 打印memblock信息
+            memblock_dump_all();
+        }
+
+        // 按距离每个node的每个zone倒序依次插入fallback列表
+        build_all_zonelists(NULL);
+        {
+            __build_all_zonelists(NULL);
+            {
+                for_each_online_node(nid) {
+                    pg_data_t *pgdat = NODE_DATA(nid);
+                    build_zonelists(pgdat);
+                    {
+                        // node_order表示numa拓扑结构中按距离排序
+                        build_zonelists_in_node_order(pgdat, node_order, nr_nodes);
+                        {
+                            // node中的zone倒序依次插入zonerefs
+                            build_zonerefs_node(node, zonerefs);
+                        }
+                    }
+                }
+            }
+        } 
+    }
+
+    mm_init();
+    {
+        // 把空闲内存加入buddy系统
+        mem_init();
+        {
+            memblock_free_all();
+            {
+                for_each_free_mem_range(i, NUMA_NO_NODE, MEMBLOCK_NONE, &start, &end, NULL)
+		            count += __free_memory_core(start, end);
+                    {
+                        while (start < end) {
+                            // 内存地址对齐之后计算当前最大order
+                            order = min(MAX_ORDER - 1UL, __ffs(start));
+
+                            while (start + (1UL << order) > end)
+                                order--;
+
+                            memblock_free_pages(pfn_to_page(start), start, order);
+                            {
+                                // 模拟释放内存的过程把page加入buddy
+                                __free_pages_core(page, order);
+                            }
+
+                            start += (1UL << order);
+                        }
+                    }
+            }
+        }
+
+        // 创建slab分配系统: 从buddy分配page切分之后加入对象池，提高内存利用率同时加速小对象的分配
+        kmem_cache_init();
+        {
+            // 给slab系统自身的对象创建对象池
+            create_boot_cache(kmem_cache_node, "kmem_cache_node", sizeof(struct kmem_cache_node), ...);
+            create_boot_cache(kmem_cache, "kmem_cache", ...);
+
+            create_kmalloc_caches(0);
+            {
+                // 在[128, 2*page]范围内创建对象池，小对象全部从对象池分配
+                for (type = KMALLOC_NORMAL; type <= KMALLOC_RECLAIM; type++) {
+                    for (i = KMALLOC_SHIFT_LOW; i <= KMALLOC_SHIFT_HIGH; i++) {
+                        if (!kmalloc_caches[type][i])
+                            new_kmalloc_cache(i, type, flags);
+
+                        if (KMALLOC_MIN_SIZE <= 32 && i == 6 && !kmalloc_caches[type][1])
+                            new_kmalloc_cache(1, type, flags);
+                        if (KMALLOC_MIN_SIZE <= 64 && i == 7 && !kmalloc_caches[type][2])
+                            new_kmalloc_cache(2, type, flags);
+                    }
+                }
+            }
+        }
+
+        // 初始化vmalloc系统: 分配多个线性地址连续的page
+        vmalloc_init();
+        {
+            // 创建vmalloc元数据的对象池
+            vmap_area_cachep = KMEM_CACHE(vmap_area, ...);
+
+            /* 把boot过程中已经分配的线性内存加入vmap */
+            for (tmp = vmlist; tmp; tmp = tmp->next) {
+                va = kmem_cache_zalloc(vmap_area_cachep, ...);
+                
+                va->va_start = (unsigned long)tmp->addr;
+                va->va_end = va->va_start + tmp->size;
+                va->vm = tmp;
+
+                // vmap_area_root是以va_start和va_end为key的红黑树
+                insert_vmap_area(va, &vmap_area_root, &vmap_area_list);
+            }
+
+            // 把剩余的线性地址空间都加入free_vmap
+            vmap_init_free_space();
+            {
+                // 整个线性地址空间
+                unsigned long vmap_start = 1;
+	            unsigned long vmap_end = ULONG_MAX;
+
+                // vmap_area_list表示已占用的线性地址空间
+	            // 把vmap_area_list的间隙全部加入free_vmap
+                list_for_each_entry(busy, &vmap_area_list, list) {
+                    if (busy->va_start - vmap_start > 0) {
+                        free = kmem_cache_zalloc(vmap_area_cachep, GFP_NOWAIT);
+                        free->va_start = vmap_start;
+                        free->va_end = busy->va_start;
+
+                        insert_vmap_area_augment(free, NULL,
+                            &free_vmap_area_root, &free_vmap_area_list);
+                    }
+
+                    vmap_start = busy->va_end;
+                }
+
+                // 最后剩余的线性地址空间也加入free_vmap
+                if (vmap_end - vmap_start > 0) {
+                    free = kmem_cache_zalloc(vmap_area_cachep, GFP_NOWAIT);
+                    free->va_start = vmap_start;
+                    free->va_end = vmap_end;
+
+                    insert_vmap_area_augment(free, NULL,
+                        &free_vmap_area_root, &free_vmap_area_list);
+                }
+            }
+        }
+    }
+
+    
+
+
+}
+```
+
+
+# buddy
+
+
+# slab
+
+
+# vmalloc
+
+
+# malloc
