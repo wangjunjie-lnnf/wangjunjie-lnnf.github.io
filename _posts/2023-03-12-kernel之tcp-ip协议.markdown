@@ -322,8 +322,25 @@ int ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl)
 
 ### 路由算法
 
+When the `IP` layer in a host or router needs to send an IP datagram to a next-hop router or host, it first examines the destination IP address (D) in the datagram. Using the value D, the following `longest prefix match` algorithm is executed on the forwarding table:
+
+1. Search the table for all entries for which the following property holds: `(D ^ mj) = dj`, where `mj` is the value of the `mask field` associated with the forwarding entry `ej` having index `j`, and `dj` is the value of the destination field associated with `ej`. This means that the destination IP address D is `bitwise ANDed` with the mask in each forwarding table entry (mj), and the result is compared against the destination in the same forwarding table entry (dj). If the property holds, the entry (ej here) is a “match” for the destination IP address. When a match happens, the algorithm notes the entry index (j here) and how many bits in the mask mj were set to 1. The more bits set to 1, the “better” the match.
+
+从IP报文头取出目标地址D，跟路由表中的每个路由项的子网掩码做and运算，结果跟此路由项的地址对比，计算匹配的最大长度。
+
+2. The best matching entry ek (i.e., the one with the largest number of 1 bits in its mask mk) is selected, and its next-hop field nk is used as the next-hop IP address in forwarding the datagram.
+
+If no matches in the forwarding table are found, the datagram is undeliverable. If the undeliverable datagram was generated locally (on this host), a `“host unreach- able”` error is normally returned to the application that generated the datagram. On a router, an `ICMP` message is normally sent back to the host that sent the datagram.
+
 ### 分片算法
 
+When an IPv4 datagram is fragmented into multiple smaller fragments, each of which itself is an independent IP datagram, `the Total Length field reflects the length of the particular fragment`.
+
+The `Identification field` helps indentify each datagram sent by an IPv4 host. To ensure that the fragments of one datagram are not confused with those of another, the sending host normally increments an internal counter by 1 each time a datagram is sent (from one of its IP addresses) and copies the value of the counter into the IPv4 Identification field.
+
+The `Identification field` value (set by the original sender) is copied to each fragment and is used to group them together when they arrive. The `Fragment Offset` field gives the offset of the first byte of the fragment payload byte in the original IPv4 datagram (`in 8-byte units`). Clearly, the first fragment always has offset 0.
+
+`Identification`字段用于标识多个分片属于同一个datagram
 
 
 ## 邻居子系统
@@ -1480,18 +1497,314 @@ long __sys_recvmsg(int fd, struct user_msghdr __user *msg, unsigned int flags, .
 # 连接建立
 
 ```c
+
+// client发送syn
 int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
+    tcp_set_state(sk, TCP_SYN_SENT);
 
+    // 生成ISN: hash + 时间戳
+    tp->write_seq = secure_tcp_seq(inet->inet_saddr,
+                                   inet->inet_daddr,
+                                   inet->inet_sport,
+                                   usin->sin_port);
+    {
+        hash = siphash_3u32((__force u32)saddr, (__force u32)daddr,
+			                (__force u32)sport << 16 | (__force u32)dport, ...);
+	    return seq_scale(hash);
+        {
+            return hash + (ktime_get_real_ns() >> 6);
+        }
+    }
+
+    tcp_connect(sk);
+    {
+        buff = sk_stream_alloc_skb(sk, 0, sk->sk_allocation, true);
+        tcp_init_nondata_skb(buff, tp->write_seq++, TCPHDR_SYN);
+        // 发送syn
+        tcp_transmit_skb(sk, buff, 1, sk->sk_allocation);
+
+        // 设置重传计时器
+        inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS, inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
+    }
 }
+
+// server接收syc，发送syn+ack
+int tcp_v4_rcv(struct sk_buff *skb)
+{
+    tcp_v4_do_rcv(sk, skb);
+    {
+        tcp_rcv_state_process(sk, skb);
+        {
+            switch (sk->sk_state) {
+                case TCP_LISTEN:
+                    if (th->syn) {
+                        icsk->icsk_af_ops->conn_request(sk, skb);
+                        {
+                            tcp_v4_conn_request(sk, skb);
+                            {
+                                inet_reqsk_alloc(rsk_ops, sk, !want_cookie);
+                                {
+                                    struct request_sock *req = reqsk_alloc(ops, sk_listener, attach_listener);
+                                    struct inet_request_sock *ireq = inet_rsk(req);
+                                    // 是不是很神奇，状态并不是TCP_SYN_RECV
+                                    // TCP_SYN_RECV已经被fastopen占用了，所以新增了TCP_NEW_SYN_RECV
+                                    ireq->ireq_state = TCP_NEW_SYN_RECV;
+                                }
+
+                                if (!want_cookie) {
+                                    // TFO stands for TCP Fast Open. 
+                                    // It is a transport layer solution for avoiding one full RTT between client and server.
+                                    // It avoids TCP-3 way handshake for repeated connections.
+                                    // 
+                                    // TFO works only for repeat connections because of the requirement of a cryptographic cookie. 
+                                    // For the first time when the client interacts with the server then it has to perform 3 way handshake. 
+                                    // In that handshake, the server shares a cryptographic cookie with the client. 
+                                    // For the next connection onwards, the client just piggybacks the GET(只支持GET，不支持POST) request
+                                    // and cookie in the SYN packet itself. 
+                                    // Then server authenticates the client using a cookie accepts the connection request 
+                                    // and sends the data in the ACK packet.
+                                    fastopen_sk = tcp_try_fastopen(sk, skb, req, &foc, dst);
+                                    {
+                                        tcp_fastopen_create_child(sk, skb, req);
+                                        {
+                                            inet_csk(sk)->icsk_af_ops->syn_recv_sock(sk, skb, req, ...);
+                                            {
+                                                tcp_v4_syn_recv_sock(sk, skb, req, ...);
+                                                {
+                                                    tcp_create_openreq_child(sk, req, skb);
+                                                    {
+                                                        inet_csk_clone_lock(sk, req, GFP_ATOMIC);
+                                                        {
+                                                            struct sock *newsk = sk_clone_lock(sk, priority);
+                                                            inet_sk_set_state(newsk, TCP_SYN_RECV);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (fastopen_sk) {
+                                    // 发送syn+ack
+                                    af_ops->send_synack(sk, dst, &fl, req, ..., skb);
+                                    /* Add the child socket directly into the accept queue */
+                                    inet_csk_reqsk_queue_add(sk, req, fastopen_sk);
+                                } else {
+                                    // 把req插入tcp_hashinfo
+                                    inet_csk_reqsk_queue_hash_add(sk, req, ...);
+                                    // 发送syn+ack
+                                    af_ops->send_synack(sk, dst, &fl, req, ..., skb);
+                                }
+                            }
+                        }
+
+                        return 0;
+                    }
+            }
+        }
+    }
+}
+
+// client收到syn+ack
+int tcp_v4_rcv(struct sk_buff *skb)
+{
+    tcp_v4_do_rcv(sk, skb);
+    {
+        tcp_rcv_state_process(sk, skb);
+        {
+            switch (sk->sk_state) {
+                case TCP_SYN_SENT:
+                    tcp_rcv_synsent_state_process(sk, skb, th);
+                    {
+                        tcp_finish_connect(sk, skb);
+                        {
+                            tcp_set_state(sk, TCP_ESTABLISHED);
+                        }
+                    }
+            }
+        }
+    }
+}
+
+// server收到ack
+int tcp_v4_rcv(struct sk_buff *skb)
+{
+    // 根据(saddr, sport, daddr, dport)查找sock
+	sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source, th->dest, ...);
+    
+    // 正常的3次握手
+    if (sk->sk_state == TCP_NEW_SYN_RECV) {
+        tcp_check_req(sk, skb, req, false, &req_stolen);
+        {
+            inet_csk(sk)->icsk_af_ops->syn_recv_sock(sk, skb, req, ...);
+            {
+                // 此处同fastopen
+                tcp_v4_syn_recv_sock(sk, skb, req, ...);
+                {
+                    tcp_create_openreq_child(sk, req, skb);
+                    {
+                        inet_csk_clone_lock(sk, req, GFP_ATOMIC);
+                        {
+                            struct sock *newsk = sk_clone_lock(sk, priority);
+                            inet_sk_set_state(newsk, TCP_SYN_RECV);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 插入backlog等待accept
+        tcp_child_process(sk, nsk, skb);
+        {
+            __sk_add_backlog(child, skb);
+        }
+
+        return 0;
+    }
+
+    tcp_v4_do_rcv(sk, skb);
+    {
+        tcp_rcv_state_process(sk, skb);
+        {
+            tcp_ack(sk, skb, ...);
+
+            switch (sk->sk_state) {
+                case TCP_SYN_RECV:
+                    // fastopen
+                    tcp_set_state(sk, TCP_ESTABLISHED);
+            }
+        }
+    }
+}
+
 ```
 
 # 连接断开
 
 ```c
-void tcp_send_fin(struct sock *sk)
-{
+// 关闭连接状态机变化
+static const unsigned char new_state[16] = {
+  /* current state:    new state:      action:	*/
+  [TCP_ESTABLISHED]	= TCP_FIN_WAIT1 | TCP_ACTION_FIN,
+  [TCP_SYN_SENT]	= TCP_CLOSE,
+  [TCP_SYN_RECV]	= TCP_FIN_WAIT1 | TCP_ACTION_FIN,
+  [TCP_FIN_WAIT1]	= TCP_FIN_WAIT1,
+  [TCP_FIN_WAIT2]	= TCP_FIN_WAIT2,
+  [TCP_TIME_WAIT]	= TCP_CLOSE,
+  [TCP_CLOSE]		= TCP_CLOSE,
+  [TCP_CLOSE_WAIT]	= TCP_LAST_ACK  | TCP_ACTION_FIN,
+  [TCP_LAST_ACK]	= TCP_LAST_ACK,
+  [TCP_LISTEN]		= TCP_CLOSE,
+  [TCP_CLOSING]		= TCP_CLOSING,
+};
 
+// shutdown可以选择发送通道或接收通道
+// shutdown没有destory socket
+void tcp_shutdown(struct sock *sk, int how)
+{
+    if ((1 << sk->sk_state) &
+	    (TCPF_ESTABLISHED | TCPF_SYN_SENT |
+	     TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
+        
+        res = tcp_close_state(sk);
+        {
+            int next = (int)new_state[sk->sk_state];
+            // TCP_ESTABLISHED -> TCP_FIN_WAIT1
+            // TCP_CLOSE_WAIT -> TCP_LAST_ACK
+            tcp_set_state(sk, ns);
+        }
+
+		if (res)
+			tcp_send_fin(sk);
+	}
+}
+
+// close直接destory socket
+void __tcp_close(struct sock *sk, long timeout)
+{
+    res = tcp_close_state(sk);
+    {
+        int next = (int)new_state[sk->sk_state];
+        // TCP_ESTABLISHED -> TCP_FIN_WAIT1
+        // TCP_CLOSE_WAIT -> TCP_LAST_ACK
+        tcp_set_state(sk, ns);
+    }
+
+    if (res)
+        tcp_send_fin(sk);
+}
+
+int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
+{
+    if (sk->sk_state == TCP_ESTABLISHED) {
+        tcp_rcv_established(sk, skb);
+        {
+            tcp_data_queue(sk, skb);
+            {
+                // 收到FIN标识
+                if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			        tcp_fin(sk);
+                    {
+                        switch (sk->sk_state) {
+                            case TCP_ESTABLISHED:
+                                tcp_set_state(sk, TCP_CLOSE_WAIT);
+                        }
+                    }
+            }
+        }
+    }
+
+    tcp_rcv_state_process(sk, skb);
+    {
+        switch (sk->sk_state) {
+        case TCP_FIN_WAIT1:
+            tcp_set_state(sk, TCP_FIN_WAIT2);
+            break;
+
+        case TCP_CLOSING:
+            tcp_time_wait(sk, TCP_TIME_WAIT, 0);
+            break;
+        case TCP_LAST_ACK:
+            tcp_done(sk);
+            {
+                tcp_set_state(sk, TCP_CLOSE);
+            }
+            break;
+        }
+
+        switch (sk->sk_state) {
+            case TCP_CLOSE_WAIT:
+            case TCP_CLOSING:
+            case TCP_LAST_ACK:
+            case TCP_FIN_WAIT1:
+            case TCP_FIN_WAIT2:
+            case TCP_ESTABLISHED:
+                tcp_data_queue(sk, skb);
+                {
+                    // 收到FIN标识
+                    if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+                        tcp_fin(sk);
+                        {
+                            switch (sk->sk_state) {
+                            case TCP_SYN_RECV:
+                            case TCP_ESTABLISHED:
+                                tcp_set_state(sk, TCP_CLOSE_WAIT);
+                                break;
+
+                            case TCP_FIN_WAIT1:
+                                tcp_set_state(sk, TCP_CLOSING);
+                                break;
+
+                            case TCP_FIN_WAIT2:
+                                tcp_time_wait(sk, TCP_TIME_WAIT, 0);
+                                break;
+                            }
+                        }
+                }
+        }
+    }
 }
 ```
 
