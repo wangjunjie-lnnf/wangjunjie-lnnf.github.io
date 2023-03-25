@@ -1,0 +1,161 @@
+---
+layout: post
+title:  "kernel之锁"
+date:   2023-03-24 19:22:07 +0000
+categories: jekyll
+tags: kernel lock
+---
+
+# lock
+
+The key difference between the two lock types – the `mutex` and the `spinlock` – is based on how the losers wait upon the unlock. With the `mutex` lock, the loser threads are put to sleep; that is, they wait by sleeping. The moment the winner performs the unlock, the kernel awakens the losers (all of them) and they run, again competing for the lock.
+
+With the `spinlock`, however, there is no question of sleeping; the losers wait by spinning upon the lock until it is unlocked.
+
+`mutex`从加锁失败到加锁成功，至少需要两次上下文切换，如果预估获取锁的时间少于2次上下文切换的时间，则优先选择`spinlock`。
+
+原子上下文中必须使用`spinlock`。
+
+## mutex
+
+### mutex_init
+
+```c
+typedef struct qspinlock {
+	union {
+		atomic_t val;
+
+		struct {
+			u8	locked;
+			u8	pending;
+		};
+		struct {
+			u16	locked_pending;
+			u16	tail;
+		};
+	};
+} arch_spinlock_t;
+
+typedef struct raw_spinlock {
+	arch_spinlock_t raw_lock;
+} raw_spinlock_t;
+
+struct optimistic_spin_queue {
+    atomic_t tail;
+};
+
+struct mutex {
+	atomic_long_t		owner;
+	raw_spinlock_t		wait_lock;
+	struct optimistic_spin_queue osq;
+	struct list_head	wait_list;
+};
+
+void __mutex_init(struct mutex *lock, const char *name, ...)
+{
+    atomic_long_set(&lock->owner, 0);
+	raw_spin_lock_init(&lock->wait_lock);
+	INIT_LIST_HEAD(&lock->wait_list);
+	osq_lock_init(&lock->osq);
+}
+```
+
+### mutex_lock
+
+```c
+void __sched mutex_lock(struct mutex *lock)
+{
+    res = __mutex_trylock_fast(lock);
+    {
+        unsigned long curr = (unsigned long)current;
+	    unsigned long zero = 0UL;
+
+        // 原子指令设置owner为current
+	    atomic_long_try_cmpxchg_acquire(&lock->owner, &zero, curr);
+    }
+
+    if (!res)
+		__mutex_lock_slowpath(lock);
+        {
+            __mutex_lock(lock, TASK_UNINTERRUPTIBLE, ...);
+            {
+                __mutex_lock_common(lock, state, ...);
+                {
+                    struct mutex_waiter waiter;
+                    waiter.task = current;
+
+                    // 先获取spin_lock
+                    raw_spin_lock(&lock->wait_lock);
+                    // 加入等待队列
+                    __mutex_add_waiter(lock, &waiter, &lock->wait_list);
+                    {
+                        list_add_tail(&waiter->list, list);
+                        if (__mutex_waiter_is_first(lock, waiter))
+                            __mutex_set_flag(lock, MUTEX_FLAG_WAITERS);
+                    }
+                    // 设置task状态
+                    set_current_state(state);
+
+                    for (;;) {
+                        if (__mutex_trylock(lock))
+			                goto acquired;
+
+                        // 检查current是否收到了signal
+                        res = signal_pending_state(state, current);
+                        if (res) {
+                            ret = -EINTR;
+			                goto err;
+                        }
+
+                        raw_spin_unlock(&lock->wait_lock);
+		                schedule_preempt_disabled();
+
+                        bool first = __mutex_waiter_is_first(lock, &waiter);
+
+		                set_current_state(state);
+
+                        res = __mutex_trylock_or_handoff(lock, first);
+                        {
+                            return !__mutex_trylock_common(lock, handoff);
+                        }
+
+                        if (res) {
+                            break;
+                        }
+
+                        res = mutex_optimistic_spin(lock, ww_ctx, &waiter);
+                        if (first && res) {
+                            break;
+                        }
+
+                        raw_spin_lock(&lock->wait_lock);
+                    }
+
+                    raw_spin_lock(&lock->wait_lock);
+                    __set_current_state(TASK_RUNNING);
+                    __mutex_remove_waiter(lock, &waiter);
+                    raw_spin_unlock(&lock->wait_lock);
+                    preempt_enable();
+                    return 0;
+                }
+            }
+        }
+}
+```
+
+### mutex_unlock
+
+```c
+void __sched mutex_unlock(struct mutex *lock)
+{
+    res = __mutex_unlock_fast(lock);
+    if (res)
+		return;
+    __mutex_unlock_slowpath(lock, _RET_IP_);
+}
+```
+
+## spin_lock
+
+
+## rwlock

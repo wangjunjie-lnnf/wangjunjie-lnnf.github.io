@@ -1,0 +1,549 @@
+---
+layout: post
+title:  "jvm之线程同步实现机制"
+date:   2023-03-25 11:22:07 +0000
+categories: jekyll
+tags: jvm volatile
+---
+
+# volatile
+
+## 定义
+
+[`8.3.1.4. volatile Fields`](https://docs.oracle.com/javase/specs/jls/se8/html/jls-8.html#jls-8.3.1.4)
+对`volatile`的描述如下：
+
+The `Java programming language` allows threads to access shared variables. As a rule, to ensure that shared variables are consistently and reliably updated, a thread should ensure that it has exclusive use of such variables by obtaining a lock that, conventionally, enforces mutual exclusion for those shared variables.
+
+The `Java programming language` provides a second mechanism, `volatile` fields, that is more convenient than locking for some purposes.
+
+A field may be declared `volatile`, in which case the `Java Memory Model` ensures that all threads see a consistent value for the variable.
+
+It is a compile-time error if a `final` variable is also declared `volatile`.
+
+## 实现
+
+参考[jvm解释器](/jekyll/2023/01/28/jvm解释器.html)  
+`volatile`只修饰字段，所有受影响的字节码包括`_getstatic、_putstatic、_getfield、_putfield`
+
+```c++
+void TemplateTable::initialize() {
+    def(Bytecodes::_getstatic , ubcp|____|clvm|____, vtos, vtos, getstatic , f1_byte);
+    def(Bytecodes::_putstatic , ubcp|____|clvm|____, vtos, vtos, putstatic , f2_byte);
+    def(Bytecodes::_getfield  , ubcp|____|clvm|____, vtos, vtos, getfield  , f1_byte);
+    def(Bytecodes::_putfield  , ubcp|____|clvm|____, vtos, vtos, putfield  , f2_byte);
+}
+```
+
+读取字段时`volatile`的效果
+
+```c++
+void TemplateTable::getfield(int byte_no)
+{
+    getfield_or_static(byte_no, false);
+}
+
+void TemplateTable::getstatic(int byte_no)
+{
+    getfield_or_static(byte_no, true);
+}
+
+void TemplateTable::getfield_or_static(int byte_no, bool is_static)
+{
+    // 读取字段前插入barrier指令
+    Label notVolatile;
+    __ tbz(raw_flags, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
+    __ membar(MacroAssembler::AnyAny);
+    __ bind(notVolatile);
+
+    // 正常读取字段
+
+    // 字段读取完毕插入barrier指令
+    Label notVolatile;
+    __ tbz(raw_flags, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
+    __ membar(MacroAssembler::LoadLoad | MacroAssembler::LoadStore);
+    __ bind(notVolatile);
+}
+```
+
+更新字段时`volatile`的效果
+
+```c++
+void TemplateTable::putfield(int byte_no)
+{
+    putfield_or_static(byte_no, false);
+}
+
+void TemplateTable::putstatic(int byte_no) 
+{
+    putfield_or_static(byte_no, true);
+}
+
+void TemplateTable::putfield_or_static(int byte_no, bool is_static) 
+{
+    // 更新字段前插入barrier指令
+    {
+        Label notVolatile;
+        __ tbz(r5, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
+        __ membar(MacroAssembler::StoreStore | MacroAssembler::LoadStore);
+        __ bind(notVolatile);
+    }
+
+    // 正常更新字段
+
+    // 字段更新完毕插入barrier指令
+    {
+        Label notVolatile;
+        __ tbz(r5, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
+        __ membar(MacroAssembler::StoreLoad | MacroAssembler::StoreStore);
+        __ bind(notVolatile);
+    }
+}
+```
+
+可见`volatile`修饰字段的效果就是在读写字段前后执行`barrier`指令
+
+```c++
+enum Membar_mask_bits {
+    // We can use ISH for a barrier because the ARM ARM says 
+    // "This architecture assumes that all Processing Elements that use the
+    // same operating system or hypervisor are in the same Inner
+    // Shareable shareability domain."
+    StoreStore = ISHST,
+    LoadStore  = ISHLD,
+    LoadLoad   = ISHLD,
+    StoreLoad  = ISH,
+    AnyAny     = ISH
+};
+
+void membar(Membar_mask_bits order_constraint) {
+    dmb(Assembler::barrier(order_constraint));
+}
+```
+
+参考[arm文档](https://developer.arm.com/documentation/dui0802/b/DMB)关于`dmb`指令的定义
+
+Syntax: `DMB  option|#imm`
+
+`imm` Is a 4-bit unsigned immediate, in the range 0 to 15.  
+`option` Is a barrier option name. The options in the following table are ordered in decreasing scope of the shareability domain. `ARM recommends that you use the option names in preference to the equivalent #imm values`.
+
+`Data memory barrier options`
+
+| option | imm | Ordered Accesses (before-after) | Shareability domain |
+| - | - | - | - |
+| LD	| 13 | 	Load-Load, Load-Store |  |	
+| ST	| 14 | 	Store-Store | Full system |
+| SY	| 15 | 	Any-Any |  |
+| OSHLD	| 1	 | Load-Load, Load-Store |  |
+| OSHST	| 2	 | Store-Store | Outer shareable |
+| OSH	| 3	 | Any-Any |  |
+| ISHLD	| 9	 | Load-Load, Load-Store |  |
+| ISHST	| 10 | 	Store-Store | Inner shareable |
+| ISH	| 11 | 	Any-Any |  |
+| NSHLD	| 5	 | Load-Load, Load-Store |  |
+| NSHST	| 6	 | Store-Store | Non-shareable |
+| NSH	| 7	 | Any-Any |  |
+
+参考[shareability domain](https://medium.com/@om.nara/arm64-system-memory-fbf71dce37ee)的介绍  
+
+![shareability domain](/assets/images/2023-03-25/shareability-domain.webp)
+
+In Symmetric multi processing, one instance of the operating system or hypervisor runs on all the PEs. Such a situation mandates all PEs and the memory accessed by them fall into the same Inner shareable domain.
+
+搞清楚`dmb`指令的含义后再看`volatile`修饰的字段在读写时插入的`barrier`指令的含义
+
+`barrier`指令有两层含义: 禁止cpu执行时重排某些指令、刷新各种缓存保证可见性(类似写文件时fsync)，关于缓存共识和内存一致性有必要改天单独介绍。
+
+```c++
+void TemplateTable::getfield_or_static(int byte_no, bool is_static)
+{
+    // 读取字段前插入barrier指令
+    // 1. 禁止任何指令执行时越过此barrier
+    // 2. barrier指令执行完后确保之前的write指令更新的数据可见
+    __ membar(MacroAssembler::AnyAny);
+
+    // 正常读取字段：使用Load指令
+
+    // 字段读取完毕插入barrier指令
+    // 1. 前面的Load指令执行完之前禁止后续的Load/Store指令执行
+    __ membar(MacroAssembler::LoadLoad | MacroAssembler::LoadStore);
+}
+
+void TemplateTable::putfield_or_static(int byte_no, bool is_static) 
+{
+    // 更新字段前插入barrier指令
+    // 1. 禁止barrier指令前后的Store指令重排
+    // 2. 确保barrier指令前面的Load不受后面Store指令的影响
+    __ membar(MacroAssembler::StoreStore | MacroAssembler::LoadStore);
+    
+    // 正常更新字段：使用Store指令
+
+    // 字段更新完毕插入barrier指令
+    // 1. 禁止barrier指令前后的Store指令重排
+    // 2. 确保barrier指令后面的Load可以读取到Store的最新数据
+    __ membar(MacroAssembler::StoreLoad | MacroAssembler::StoreStore);
+    
+}
+```
+
+# synchronized
+
+`synchronized`对应`_monitorenter`和`_monitorexit`指令
+
+```c++
+void TemplateTable::initialize() {
+    def(Bytecodes::_monitorenter , ____|disp|clvm|____, atos, vtos, monitorenter ,  _ );
+    def(Bytecodes::_monitorexit  , ____|____|clvm|____, atos, vtos, monitorexit  ,  _ );
+}
+```
+
+## monitorenter
+
+```c++
+
+class BasicLock {
+    volatile markOop _displaced_header;
+}
+
+class BasicObjectLock {
+    BasicLock _lock;
+    oop       _obj;
+}
+
+// 动态构造汇编指令
+void TemplateTable::monitorenter()
+{
+    // 在栈上给BasicObjectLock分配空间
+    c_rarg1 = BasicObjectLock();
+
+    // 把同步对象存储到BasicObjectLock#_obj字段
+    __ str(r0, Address(c_rarg1, BasicObjectLock::obj_offset_in_bytes()));
+
+    // 获取锁，返回即成功
+    __ lock_object(c_rarg1);
+    {
+        Register lock_reg = c_rarg1;
+
+        const int obj_offset = BasicObjectLock::obj_offset_in_bytes();
+        const int lock_offset = BasicObjectLock::lock_offset_in_bytes ();
+        const int mark_offset = lock_offset + BasicLock::displaced_header_offset_in_bytes();
+
+        // Load object pointer into obj_reg %c_rarg3
+        ldr(obj_reg, Address(lock_reg, obj_offset));
+
+        // 偏向锁
+        if (UseBiasedLocking) {
+            biased_locking_enter(lock_reg, obj_reg, swap_reg, tmp, false, done, &slow_case);
+            {
+                Address mark_addr      (obj_reg, oopDesc::mark_offset_in_bytes());
+                ldr(swap_reg, mark_addr);
+                andr(tmp_reg, swap_reg, markOopDesc::biased_lock_mask_in_place);
+                // 非偏向锁模式则返回
+                if(tmp_reg != markOopDesc::biased_lock_pattern) {
+                    return;
+                }
+
+                // TODO 检查age和epoch
+            }
+        }
+
+        // 1表示unlocked
+        // Load (object->mark() | 1) into swap_reg
+        ldr(rscratch1, Address(obj_reg, 0));
+        orr(swap_reg, rscratch1, 1);
+
+        // Save (object->mark() | 1) into BasicLock's displaced header
+        str(swap_reg, Address(lock_reg, mark_offset));
+
+        // CAS尝试加锁
+        // if (obj_reg == swap_reg) 
+        //      obj_reg = lock_reg;
+        //      goto done;
+        cmpxchgptr(swap_reg, lock_reg, obj_reg, rscratch1, done, ...);
+
+        bind(slow_case);
+
+        // 调用InterpreterRuntime::monitorenter(lock_reg)
+        call_VM(InterpreterRuntime::monitorenter(lock_reg));
+
+        bind(done);
+    }
+
+    // 获取锁之后处理下一条字节码
+    __ dispatch_next(vtos);
+}
+
+void InterpreterRuntime::monitorenter(JavaThread* thread, BasicObjectLock* elem)
+{
+    if (UseBiasedLocking) {
+        // Retry fast entry if bias is revoked to avoid unnecessary inflation
+        ObjectSynchronizer::fast_enter(obj, elem->lock(), true, CHECK);
+        {
+            if (UseBiasedLocking) {
+                if (!SafepointSynchronize::is_at_safepoint()) {
+                    // 备份对象头到BasicObjectLock，然后把当前线程写入对象头，设置偏向锁模式
+                    BiasedLocking::Condition cond = BiasedLocking::revoke_and_rebias(obj, attempt_rebias, THREAD);
+                    if (cond == BiasedLocking::BIAS_REVOKED_AND_REBIASED) {
+                        return;
+                    }
+                } else {
+                    // 取消偏向锁
+                    BiasedLocking::revoke_at_safepoint(obj);
+                }
+                assert(!obj->mark()->has_bias_pattern(), "biases should be revoked by now");
+            }
+
+            slow_enter(obj, lock, THREAD);
+        }
+    } else {
+        ObjectSynchronizer::slow_enter(obj, elem->lock(), CHECK);
+        {
+            markOop mark = obj->mark();
+            // 当前无锁直接尝试cas
+            if (mark->is_neutral()) {
+                lock->set_displaced_header(mark);
+                if (mark == (markOop) Atomic::cmpxchg_ptr(lock, obj()->mark_addr(), mark)) {
+                    return;
+                }
+            } else if (mark->has_locker() && THREAD->is_lock_owned((address)mark->locker())) {
+                // 锁重入
+                lock->set_displaced_header(NULL);
+                return;
+            }
+
+            lock->set_displaced_header(markOopDesc::unused_mark());
+
+            // 创建ObjectMonitor
+            ObjectMonitor* monitor = ObjectSynchronizer::inflate(THREAD, obj(), inflate_cause_monitor_enter);
+            {
+                // The mark can be in one of the following states:
+                // *  Inflated     - just return
+                // *  Stack-locked - coerce it to inflated
+                // *  INFLATING    - busy wait for conversion to complete
+                // *  Neutral      - aggressively inflate the object.
+                // *  BIASED       - Illegal.  We should never see this
+                for (;;) {
+                    const markOop mark = object->mark();
+
+                    if (mark->has_monitor()) {
+                        return mark->monitor();
+                    }
+
+                    if (mark == markOopDesc::INFLATING()) {
+                        continue;
+                    }
+
+                    if (mark->has_locker()) {
+                        ObjectMonitor * m = omAlloc(Self);
+                        markOop cmp = (markOop) Atomic::cmpxchg_ptr(markOopDesc::INFLATING(), object->mark_addr(), mark);
+                        if (cmp != mark) {
+                            omRelease(Self, m, true);
+                            continue;
+                        }
+
+                        m->set_header(dmw);
+                        m->set_owner(mark->locker());
+                        m->set_object(object);
+                        return m;
+                    }
+
+                    ObjectMonitor * m = omAlloc(Self);
+                    m->set_header(mark);
+                    m->set_owner(NULL);
+                    m->set_object(object);
+                    m->OwnerIsThread = 1;
+
+                    if (Atomic::cmpxchg_ptr(markOopDesc::encode(m), object->mark_addr(), mark) != mark) {
+                        m->set_object(NULL);
+                        m->set_owner(NULL);
+                        m->OwnerIsThread = 0;
+                        omRelease(Self, m, true);
+                        m = NULL;
+                        continue;
+                    }
+
+                    return m;
+                }
+            }
+
+            monitor->enter(THREAD);
+            {
+                Thread * const Self = THREAD;
+
+                // cas尝试加锁
+                cur = Atomic::cmpxchg_ptr(Self, &_owner, NULL);
+                if (cur == NULL) {
+                    return;
+                }   
+
+                // 递归锁重入
+                if (cur == Self) {
+                    _recursions ++;
+                    return;
+                }
+
+                // 当前线程阻塞在此: 可以用于分析死锁
+                Self->_Stalled = intptr_t(this);
+                
+                // 先尝试自旋锁: 只是循环尝试cas加锁
+                if (TrySpin(Self) > 0) return;
+                {
+                    int ctr = Knob_FixedSpin;
+                    if (ctr != 0) {
+                        while (--ctr >= 0) {
+                            if (TryLock(Self) > 0) return 1;
+                            // 什么也没干
+                            SpinPause();
+                        }
+                        return 0;
+                    }
+
+                    for (ctr = Knob_PreSpin + 1; --ctr >= 0; ) {
+                        if (TryLock(Self) > 0) {
+                            int x = _SpinDuration;
+                            if (x < Knob_SpinLimit) {
+                                if (x < Knob_Poverty) x = Knob_Poverty;
+                                _SpinDuration = x + Knob_BonusB;
+                            }
+                            return 1;
+                        }
+                        SpinPause();
+                    }
+                }
+
+                for (;;) {
+                    EnterI(THREAD);
+                    {
+                        // 尝试cas加锁
+                        if (TryLock(Self) > 0) return;
+                        {
+                            for (;;) {
+                                if (Atomic::cmpxchg_ptr(Self, &_owner, NULL) == NULL) {
+                                    return 1;
+                                }
+                            }
+                        }
+
+                        if (TrySpin(Self) > 0) return;
+
+                        // 各种cas尝试都不行，开始排队
+                        ObjectWaiter node(Self);
+                        Self->_ParkEvent->reset();
+                        node._prev   = (ObjectWaiter *) 0xBAD;
+                        node.TState  = ObjectWaiter::TS_CXQ;
+
+                        for (;;) {
+                            // cas插入等待队列
+                            if (Atomic::cmpxchg_ptr(&node, &_cxq, nxt) == nxt) break;
+
+                            if (TryLock(Self) > 0) return;
+                        }
+
+                        for (;;) {
+                            if (TryLock(Self) > 0) break;
+
+                            // 开始睡眠
+                            if (_Responsible == Self || (SyncFlags & 1)) {
+                                Self->_ParkEvent->park((jlong) RecheckInterval);
+                                // Increase the RecheckInterval, but clamp the value.
+                                RecheckInterval *= 8;
+                                if (RecheckInterval > 1000) RecheckInterval = 1000;
+                            } else {
+                                Self->_ParkEvent->park();
+                                {
+                                    pthread_mutex_lock(_mutex);
+                                    // 等待其他线程解锁时notify
+                                    pthread_cond_wait(_cond, _mutex);
+                                    pthread_mutex_unlock(_mutex);
+                                }
+                            }
+                        }
+                    }
+
+                    if (!ExitSuspendEquivalent(jt)) break;
+                }
+            }
+        }
+    }
+}
+```
+
+## monitorexit
+
+```c++
+void TemplateTable::monitorexit()
+{
+    // r0表示第一个参数，即锁对象
+    // make sure object is on stack (contract with oopMaps)
+    __ push_ptr(r0); 
+    // c_rarg1指向BasicObjectLock
+    __ unlock_object(c_rarg1);
+
+    if (UseBiasedLocking) {
+      biased_locking_exit(obj_reg, header_reg, done);
+    }
+
+    lea(swap_reg, Address(lock_reg, BasicObjectLock::lock_offset_in_bytes()));
+    // Load the old header from BasicLock structure
+    ldr(header_reg, Address(swap_reg, BasicLock::displaced_header_offset_in_bytes()));
+
+    // 什么情况会导致此处失败: 递归重入
+    // Atomic swap back the old header
+    cmpxchgptr(swap_reg, header_reg, obj_reg, rscratch1, done, ...);
+
+    // restore obj
+    str(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()));
+    InterpreterRuntime::monitorexit(lock_reg);
+
+    bind(done);
+}
+
+void InterpreterRuntime::monitorexit(JavaThread* thread, BasicObjectLock* elem)
+{
+    Handle h_obj(thread, elem->obj());
+    ObjectSynchronizer::slow_exit(h_obj(), elem->lock(), thread);
+    {
+        fast_exit(h_obj(), lock, THREAD);
+        {
+            ObjectMonitor* monitor = ObjectSynchronizer::inflate(THREAD, object, inflate_cause_vm_internal);
+            monitor->exit(true, THREAD);
+            {
+                if (_recursions != 0) {
+                    _recursions--;
+                    return;
+                }
+
+                for (;;) {
+                    OrderAccess::release_store_ptr(&_owner, NULL);   // drop the lock
+                    OrderAccess::storeload();                        // See if we need to wake a successor
+                    // 没有等待线性直接返回
+                    if ((intptr_t(_EntryList) | intptr_t(_cxq)) == 0) {
+                        return;
+                    }
+
+                    // 有等待线性则唤醒等待队列头的线程
+                    ObjectWaiter * w = _cxq;
+                    ExitEpilog(Self, w);
+                    {
+                        ParkEvent * Trigger = w->_event;
+                        Trigger->unpark();
+                        {
+                            pthread_mutex_lock(_mutex);
+                            // 唤醒等待队列头的线程
+                            pthread_cond_signal(_cond);
+                            pthread_mutex_unlock(_mutex);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+```
+
+# AQS
+
+
+
