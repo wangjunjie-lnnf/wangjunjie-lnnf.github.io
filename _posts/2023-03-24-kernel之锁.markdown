@@ -1,0 +1,316 @@
+---
+layout: post
+title:  "kernel之锁"
+date:   2023-03-24 19:22:07 +0000
+categories: jekyll
+tags: kernel lock
+---
+
+# lock
+
+The key difference between the two lock types – the `mutex` and the `spinlock` – is based on how the losers wait upon the unlock. With the `mutex` lock, the loser threads are put to sleep; that is, they wait by sleeping. The moment the winner performs the unlock, the kernel awakens the losers (all of them) and they run, again competing for the lock.
+
+With the `spinlock`, however, there is no question of sleeping; the losers wait by spinning upon the lock until it is unlocked.
+
+`mutex`从加锁失败到加锁成功，至少需要两次上下文切换，如果预估获取锁的时间少于2次上下文切换的时间，则优先选择`spinlock`。
+
+原子上下文中必须使用`spinlock`。
+
+## mutex
+
+### mutex_init
+
+```c
+typedef struct qspinlock {
+	union {
+		atomic_t val;
+
+		struct {
+			u8	locked;
+			u8	pending;
+		};
+		struct {
+			u16	locked_pending;
+			u16	tail;
+		};
+	};
+} arch_spinlock_t;
+
+typedef struct raw_spinlock {
+	arch_spinlock_t raw_lock;
+} raw_spinlock_t;
+
+struct optimistic_spin_queue {
+    atomic_t tail;
+};
+
+// spin_lock加等待队列
+// 获取锁可能需要很长时间，获取等待队列的锁肯定很快
+struct mutex {
+	atomic_long_t		owner;
+	raw_spinlock_t		wait_lock;
+	struct optimistic_spin_queue osq;
+	struct list_head	wait_list;
+};
+
+void __mutex_init(struct mutex *lock, const char *name, ...)
+{
+    atomic_long_set(&lock->owner, 0);
+	raw_spin_lock_init(&lock->wait_lock);
+	INIT_LIST_HEAD(&lock->wait_list);
+	osq_lock_init(&lock->osq);
+}
+```
+
+### mutex_lock
+
+```c
+void __sched mutex_lock(struct mutex *lock)
+{
+    res = __mutex_trylock_fast(lock);
+    {
+        unsigned long curr = (unsigned long)current;
+	    unsigned long zero = 0UL;
+
+        // 原子指令设置owner为current
+	    atomic_long_try_cmpxchg_acquire(&lock->owner, &zero, curr);
+    }
+
+    if (!res)
+		__mutex_lock_slowpath(lock);
+        {
+            __mutex_lock(lock, TASK_UNINTERRUPTIBLE, ...);
+            {
+                __mutex_lock_common(lock, state, ...);
+                {
+                    // 禁止抢占
+                    preempt_disable();
+
+                    // 尝试cas加锁
+                    if (__mutex_trylock(lock)) return 0;
+                    {
+                        return !__mutex_trylock_common(lock, false);
+                        {
+                            for (;;) {
+                                // cas设置owner
+                                if (atomic_long_try_cmpxchg_acquire(&lock->owner, &owner, task | flags)) {
+                                    if (task == curr)
+                                        return NULL;
+                                    break;
+                                }
+                            }
+
+                            return __owner_task(owner);
+                        }
+                    }
+
+                    struct mutex_waiter waiter;
+                    waiter.task = current;
+
+                    // 先获取spin_lock
+                    raw_spin_lock(&lock->wait_lock);
+                    // 加入等待队列
+                    __mutex_add_waiter(lock, &waiter, &lock->wait_list);
+                    {
+                        list_add_tail(&waiter->list, list);
+                        if (__mutex_waiter_is_first(lock, waiter))
+                            __mutex_set_flag(lock, MUTEX_FLAG_WAITERS);
+                    }
+                    // 设置task状态
+                    set_current_state(state);
+
+                    for (;;) {
+                        if (__mutex_trylock(lock))
+			                goto acquired;
+
+                        // 检查是否被signal打断
+                        res = signal_pending_state(state, current);
+                        if (res) {
+                            ret = -EINTR;
+			                goto err;
+                        }
+
+                        raw_spin_unlock(&lock->wait_lock);
+
+                        // 调用schedule()让出cpu开始休眠
+		                schedule_preempt_disabled();
+
+                        raw_spin_lock(&lock->wait_lock);
+                    }
+
+                    raw_spin_lock(&lock->wait_lock);
+                    // 恢复状态
+                    __set_current_state(TASK_RUNNING);
+                     // 加锁成功，从等待队列移除
+                    __mutex_remove_waiter(lock, &waiter);
+                    raw_spin_unlock(&lock->wait_lock);
+
+                    // 恢复抢占
+                    preempt_enable();
+                    return 0;
+                }
+            }
+        }
+}
+```
+
+### mutex_unlock
+
+```c
+void __sched mutex_unlock(struct mutex *lock)
+{
+    __mutex_unlock_slowpath(lock, _RET_IP_);
+    {
+        for (;;) {
+            // cas解锁，判断是否有等待线程
+            if (atomic_long_try_cmpxchg_release(&lock->owner, &owner, __owner_flags(owner))) {
+                if (owner & MUTEX_FLAG_WAITERS)
+                    break;
+
+                return;
+            }
+        }
+        
+        // 获取等待队列的第一个线程
+        raw_spin_lock(&lock->wait_lock);
+        if (!list_empty(&lock->wait_list)) {
+            /* get the first entry from the wait-list: */
+            struct mutex_waiter *waiter = list_first_entry(&lock->wait_list, struct mutex_waiter, list);
+            
+            next = waiter->task;
+            wake_q_add(&wake_q, next);
+        }
+        raw_spin_unlock(&lock->wait_lock);
+
+        // 唤醒第一个等待者
+	    wake_up_q(&wake_q);
+        {
+            p = container_of(node, struct task_struct, wake_q);
+            // 修改状态为TASK_RUNNING等待调度
+		    WRITE_ONCE(p->__state, TASK_RUNNING);
+        }
+    }
+}
+```
+
+## spin_lock
+
+### spin_lock_init
+
+```c
+typedef struct qspinlock {
+	union {
+		atomic_t val;
+
+		struct {
+			u8	locked;
+			u8	pending;
+		};
+		struct {
+			u16	locked_pending;
+			u16	tail;
+		};
+	};
+} arch_spinlock_t;
+
+typedef struct raw_spinlock {
+	arch_spinlock_t raw_lock;
+} raw_spinlock_t;
+
+typedef struct spinlock {
+	union {
+		struct raw_spinlock rlock;
+    }
+} spinlock_t;
+
+// 直接设置lock->raw_lock->val = 0
+# define spin_lock_init(_lock)			\
+do {						\
+	spinlock_check(_lock);			\
+	*(_lock) = __SPIN_LOCK_UNLOCKED(_lock);	\
+} while (0)
+
+```
+
+### spin_lock
+
+```c
+static __always_inline void spin_lock(spinlock_t *lock)
+{
+	raw_spin_lock(&lock->rlock);
+    {
+        _raw_spin_lock(lock)
+        {
+            // 禁止抢占
+            preempt_disable();
+
+            do_raw_spin_lock(lock);
+            {
+                arch_spin_lock(&lock->raw_lock);
+                {
+                    int val = 0;
+
+                    if (likely(atomic_try_cmpxchg_acquire(&lock->val, &val, _Q_LOCKED_VAL)))
+                        return;
+
+                    queued_spin_lock_slowpath(lock, val);
+                    {
+                        arch_mcs_spin_lock_contended(&node->locked);
+                        {
+                            for (;;) {
+                                __cmpwait_relaxed(__PTR, VAL);
+                                {
+                                    // 此处的重点是使用了sevl和wfe指令
+                                    // sevl: Set Event Locally，通知自己
+                                    // wfe: Wait For Event
+                                    // 查资料wfe会让cpu进入低耗电模式
+                                    // 也只有内核能实现自旋锁的优化了
+                                    asm volatile(							\
+                                    "	sevl\n"							\
+                                    "	wfe\n"							\
+                                    "	ldxr" #sfx "\t%" #w "[tmp], %[v]\n"			\
+                                    "	eor	%" #w "[tmp], %" #w "[tmp], %" #w "[val]\n"	\
+                                    "	cbnz	%" #w "[tmp], 1f\n"				\
+                                    "	wfe\n", ...);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### spin_unlock
+
+```c
+static __always_inline void spin_unlock(spinlock_t *lock)
+{
+	raw_spin_unlock(&lock->rlock);
+    {
+        __raw_spin_unlock(lock);
+        {
+            do_raw_spin_unlock(lock);
+            {
+                smp_store_release(&lock->locked, 0);
+                {
+                    // stlr: Store-Release Register 
+                    // stores a 32-bit word or a 64-bit doubleword to a memory location, from a register
+                    // stlr执行完应该会通知其他cpu，跟spin_lock的wfe相呼应
+                    asm volatile ("stlr %1, %0"				\
+                        : "=Q" (*__p)				\
+                        : "r" (*(__u64 *)__u.__c)		\
+                        : "memory");
+                }
+            }
+
+            // 恢复抢占
+            preempt_enable();
+        }
+    }
+}
+```
+
+## rwlock
