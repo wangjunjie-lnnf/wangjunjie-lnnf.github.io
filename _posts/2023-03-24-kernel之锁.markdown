@@ -22,22 +22,22 @@ With the `spinlock`, however, there is no question of sleeping; the losers wait 
 
 ```c
 typedef struct qspinlock {
-	union {
-		atomic_t val;
+    union {
+        atomic_t val;
 
-		struct {
-			u8	locked;
-			u8	pending;
-		};
-		struct {
-			u16	locked_pending;
-			u16	tail;
-		};
-	};
+        struct {
+            u8    locked;
+            u8    pending;
+        };
+        struct {
+            u16    locked_pending;
+            u16    tail;
+        };
+    };
 } arch_spinlock_t;
 
 typedef struct raw_spinlock {
-	arch_spinlock_t raw_lock;
+    arch_spinlock_t raw_lock;
 } raw_spinlock_t;
 
 struct optimistic_spin_queue {
@@ -47,18 +47,18 @@ struct optimistic_spin_queue {
 // spin_lock加等待队列
 // 获取锁可能需要很长时间，获取等待队列的锁肯定很快
 struct mutex {
-	atomic_long_t		owner;
-	raw_spinlock_t		wait_lock;
-	struct optimistic_spin_queue osq;
-	struct list_head	wait_list;
+    atomic_long_t        owner;
+    raw_spinlock_t        wait_lock;
+    struct optimistic_spin_queue osq;
+    struct list_head    wait_list;
 };
 
 void __mutex_init(struct mutex *lock, const char *name, ...)
 {
     atomic_long_set(&lock->owner, 0);
-	raw_spin_lock_init(&lock->wait_lock);
-	INIT_LIST_HEAD(&lock->wait_list);
-	osq_lock_init(&lock->osq);
+    raw_spin_lock_init(&lock->wait_lock);
+    INIT_LIST_HEAD(&lock->wait_list);
+    osq_lock_init(&lock->osq);
 }
 ```
 
@@ -70,14 +70,14 @@ void __sched mutex_lock(struct mutex *lock)
     res = __mutex_trylock_fast(lock);
     {
         unsigned long curr = (unsigned long)current;
-	    unsigned long zero = 0UL;
+        unsigned long zero = 0UL;
 
         // 原子指令设置owner为current
-	    atomic_long_try_cmpxchg_acquire(&lock->owner, &zero, curr);
+        atomic_long_try_cmpxchg_acquire(&lock->owner, &zero, curr);
     }
 
     if (!res)
-		__mutex_lock_slowpath(lock);
+        __mutex_lock_slowpath(lock);
         {
             __mutex_lock(lock, TASK_UNINTERRUPTIBLE, ...);
             {
@@ -121,19 +121,19 @@ void __sched mutex_lock(struct mutex *lock)
 
                     for (;;) {
                         if (__mutex_trylock(lock))
-			                goto acquired;
+                            goto acquired;
 
                         // 检查是否被signal打断
                         res = signal_pending_state(state, current);
                         if (res) {
                             ret = -EINTR;
-			                goto err;
+                            goto err;
                         }
 
                         raw_spin_unlock(&lock->wait_lock);
 
                         // 调用schedule()让出cpu开始休眠
-		                schedule_preempt_disabled();
+                        schedule_preempt_disabled();
 
                         raw_spin_lock(&lock->wait_lock);
                     }
@@ -183,11 +183,11 @@ void __sched mutex_unlock(struct mutex *lock)
         raw_spin_unlock(&lock->wait_lock);
 
         // 唤醒第一个等待者
-	    wake_up_q(&wake_q);
+        wake_up_q(&wake_q);
         {
             p = container_of(node, struct task_struct, wake_q);
             // 修改状态为TASK_RUNNING等待调度
-		    WRITE_ONCE(p->__state, TASK_RUNNING);
+            WRITE_ONCE(p->__state, TASK_RUNNING);
         }
     }
 }
@@ -199,35 +199,35 @@ void __sched mutex_unlock(struct mutex *lock)
 
 ```c
 typedef struct qspinlock {
-	union {
-		atomic_t val;
+    union {
+        atomic_t val;
 
-		struct {
-			u8	locked;
-			u8	pending;
-		};
-		struct {
-			u16	locked_pending;
-			u16	tail;
-		};
-	};
+        struct {
+            u8    locked;
+            u8    pending;
+        };
+        struct {
+            u16    locked_pending;
+            u16    tail;
+        };
+    };
 } arch_spinlock_t;
 
 typedef struct raw_spinlock {
-	arch_spinlock_t raw_lock;
+    arch_spinlock_t raw_lock;
 } raw_spinlock_t;
 
 typedef struct spinlock {
-	union {
-		struct raw_spinlock rlock;
+    union {
+        struct raw_spinlock rlock;
     }
 } spinlock_t;
 
 // 直接设置lock->raw_lock->val = 0
-# define spin_lock_init(_lock)			\
-do {						\
-	spinlock_check(_lock);			\
-	*(_lock) = __SPIN_LOCK_UNLOCKED(_lock);	\
+# define spin_lock_init(_lock)            \
+do {                        \
+    spinlock_check(_lock);            \
+    *(_lock) = __SPIN_LOCK_UNLOCKED(_lock);    \
 } while (0)
 
 ```
@@ -237,7 +237,7 @@ do {						\
 ```c
 static __always_inline void spin_lock(spinlock_t *lock)
 {
-	raw_spin_lock(&lock->rlock);
+    raw_spin_lock(&lock->rlock);
     {
         _raw_spin_lock(lock)
         {
@@ -265,13 +265,13 @@ static __always_inline void spin_lock(spinlock_t *lock)
                                     // wfe: Wait For Event
                                     // 查资料wfe会让cpu进入低耗电模式
                                     // 也只有内核能实现自旋锁的优化了
-                                    asm volatile(							\
-                                    "	sevl\n"							\
-                                    "	wfe\n"							\
-                                    "	ldxr" #sfx "\t%" #w "[tmp], %[v]\n"			\
-                                    "	eor	%" #w "[tmp], %" #w "[tmp], %" #w "[val]\n"	\
-                                    "	cbnz	%" #w "[tmp], 1f\n"				\
-                                    "	wfe\n", ...);
+                                    asm volatile(                            \
+                                    "    sevl\n"                            \
+                                    "    wfe\n"                            \
+                                    "    ldxr" #sfx "\t%" #w "[tmp], %[v]\n"            \
+                                    "    eor    %" #w "[tmp], %" #w "[tmp], %" #w "[val]\n"    \
+                                    "    cbnz    %" #w "[tmp], 1f\n"                \
+                                    "    wfe\n", ...);
                                 }
                             }
                         }
@@ -288,7 +288,7 @@ static __always_inline void spin_lock(spinlock_t *lock)
 ```c
 static __always_inline void spin_unlock(spinlock_t *lock)
 {
-	raw_spin_unlock(&lock->rlock);
+    raw_spin_unlock(&lock->rlock);
     {
         __raw_spin_unlock(lock);
         {
@@ -299,9 +299,9 @@ static __always_inline void spin_unlock(spinlock_t *lock)
                     // stlr: Store-Release Register 
                     // stores a 32-bit word or a 64-bit doubleword to a memory location, from a register
                     // stlr执行完应该会通知其他cpu，跟spin_lock的wfe相呼应
-                    asm volatile ("stlr %1, %0"				\
-                        : "=Q" (*__p)				\
-                        : "r" (*(__u64 *)__u.__c)		\
+                    asm volatile ("stlr %1, %0"                \
+                        : "=Q" (*__p)                \
+                        : "r" (*(__u64 *)__u.__c)        \
                         : "memory");
                 }
             }

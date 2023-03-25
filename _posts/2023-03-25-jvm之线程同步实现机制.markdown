@@ -517,12 +517,12 @@ void InterpreterRuntime::monitorexit(JavaThread* thread, BasicObjectLock* elem)
                 for (;;) {
                     OrderAccess::release_store_ptr(&_owner, NULL);   // drop the lock
                     OrderAccess::storeload();                        // See if we need to wake a successor
-                    // 没有等待线性直接返回
+                    // 没有等待线程直接返回
                     if ((intptr_t(_EntryList) | intptr_t(_cxq)) == 0) {
                         return;
                     }
 
-                    // 有等待线性则唤醒等待队列头的线程
+                    // 有等待线程则唤醒等待队列头的线程
                     ObjectWaiter * w = _cxq;
                     ExitEpilog(Self, w);
                     {
