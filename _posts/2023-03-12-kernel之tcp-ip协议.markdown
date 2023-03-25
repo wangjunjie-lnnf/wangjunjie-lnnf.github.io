@@ -1808,10 +1808,58 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 }
 ```
 
-# 定时器
-
 # 拥堵控制
 
+`MSS`决定了一个包的大小，`window`决定了可以发多少`MSS`大小的包，
+假设发送方和接收方性能都很强，`window`可以设置成`1G`，
+如果中间有个路由器性能很差，处理不了这么快的发送速度呢，只会导致大量丢包和重传，效率低同时浪费带宽。
+解决此问题需要再加一个参数：拥堵窗口，拥堵窗口根据丢包情况动态调整，真正的发送窗口取min(wnd, cwnd)。
+
+注册拥堵控制算法
+
+```c
+static LIST_HEAD(tcp_cong_list);
+
+// 注册
+int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
+{
+    list_add_tail_rcu(&ca->list, &tcp_cong_list);
+}
+
+static struct tcp_congestion_ops cubictcp __read_mostly = {
+	.init		= cubictcp_init,
+	.ssthresh	= cubictcp_recalc_ssthresh,
+	.cong_avoid	= cubictcp_cong_avoid,
+	.set_state	= cubictcp_state,
+	.undo_cwnd	= tcp_reno_undo_cwnd,
+	.cwnd_event	= cubictcp_cwnd_event,
+	.pkts_acked = cubictcp_acked,
+	.owner		= THIS_MODULE,
+	.name		= "cubic",
+};
+
+static int __init cubictcp_register(void)
+{
+    // ubuntu-22默认值
+    tcp_register_congestion_control(&cubictcp);
+}
+
+struct tcp_congestion_ops tcp_reno = {
+	.flags		= TCP_CONG_NON_RESTRICTED,
+	.name		= "reno",
+	.owner		= THIS_MODULE,
+	.ssthresh	= tcp_reno_ssthresh,
+	.cong_avoid	= tcp_reno_cong_avoid,
+	.undo_cwnd	= tcp_reno_undo_cwnd,
+};
+
+void __init tcp_init(void)
+{
+    // 默认值
+    tcp_register_congestion_control(&tcp_reno);
+}
+
+```
 
 
 
