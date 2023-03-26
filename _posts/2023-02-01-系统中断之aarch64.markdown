@@ -311,7 +311,6 @@ unsigned int irq_of_parse_and_map(struct device_node *dev, int index)
     // 解析并映射hwirq到virq
     return irq_create_of_mapping(&oirq);
     {
-        。。。
         // 获取hwirq
         irq_domain_translate(domain, fwspec, &hwirq, &type);
 
@@ -340,7 +339,6 @@ unsigned int irq_of_parse_and_map(struct device_node *dev, int index)
                     radix_tree_insert(&domain->revmap_tree, hwirq, irq_data);
             }
         }
-        。。。
     }
 }
 
@@ -355,23 +353,28 @@ static inline int request_irq(unsigned int irq, irq_handler_t handler, unsigned 
 {
     return request_threaded_irq(irq, handler, NULL, flags, name, dev);
     {
-        。。。
         desc = irq_to_desc(irq);
-        。。。
         action->handler = handler;
         action->thread_fn = thread_fn;
         action->flags = irqflags;
         action->name = devname;
         action->dev_id = dev_id;
-        。。。
+
         retval = __setup_irq(irq, desc, action);
     }
 }
 
 ```
 
-### 总结
-
 上述几个角色的关系
 
 ![interupt-relation](/assets/images/2023-02-01/interupt-relation.png)
+
+
+## 中断处理
+
+## threaded interrupts model
+
+## top and bottom halves
+
+

@@ -1,0 +1,158 @@
+---
+layout: post
+title:  "性能优化工具"
+date:   2023-03-26 09:22:07 +0000
+categories: jekyll
+tags: kernel perf
+---
+
+# 性能优化
+
+性能优化的第一步是先确定问题，确定问题不是靠`可能、也许、大概`，需要确切的数据支撑。
+
+## 观测工具类型
+
+### Profiling
+
+`Profiling`的特点是基于时间抽样采集数据，典型应用是用于分析cpu使用率的火焰图。
+
+`Profiling` characterizes the target by `collecting a set of samples or snapshots of its behavior`. CPU usage is a common target of profiling, where timer-based samples are taken of the instruction pointer or stack trace to characterize CPU-consuming code paths. These samples are usually collected at a fixed rate, such as 100 Hz (cycles per second) across all CPUs, and for a short dura tion such as one minute. Profiling tools, or profilers, often use 99 Hz instead of 100 Hz to avoid sampling in lockstep with target activity, which could lead to over- or undercounting.
+
+`Profiling` (and Tracing) are typically only `enabled on an as-needed` basis, since they can cost some CPU overhead to collect, and storage overhead to store. The magnitudes of these overheads depend on the tool and the rate of events it instruments. Timer-based profil- ers are generally safer: the event rate is known, so its overhead can be predicted, and the event rate can be selected to have negligible overhead.
+
+
+### Tracing
+
+`Tracing`不同于`Profiling`，`Tracing`会采集所有事件，类似debug程序时加断点，每次经过断点都会停下来收集信息。`Tracing`对应用性能有一定影响，一般是按需启用。
+
+`Tracing` instruments every occurrence of an event, and can store event-based details for later analysis or produce a summary. This is similar to profiling, but the intent is to `collect or inspect all events, not just a sample`. Tracing can incur higher CPU and storage overheads than profiling, which can slow the target of tracing. This should be taken into consideration, as it may negatively affect the production workload, and measured timestamps may also be skewed by the tracer. As with profiling, tracing is typically only used as needed.
+
+#### System-Wide
+These tracing tools examine system-wide activity in the context of system software or hardware resources, using kernel tracing facilities. Linux tools include:
+* tcpdump(8): Network packet tracing (uses libpcap)
+* biosnoop(8): Block I/O tracing (uses BCC or bpftrace)
+* execsnoop(8): New processes tracing (uses BCC or bpftrace)
+* perf(1): The standard Linux profiler, can also trace events
+* perf trace: A special perf subcommand that traces system calls system-wide
+* Ftrace: The Linux built-in tracer
+* BCC: A BPF-based tracing library and toolkit
+* bpftrace: A BPF-based tracer (bpftrace(8)) and toolkit
+
+#### Per-Process
+These tracing tools are process-oriented, as are the operating system frameworks on which they are based. Linux tools include:
+* strace(1): System call tracing
+* gdb(1): A source-level debugger
+
+### Monitoring
+
+`Monitoring`会持续的采集并存储指标数据，用于后续的分析和图表展示。最著名的监控系统是`Prometheus`。
+
+Modern monitoring software runs `agents` (also known as `exporters` or `plugins`) on each system to record kernel and application metrics. These can include agents for specific applications and targets, for example, the MySQL database server, the Apache Web Server, and the Memcached caching system. Such agents can provide detailed application request metrics that are not available from system counters alone.
+
+典型的监控系统架构
+
+![monitoring-architecture](/assets/images/2023-03-26/monitoring-architecture.png)
+
+## 观测工具
+
+linux上各个层次常用的观测工具
+
+![tools](/assets/images/2023-03-26/tools.png)
+
+常用工具所在的包
+
+| Package | Provides |
+| - | - |
+| procps | ps(1), vmstat(8), uptime(1), top(1) |
+| util-linux | dmesg(1), lsblk(1), lscpu(1) |
+| sysstat | iostat(1), mpstat(1), pidstat(1), sar(1) |
+| iproute2 | ip(8), ss(8), nstat(8), tc(8) |
+| bcc-tools | opensnoop(8), execsnoop(8), runqlat(8) |
+| bpftrace | bpftrace |
+| trace-cmd | trace-cmd(1) |
+
+这些工具可以分成4类
+
+![tools-type](/assets/images/2023-03-26/tools-type.png)
+
+Event-based tools include profilers and tracers. Profilers observe activity by taking a series of snapshots on events, painting a coarse picture of the target. Tracers instrument every event
+of interest, and may perform processing on them.
+
+### System-Wide
+
+These tools examine system-wide activity in the context of system software or hardware resources, using kernel counters. Linux tools include:
+* vmstat(8): Virtual and physical memory statistics, system-wide
+* mpstat(1): Per-CPU usage
+* iostat(1): Per-disk I/O usage, reported from the block device interface
+* nstat(8): TCP/IP stack statistics
+* sar(1): Various statistics; can also archive them for historical reporting
+
+### Per-Process
+
+These tools are process-oriented and use counters that the kernel maintains for each process. Linux tools include:
+
+* ps(1): Shows process status, shows various process statistics, including memory and CPU usage.
+* top(1): Shows top processes, sorted by CPU usage or another statistic.
+* pmap(1): Lists process memory segments with usage statistics.
+
+
+## 指标数据来源
+
+常用的观测工具的数据来源
+
+![tracing-sources](/assets/images/2023-03-26/tracing-sources.png)
+
+| Type | Source |
+| - | - |
+| Per-process counters | /proc |
+| System-wide counters | /proc, /sys |
+| Device configuration and counters | /sys |
+| Cgroup statistics | /sys/fs/cgroup |
+| Per-process tracing | ptrace |
+| Hardware counters (PMCs) | perf_event |
+| Network statistics | netlink |
+| Network packet capture | libpcap |
+| Per-thread latency metrics | Delay accounting |
+| System-wide tracing | ftrace, software events, kprobes, uprobes |
+
+### uprobe
+
+参考 [uprobe](/jekyll/2023/02/06/性能优化之uprobe.html)
+
+### kprobe
+
+参考 [kprobe](/jekyll/2023/02/07/性能优化之kprobe.html)
+
+### usdt
+
+参考 [usdt](/jekyll/2023/02/06/性能优化之usdt.html)
+
+### tracepoint
+
+TODO
+
+### ftrace
+
+TODO
+
+## 影响应用性能的因素
+
+对性能影响最大的因素
+
+* cpu：[任务调度](/jekyll/2023/03/22/kernel之任务调度.html)
+* 内存：[内存管理](/jekyll/2023/03/23/kernel之内存管理.html)
+* 文件系统: [文件系统](/jekyll/2023/03/09/kernel之ext4文件系统.html)
+* 磁盘io: TODO block设备管理
+* 网络io：[网络协议](/jekyll/2023/03/12/kernel之tcp-ip协议.html)
+
+## cpu
+
+## memory
+
+## ext4
+
+## disk 
+
+## network
+
+
