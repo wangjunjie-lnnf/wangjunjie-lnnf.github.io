@@ -1,9 +1,296 @@
 ---
 layout: post
 title:  "jvm之类加载"
-date:   2023-03-24 09:22:07 +0000
+date:   2023-03-26 09:22:07 +0000
 categories: jekyll
 tags: jvm classloader
 ---
 
-# usdt
+# classloader
+
+## 创建bootstrapCL
+
+```c
+// java入口
+int main(int argc, char **argv)
+{
+    return JLI_Launch(...);
+    {
+        /* Set default CLASSPATH */
+        cpath = getenv("CLASSPATH");
+        if (cpath == NULL) {
+            cpath = ".";
+        }
+        // 默认-Djava.class.path=.
+        SetClassPath(cpath);
+
+        ParseArguments(&argc, &argv, &mode, &what, ...);
+        {
+            // 解析命令行参数修改classpath，设置-Djava.class.path=classpath
+            if (JLI_StrCmp(arg, "-classpath") == 0 || JLI_StrCmp(arg, "-cp") == 0) {
+                SetClassPath(*argv);
+            }
+        }
+
+        // 如果命令行是java -jar xxx, 设置-Djava.class.path=jar的路径
+        if (mode == LM_JAR) {
+            SetClassPath(what);
+        }
+    }
+}
+
+// 单链表结构存储bootstrap的搜索路径
+ClassPathEntry* ClassLoader::_first_entry         = NULL;
+ClassPathEntry* ClassLoader::_last_entry          = NULL;
+
+// jvm初始化
+jint Threads::create_vm(JavaVMInitArgs* args, ...) {
+    // Initialize system properties.
+    Arguments::init_system_properties();
+    {
+        _java_ext_dirs = new SystemProperty("java.ext.dirs", NULL,  true);
+        _java_endorsed_dirs = new SystemProperty("java.endorsed.dirs", NULL,  true);
+        _sun_boot_library_path = new SystemProperty("sun.boot.library.path", NULL,  true);
+        _java_library_path = new SystemProperty("java.library.path", NULL,  true);
+        _java_home =  new SystemProperty("java.home", NULL,  true);
+        _sun_boot_class_path = new SystemProperty("sun.boot.class.path", NULL,  true);
+        _java_class_path = new SystemProperty("java.class.path", "",  true);
+
+        // Set OS specific system properties values
+        os::init_system_properties_values();
+        {
+            // 利用linker获取libjvm.so的绝对路径
+            // {JAVA_HOME}/lib/{arch}/{client|server}/libjvm.so
+            os::jvm_path(buf, bufsize);
+            {
+                dll_address_to_library_name(...);
+            }
+
+            // 根据libjvm.so的路径计算_sun_boot_library_path={JAVA_HOME}/lib/{arch}
+            Arguments::set_dll_dir(buf);
+
+            // 根据libjvm.so的路径计算_java_home
+            Arguments::set_java_home(buf);
+
+            // 根据_java_home计算bootstrap classpath
+            set_boot_path('/', ':');
+            {
+                static const char classpath_format[] =
+                    "%/lib/resources.jar:"
+                    "%/lib/rt.jar:"
+                    "%/lib/sunrsasign.jar:"
+                    "%/lib/jsse.jar:"
+                    "%/lib/jce.jar:"
+                    "%/lib/charsets.jar:"
+                    "%/lib/jfr.jar:"
+                    "%/classes";
+                // 把%替换为_java_home
+                char* sysclasspath = format_boot_path(classpath_format, home, home_len, fileSep, pathSep);
+                Arguments::set_sysclasspath(sysclasspath);
+            }
+
+            // 动态链接库搜索路径
+            // _java_library_path=env[LD_LIBRARY_PATH]:/usr/java/packages/lib/aarch64:/lib:/usr/lib
+            Arguments::set_library_path(ld_library_path);
+
+            // ExtClassLoader的加载路径
+            // _java_ext_dirs={JAVA_HOME}/lib/ext:/usr/java/packages/lib/ext
+            Arguments::set_ext_dirs(buf);
+
+            // _java_endorsed_dirs={JAVA_HOME}/lib/endorsed
+            Arguments::set_endorsed_dirs(buf);
+        }
+    }
+
+    Arguments::parse(args);
+    {
+        parse_vm_init_args(args);
+        {
+            SysClassPath scp(Arguments::get_sysclasspath());
+            parse_each_vm_init_arg(args, &scp, ...);
+            {
+                // 允许命令行参数修改bootstrap classpath
+                // -bootclasspath
+                if (match_option(option, "-Xbootclasspath:", &tail)) {
+                    scp_p->reset_path(tail);
+                // -bootclasspath/a:
+                } else if (match_option(option, "-Xbootclasspath/a:", &tail)) {
+                    scp_p->add_suffix(tail);
+                // -bootclasspath/p:
+                } else if (match_option(option, "-Xbootclasspath/p:", &tail)) {
+                    scp_p->add_prefix(tail);
+                } else if (match_option(option, "-D", &tail)) {
+                    // 设置_java_class_path为-Djava.class.path的值
+                    add_property(tail);
+                }
+            }
+        }
+    }
+
+    init_globals();
+    {
+        classLoader_init();
+        {
+            ClassLoader::initialize();
+            {
+                // 加载libzip.so用于解析jar
+                load_zip_library();
+                setup_bootstrap_search_path();
+                {
+                    const char* sys_class_path = Arguments::get_sysclasspath();
+                    // 解析bootstrap的路径到全局的单链表结构
+                    setup_search_path(sys_class_path);
+                }
+            }
+        }
+
+        universe_init();
+        {
+            // 创建bootstrap classloader
+            ClassLoaderData::init_null_class_loader_data();
+            {
+                _the_null_class_loader_data = new ClassLoaderData((oop)NULL, false, Dependencies());
+                ClassLoaderDataGraph::_head = _the_null_class_loader_data;
+            }
+        }
+
+        // 预先加载核心类
+        universe_post_init();
+        {
+            // Setup preallocated empty java.lang.Class array
+            Universe::_the_empty_class_klass_array = oopFactory::new_objArray(SystemDictionary::Class_klass(), 0, ...);
+            SystemDictionary::resolve_or_fail(vmSymbols::java_lang_OutOfMemoryError(), true, ...);
+            SystemDictionary::resolve_or_fail(vmSymbols::java_lang_NullPointerException(), true, ...);
+            // 加载著名的sun.misc.Unsafe类
+            InstanceKlass::cast(SystemDictionary::misc_Unsafe_klass())->link_class(...);
+        }
+    }
+
+    // 加载并初始化核心类
+    initialize_class(vmSymbols::java_lang_String(), ...);
+    initialize_class(vmSymbols::java_lang_System(), ...);
+    initialize_class(vmSymbols::java_lang_Class(), ...);
+    initialize_class(vmSymbols::java_lang_OutOfMemoryError(), ...);
+    initialize_class(vmSymbols::java_lang_NullPointerException(), ...)
+
+    // 创建用于加载应用代码的system classloader
+    SystemDictionary::compute_java_system_loader(THREAD);
+    {
+        // 调用ClassLoader.getSystemClassLoader()创建
+        JavaCalls::call_static(&result,
+                         KlassHandle(THREAD, WK_KLASS(ClassLoader_klass)),
+                         vmSymbols::getSystemClassLoader_name(),
+                         vmSymbols::void_classloader_signature(), ...);
+
+        _java_system_loader = (oop)result.get_jobject();
+    }
+}
+
+```
+
+## 创建SystemCL
+
+```java
+
+public class Launcher {
+
+    private ClassLoader loader;
+
+    public Launcher() {
+        // ExtClassLoader继承URLClassLoader
+        ClassLoader extcl = ExtClassLoader.getExtClassLoader();
+        {
+            return new ExtClassLoader(System.getProperty("java.ext.dirs"));
+        }
+
+        // AppClassLoader继承URLClassLoader，parent为ExtClassLoader
+        loader = AppClassLoader.getAppClassLoader(extcl);
+        {
+            return new AppClassLoader(System.getProperty("java.class.path"), extcl);
+        }
+
+        // 设置为contextClassLoader
+        Thread.currentThread().setContextClassLoader(loader);
+    }
+
+}
+
+public abstract class ClassLoader {
+
+    private static ClassLoader scl;
+
+    public static ClassLoader getSystemClassLoader() {
+        initSystemClassLoader();
+        {
+            sun.misc.Launcher l = sun.misc.Launcher.getLauncher();
+            scl = l.getClassLoader();
+        }
+
+        return scl;
+    }
+
+}
+
+```
+
+## 加载mainClass
+
+```c
+
+int JavaMain(void * _args)
+{
+    // 初始化jvm
+    InitializeJVM(&vm, &env, &ifn);
+
+    // 加载mainClass
+    mainClass = LoadMainClass(env, mode, what);
+    {
+        // 调用sun.launcher.LauncherHelper.checkAndLoadMain()
+        mid = (*env)->GetStaticMethodID(env, cls,
+                "checkAndLoadMain",
+                "(ZILjava/lang/String;)Ljava/lang/Class;");
+
+        result = (*env)->CallStaticObjectMethod(env, cls, mid, USE_STDERR, mode, str);
+    }
+
+    // 查找main静态方法
+    mainID = (*env)->GetStaticMethodID(env, mainClass, "main", "([Ljava/lang/String;)V");
+
+    // 开始执行main方法
+    (*env)->CallStaticVoidMethod(env, mainClass, mainID, mainArgs);
+
+    return (*env)->ExceptionOccurred(env) == NULL ? 0 : 1;
+}
+
+```
+
+```java
+
+public enum LauncherHelper {
+
+    private static final ClassLoader scloader = ClassLoader.getSystemClassLoader();
+
+    public static Class<?> checkAndLoadMain(boolean printToStderr, int mode, String what) {
+
+        String cn = null;
+        switch (mode) {
+            // 直接指定mainClass
+            case LM_CLASS:
+                cn = what;
+                break;
+            // 解析指定的jar获取mainClass
+            case LM_JAR:
+                cn = getMainClassFromJar(what);
+                break;
+        }
+        cn = cn.replace('/', '.');
+
+        // 使用SystemClassLoader加载mainClass
+        Class<?> mainClass = scloader.loadClass(cn);
+
+        return mainClass;
+    }
+
+}
+
+```
