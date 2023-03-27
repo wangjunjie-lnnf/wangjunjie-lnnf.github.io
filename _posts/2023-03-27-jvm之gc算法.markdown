@@ -6,4 +6,271 @@ categories: jekyll
 tags: jvm gc
 ---
 
-# usdt
+# gc
+
+## gc相关参数
+
+```c++
+
+jint Threads::create_vm(JavaVMInitArgs* args, ...)
+{
+    Arguments::parse(args);
+    {
+        parse_vm_init_args(args);
+        {
+            parse_each_vm_init_arg(args, &scp, ...);
+            {
+                // 打印gc信息
+                if (match_option(option, "-verbose", &tail)) {
+                    if (!strcmp(tail, ":gc")) {
+                        FLAG_SET_CMDLINE(bool, PrintGC, true);
+                    }
+                } else if (match_option(option, "-Xnoclassgc", &tail)) {
+                    // 默认回收class
+                    FLAG_SET_CMDLINE(bool, ClassUnloading, false);
+                } else if (match_option(option, "-Xmn", &tail)) {
+                    FLAG_SET_CMDLINE(uintx, MaxNewSize, ...);
+                    FLAG_SET_CMDLINE(uintx, NewSize, ...);
+                } else if (match_option(option, "-Xms", &tail)) {
+                    FLAG_SET_CMDLINE(uintx, InitialHeapSize, ...);
+                } else if (match_option(option, "-Xmx", &tail) || match_option(option, "-XX:MaxHeapSize=", &tail)) {
+                    FLAG_SET_CMDLINE(uintx, MaxHeapSize, ...);
+                } else if (match_option(option, "-Xss", &tail)) {
+                    FLAG_SET_CMDLINE(intx, ThreadStackSize, ...);
+                } else if (match_option(option, "-Xloggc:", &tail)) {
+                    // 打印gc信息到指定文件
+                    _gc_log_filename = strdup(tail);
+                    FLAG_SET_CMDLINE(bool, PrintGC, true);
+                    FLAG_SET_CMDLINE(bool, PrintGCTimeStamps, true);
+                }
+            }
+        }
+    }
+
+    Arguments::apply_ergo();
+    {
+        set_ergonomics_flags();
+        {
+            select_gc();
+            {
+                if (!gc_selected()) {
+                    // 设置默认gc
+                    select_gc_ergonomically();
+                    {
+                        // 配置超过2核2G视为server
+                        if (os::is_server_class_machine()) {
+                            if (should_auto_select_low_pause_collector()) {
+                                // 设置了cms相关参数
+                                FLAG_SET_ERGO(bool, UseConcMarkSweepGC, true);
+                            } else {
+                                // 默认UseParallelGC
+                                FLAG_SET_ERGO(bool, UseParallelGC, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        set_heap_size();
+        {
+            julong phys_mem = MIN2(os::physical_memory(), (julong)MaxRAM);
+
+            // MaxHeapSize默认96M
+            // InitialHeapSize默认0
+
+            // 下文中的参数全部使用默认值
+            if (FLAG_IS_DEFAULT(MaxHeapSize)) {
+                julong reasonable_max = (julong)((phys_mem * 25) / 100);
+                const julong reasonable_min = (julong)((phys_mem * 50) / 100);
+
+                if (reasonable_min < MaxHeapSize) {
+                    reasonable_max = reasonable_min;
+                } else {
+                    reasonable_max = MAX2(reasonable_max, (julong)MaxHeapSize);
+                }
+
+                if (!FLAG_IS_DEFAULT(InitialHeapSize)) {
+                    reasonable_max = MAX2(reasonable_max, (julong)InitialHeapSize);
+                }
+
+                // max(物理内存/4, 96M)
+                FLAG_SET_ERGO(uintx, MaxHeapSize, (uintx)reasonable_max);
+            }
+
+            if (InitialHeapSize == 0 || min_heap_size() == 0) {
+                // 默认OldSize=4M
+                // 默认NewSize=1M
+                julong reasonable_minimum = (julong)(OldSize + NewSize);
+                reasonable_minimum = MIN2(reasonable_minimum, (julong)MaxHeapSize);
+
+                julong reasonable_initial = (julong)((phys_mem * 1.5625) / 100);
+
+                reasonable_initial = MAX3(reasonable_initial, reasonable_minimum, (julong)min_heap_size());
+                reasonable_initial = MIN2(reasonable_initial, (julong)MaxHeapSize);
+
+                // min(phys_mem * 1.5625%, MaxHeapSize)
+                FLAG_SET_ERGO(uintx, InitialHeapSize, (uintx)reasonable_initial);
+            }
+        }
+    }
+
+    init_globals();
+    {
+        universe_init();
+        {
+            Universe::initialize_heap();
+            {
+                if (UseParallelGC) {
+                    Universe::_collectedHeap = new ParallelScavengeHeap();
+                } else if (UseG1GC) {
+                    G1CollectorPolicyExt* g1p = new G1CollectorPolicyExt();
+                    g1p->initialize_all();
+                    Universe::_collectedHeap = new G1CollectedHeap(g1p);
+                } else {
+                    // 忽略UseSerialGC和UseConcMarkSweepGC
+                    if (UseSerialGC) {
+                        gc_policy = new MarkSweepPolicy();
+                    } else if (UseConcMarkSweepGC) {
+
+                    } else {
+                        // 2核2G以下默认同UseSerialGC
+                        gc_policy = new MarkSweepPolicy();
+                    }
+
+                    gc_policy->initialize_all();
+
+                    Universe::_collectedHeap = new GenCollectedHeap(gc_policy);
+                }
+
+                // 初始化
+                Universe::heap()->initialize();
+            }
+        }
+    }
+}
+
+```
+
+## CollectedHeap接口
+
+```c++
+
+class CollectedHeap {
+
+    // 初始化
+    virtual jint initialize() = 0;
+    virtual void post_initialize() = 0;
+
+    // 内存分配：核心接口，heap是为了分配内存而生
+    virtual HeapWord* allocate_new_tlab(size_t size);
+    virtual HeapWord* mem_allocate(size_t size, bool* gc_overhead_limit_was_exceeded) = 0;
+
+    // 主动gc相关
+    virtual void collect(GCCause::Cause cause) = 0;
+    virtual void do_full_collection(bool clear_all_soft_refs) = 0;
+
+    // heap枚举
+    virtual void oop_iterate(ExtendedOopClosure* cl) = 0;
+    virtual void object_iterate(ObjectClosure* cl) = 0;
+
+    // 常用inline static工具方法
+    inline static HeapWord* allocate_from_tlab(KlassHandle klass, Thread* thread, size_t size)
+    {
+        // 指针碰撞
+        HeapWord* obj = thread->tlab().allocate(size);
+        if (obj != NULL) {
+            return obj;
+        }
+
+        return allocate_from_tlab_slow(klass, thread, size);
+        {
+            // tlab还剩很多，跳过tlab从heap里分配
+            if (thread->tlab().free() > thread->tlab().refill_waste_limit()) {
+                thread->tlab().record_slow_allocation(size);
+                return NULL;
+            }
+
+            // 生成新的tlab并从tlab分配
+            HeapWord* obj = Universe::heap()->allocate_new_tlab(new_tlab_size);
+            thread->tlab().fill(obj, obj + size, new_tlab_size);
+            return obj;
+        }
+    }
+
+    inline static oop obj_allocate(KlassHandle klass, int size, TRAPS)
+    {
+        HeapWord* obj = common_mem_allocate_init(klass, size, CHECK_NULL);
+        {
+            // 为指定类的实例分配内存
+            HeapWord* obj = common_mem_allocate_noinit(klass, size, CHECK_NULL);
+            {
+                // 先尝试tlab
+                result = allocate_from_tlab(klass, THREAD, size);
+                if (result != NULL) {
+                    return result;
+                }
+
+                // 直接从heap里分配
+                result = Universe::heap()->mem_allocate(size, &gc_overhead_limit_was_exceeded);
+                if (result != NULL) {
+                    return result;
+                }
+
+                if (!gc_overhead_limit_was_exceeded) {
+                    // heap空间不足
+                    report_java_out_of_memory("Java heap space");
+                } else {
+                    // 尝试了太多次
+                    report_java_out_of_memory("GC overhead limit exceeded");
+                }
+            }
+
+            // 初始化实例
+            init_obj(obj, size);
+            {
+                const size_t hs = oopDesc::header_size();
+                // header之后用0填充
+                Copy::fill_to_aligned_words(obj + hs, size - hs);
+            }
+
+            return obj;
+        }
+
+        post_allocation_setup_obj(klass, obj, size);
+        {
+            // 指定class初始化自己的实例
+            post_allocation_setup_common(klass, obj_ptr);
+            {
+                post_allocation_setup_no_klass_install(klass, obj_ptr);
+                {
+                    oop obj = (oop)obj_ptr;
+                    if (UseBiasedLocking && (klass() != NULL)) {
+                        obj->set_mark(klass->prototype_header());
+                    } else {
+                        // 设置默认对象头
+                        obj->set_mark(markOopDesc::prototype());
+                    }
+                }
+
+                // 设置对象头中的class
+                obj->release_set_klass(klass());
+            }
+        }
+
+        return (oop)obj;
+    }
+
+    inline static oop array_allocate(KlassHandle klass, int size, int length, TRAPS)
+    {
+        HeapWord* obj = common_mem_allocate_init(klass, size, CHECK_NULL);
+        post_allocation_setup_array(klass, obj, length);
+        {
+            post_allocation_setup_common(klass, obj_ptr);
+        }
+
+        return (oop)obj;
+    }
+}
+
+```
