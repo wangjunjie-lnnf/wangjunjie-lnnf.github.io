@@ -226,7 +226,6 @@ class CollectedHeap {
                 }
             }
 
-            // 初始化实例
             init_obj(obj, size);
             {
                 const size_t hs = oopDesc::header_size();
@@ -273,12 +272,370 @@ class CollectedHeap {
     }
 }
 
+class CollectorPolicy {
+
+    virtual void initialize_alignments() = 0;
+    virtual void initialize_flags();
+    virtual void initialize_size_info();
+
+    size_t _initial_heap_byte_size;
+    size_t _max_heap_byte_size;
+    size_t _min_heap_byte_size;
+
+    size_t _space_alignment;
+    size_t _heap_alignment;
+
+    virtual void initialize_all() {
+        initialize_alignments();
+        initialize_flags();
+        initialize_size_info();
+    }
+
+    virtual HeapWord* mem_allocate_work(size_t size,
+                                        bool is_tlab,
+                                        bool* gc_overhead_limit_was_exceeded) = 0;
+
+}
+
 ```
 
 ## ParallelGC
 
 ### 初始化
 
+初始化之后的heap的示意图，绿色表示已经申请了物理内存
+
+![ps-heap](/assets/images/2023-03-27/ps-heap.png)
+
+```c++
+
+class ParallelScavengeHeap : public CollectedHeap {
+
+    // 按默认行为
+    jint ParallelScavengeHeap::initialize() {
+        // 确定XxxNewSize、XxxOldSize、XxxHeapSize
+        _collector_policy = new GenerationSizer();
+        _collector_policy->initialize_all();
+        {
+            initialize_alignments();
+            {
+                // young和old之间的边界
+                _space_alignment = _gen_alignment = 512 * K;
+
+                // cardTable按page申请内存，cardTable的1字节标记heap的512字节
+                _heap_alignment = compute_heap_alignment();
+                {
+                    return 512 * os::vm_page_size();
+                }
+            }
+
+            initialize_flags();
+            {
+                TwoGenerationCollectorPolicy::initialize_flags();
+                {
+                    GenCollectorPolicy::initialize_flags();
+                    {
+                        CollectorPolicy::initialize_flags();
+                        {
+                            // InitialHeapSize和MaxHeapSize按_heap_alignment对齐
+                            _min_heap_byte_size = align_size_up(_min_heap_byte_size, _heap_alignment);
+                            FLAG_SET_ERGO(uintx, InitialHeapSize, align_size_up(InitialHeapSize, _heap_alignment));
+                            FLAG_SET_ERGO(uintx, MaxHeapSize, align_size_up(MaxHeapSize, _heap_alignment));
+                            _initial_heap_byte_size = InitialHeapSize;
+                            _max_heap_byte_size = MaxHeapSize;
+                        }
+
+                        // 计算NewSize = max(NewSize, 3 * _space_alignment)
+
+                        // 最小的young: eden + two survivors
+                        uintx smallest_new_size = align_size_up(3 * _space_alignment, _gen_alignment);
+                        // 最小的heap = smallest_new_size + old
+                        uintx smallest_heap_size = align_size_up(smallest_new_size + _space_alignment, _heap_alignment);
+                    
+                        NewSize =  MAX2(smallest_new_size, (uintx)align_size_down(NewSize, _gen_alignment));
+                        _initial_gen0_size = NewSize;
+                    }
+
+                    // 调节NewSize、OldSize、MaxHeapSize的关系
+                    if (NewSize + OldSize > MaxHeapSize) {
+                        if (_max_heap_size_cmdline) {
+                            // 如果指定了MaxHeapSize则按比例减少NewSize和OldSize
+                            uintx calculated_size = NewSize + OldSize;
+                            double shrink_factor = (double) MaxHeapSize / calculated_size;
+                            uintx smaller_new_size = align_size_down((uintx)(NewSize * shrink_factor), _gen_alignment);
+                            FLAG_SET_ERGO(uintx, NewSize, MAX2(young_gen_size_lower_bound(), smaller_new_size));
+                            FLAG_SET_ERGO(uintx, OldSize, MaxHeapSize - NewSize);
+                        } else {
+                            // 未指定MaxHeapSize则增加MaxHeapSize
+                            FLAG_SET_ERGO(uintx, MaxHeapSize, align_size_up(NewSize + OldSize, _heap_alignment));
+                            _max_heap_byte_size = MaxHeapSize;
+                        }
+                    }
+                }                
+            }
+
+            initialize_size_info();
+            {
+                TwoGenerationCollectorPolicy::initialize_size_info();
+                {
+                    GenCollectorPolicy::initialize_size_info();
+                    {
+                        // 根据NewRatio和XxxHeapSize计算XxxNewSize
+                        max_new_size = scale_by_NewRatio_aligned(_max_heap_byte_size);
+                        _min_gen0_size = MAX2(scale_by_NewRatio_aligned(_min_heap_byte_size), NewSize);
+                        desired_new_size = MAX2(scale_by_NewRatio_aligned(_initial_heap_byte_size), NewSize);
+                    }
+
+                    // 根据XxxNewSize和XxxHeapSize计算XxxOldSize
+                    _max_gen1_size = MAX2(_max_heap_byte_size - _max_gen0_size, _gen_alignment);
+                    _min_gen1_size = MAX2(_min_heap_byte_size - _min_gen0_size, _gen_alignment);
+                    _initial_gen1_size = MAX2(_initial_heap_byte_size - _initial_gen0_size, _gen_alignment);
+                    FLAG_SET_ERGO(uintx, OldSize, _initial_gen1_size);
+                }
+            }
+        }
+
+        // 使用mmap按MaxHeapSize申请线性地址空间
+        const size_t heap_size = _collector_policy->max_heap_byte_size();
+        ReservedSpace heap_rs = Universe::reserve_heap(heap_size, _collector_policy->heap_alignment());
+        {
+            // 默认不限制heap线性地址，选择UseCompressedOops时选择较大的base可以空出地址中较高的bit
+            char* addr = Universe::preferred_heap_base(total_reserved, alignment, Universe::UnscaledNarrowOop);
+            base = os::reserve_memory(size, NULL, alignment);
+            {
+                flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS;
+                addr = (char*)::mmap(requested_addr, bytes, PROT_NONE, flags, ...);
+            }
+        }
+
+        // 线性地址空间范围
+        _reserved = MemRegion((HeapWord*)heap_rs.base(),
+                              (HeapWord*)(heap_rs.base() + heap_rs.size()));
+
+        // 创建cardTable: 覆盖3个region: eden, from, old
+        CardTableExtension* const barrier_set = new CardTableExtension(_reserved, 3);
+        {
+            _covered = new MemRegion[_max_covered_regions];
+        }
+
+        barrier_set->initialize();
+        {
+            // 每个card占1字节对应heap的512字节，计算需要的card数量
+            _guard_index = cards_required(_whole_heap.word_size()) - 1;
+            _last_valid_index = _guard_index - 1;
+
+            // card按page取整
+            _byte_map_size = compute_byte_map_size();
+
+            // 使用mmap为cardTable申请线性地址
+            ReservedSpace heap_rs(_byte_map_size, rs_align, false);
+
+            _byte_map = (jbyte*) heap_rs.base();
+            // 为方便计算byte_map_base表示从0开始card，实际[0, low_bound]之间是空的
+            byte_map_base = _byte_map - (uintptr_t(low_bound) >> card_shift);
+
+            // cardTable最后一个page
+            byte* guard_card = &_byte_map[_guard_index];
+            uintptr_t guard_page = align_size_down((uintptr_t)guard_card, _page_size);
+            _guard_region = MemRegion((HeapWord*)guard_page, _page_size);
+            // 为cardTable的最后一个page申请物理内存
+            os::commit_memory_or_exit((char*)guard_page, _page_size, _page_size, ...);
+
+            // 记录每个region的边界
+            _lowest_non_clean = NEW_C_HEAP_ARRAY(CardArr, _max_covered_regions, mtGC);
+            _lowest_non_clean_chunk_size = NEW_C_HEAP_ARRAY(size_t, _max_covered_regions, mtGC);
+            _lowest_non_clean_base_chunk_index = NEW_C_HEAP_ARRAY(uintptr_t, _max_covered_regions, mtGC);
+            _last_LNC_resizing_collection = NEW_C_HEAP_ARRAY(int, _max_covered_regions, mtGC);
+
+            for (int i = 0; i < _max_covered_regions; i++) {
+                _lowest_non_clean[i] = NULL;
+                _lowest_non_clean_chunk_size[i] = 0;
+                _last_LNC_resizing_collection[i] = -1;
+            }
+        }
+
+        _barrier_set = barrier_set;
+        oopDesc::set_bs(_barrier_set);
+
+        // 把heap分成old和young两部分
+        _gens = new AdjoiningGenerations(heap_rs, _collector_policy, generation_alignment());
+        {
+            _virtual_spaces(old_young_rs, policy->min_gen1_size(), policy->min_gen0_size(), alignment) {
+            size_t init_low_byte_size = policy->initial_gen1_size();
+            size_t min_low_byte_size = policy->min_gen1_size();
+            size_t max_low_byte_size = policy->max_gen1_size();
+            size_t init_high_byte_size = policy->initial_gen0_size();
+            size_t min_high_byte_size = policy->min_gen0_size();
+            size_t max_high_byte_size = policy->max_gen0_size();
+            
+            // 整个heap分成MaxOldSize和MaxNewSize两部分
+            ReservedSpace old_rs = virtual_spaces()->reserved_space().first_part(max_low_byte_size);
+            ReservedSpace heap_rs = virtual_spaces()->reserved_space().last_part(max_low_byte_size);
+            ReservedSpace young_rs = heap_rs.first_part(max_high_byte_size);
+
+            _young_gen = new PSYoungGen(init_high_byte_size,
+                                        min_high_byte_size,
+                                        max_high_byte_size);
+            _old_gen = new PSOldGen(init_low_byte_size,
+                                    min_low_byte_size,
+                                    max_low_byte_size,
+                                    "old", 1);
+
+            _young_gen->initialize(young_rs, alignment);
+            {
+                initialize_virtual_space(rs, alignment);
+                {
+                    _virtual_space = new PSVirtualSpace(rs, alignment);
+                    // 申请物理内存
+                    virtual_space()->expand_by(_init_gen_size);
+                }
+
+                initialize_work();
+                {
+                    // 整个线性地址空间
+                    _reserved = MemRegion((HeapWord*)virtual_space()->low_boundary(),
+                                          (HeapWord*)virtual_space()->high_boundary());
+
+                    // commited的线性地址空间
+                    MemRegion cmr((HeapWord*)virtual_space()->low(),
+                                  (HeapWord*)virtual_space()->high());
+                    
+                    // 为覆盖此区域的cardTable分配内存
+                    Universe::heap()->barrier_set()->resize_covered_region(cmr);
+
+                    _eden_space = new MutableSpace(virtual_space()->alignment());
+                    _from_space = new MutableSpace(virtual_space()->alignment());
+                    _to_space   = new MutableSpace(virtual_space()->alignment());
+
+                    // 线性地址空间按比例计算eden和survivor的大小
+                    max_survivor_size = size / InitialSurvivorRatio;
+                    max_eden_size = size - 2 * max_survivor_size;
+
+                    compute_initial_space_boundaries();
+                    {
+                        size_t size = virtual_space()->committed_size();
+
+
+                        set_space_boundaries(eden_size, survivor_size);
+                        {
+                            // commited地址按eden/to/from的顺序排列
+                            char *eden_start = virtual_space()->low();
+                            char *to_start   = eden_start + eden_size;
+                            char *from_start = to_start   + survivor_size;
+                            char *from_end   = from_start + survivor_size;
+
+                            MemRegion eden_mr((HeapWord*)eden_start, (HeapWord*)to_start);
+                            MemRegion to_mr  ((HeapWord*)to_start, (HeapWord*)from_start);
+                            MemRegion from_mr((HeapWord*)from_start, (HeapWord*)from_end);
+
+                            eden_space()->initialize(eden_mr, true, ZapUnusedHeapArea);
+                              to_space()->initialize(to_mr  , true, ZapUnusedHeapArea);
+                            from_space()->initialize(from_mr, true, ZapUnusedHeapArea);
+                        }
+                    }
+                }
+            }
+
+            _old_gen->initialize(old_rs, alignment, "old", 1);
+            {
+                initialize_virtual_space(rs, alignment);
+                {
+                    _virtual_space = new PSVirtualSpace(rs, alignment);
+                    _virtual_space->expand_by(_init_gen_size);
+                }
+
+                initialize_work(perf_data_name, level);
+                {
+                    // 整个线性地址空间
+                    MemRegion limit_reserved((HeapWord*)virtual_space()->low_boundary(), heap_word_size(_max_gen_size));
+                    // 稀疏索引记录对象的起始地址: 每512字节内的第一个对象的地址
+                    start_array()->initialize(limit_reserved);
+
+                    // 已经commited的线性地址
+                    MemRegion cmr((HeapWord*)virtual_space()->low(),
+                                  (HeapWord*)virtual_space()->high());
+
+                    // 为对应的catdTable申请内存
+                    Universe::heap()->barrier_set()->resize_covered_region(cmr);
+
+                    // 储存对象
+                    _object_space = new MutableSpace(virtual_space()->alignment());
+                    object_space()->initialize(cmr, ...);
+
+                    start_array()->set_covered_region(cmr);
+                }
+            }
+        }
+
+        _old_gen = _gens->old_gen();
+        _young_gen = _gens->young_gen();
+
+        // 根据暂停时间收集信息动态调整heap的大小
+        _size_policy = new PSAdaptiveSizePolicy(eden_capacity, initial_promo_size, ...);
+
+        // 创建用于gc的线程池
+        _gc_task_manager = GCTaskManager::create(ParallelGCThreads);
+        {
+            initialize();
+            {
+                // 创建任务队列
+                GCTaskQueue* unsynchronized_queue = GCTaskQueue::create_on_c_heap();
+                _queue = SynchronizedGCTaskQueue::create(unsynchronized_queue, lock());
+
+                // 创建线程池
+                _thread = NEW_C_HEAP_ARRAY(GCTaskThread*, workers(), mtGC);
+                for (uint t = 0; t < workers(); t += 1) {
+                    set_thread(t, GCTaskThread::create(this, t, processor_assignment[t]));
+                }
+            }
+        }
+
+        // 并行整理gc算法初始化
+        PSParallelCompact::initialize();
+        {
+            MemRegion mr = heap->reserved_region();
+
+            _mark_bitmap.initialize(mr);
+            {
+                // 一个bit标记8个字节
+                const idx_t bits = bits_required(covered_region);
+                const size_t words = bits / BitsPerWord;
+                const size_t raw_bytes = words * sizeof(idx_t);
+                _reserved_byte_size = align_size_up(raw_bytes, MAX2(page_sz, granularity));
+                // 申请线性地址
+                ReservedSpace rs(_reserved_byte_size, rs_align, rs_align > 0);
+                _virtual_space = new PSVirtualSpace(rs, page_sz);
+                // 申请物理内存
+                _virtual_space->expand_by(_reserved_byte_size);
+            }
+
+            _summary_data.initialize(mr);
+            {
+                const size_t region_size = covered_region.word_size();
+                initialize_region_data(region_size);
+                {
+                    // 使用一个RegionData描述一个64k的region
+                    const size_t count = (region_size + RegionSizeOffsetMask) >> Log2RegionSize;
+                    _region_vspace = create_vspace(count, sizeof(RegionData));
+                }
+
+                initialize_block_data();
+                {
+                    // 使用一个BlockData描述一个128B的block
+                    const size_t count = _region_count << Log2BlocksPerRegion;
+                    _block_vspace = create_vspace(count, sizeof(BlockData));
+                }
+            }
+        }
+    }
+}
+
+```
+
 ## G1GC
 
 ### 初始化
+
+```c++
+
+```
