@@ -614,7 +614,7 @@ class ParallelScavengeHeap : public CollectedHeap {
                 const size_t region_size = covered_region.word_size();
                 initialize_region_data(region_size);
                 {
-                    // 使用一个RegionData描述一个64k的region
+                    // 使用一个RegionData描述一个512k的region，用于full-gc时并行整理
                     const size_t count = (region_size + RegionSizeOffsetMask) >> Log2RegionSize;
                     _region_vspace = create_vspace(count, sizeof(RegionData));
                 }
@@ -631,12 +631,56 @@ class ParallelScavengeHeap : public CollectedHeap {
 
     void ParallelScavengeHeap::post_initialize() {
         PSScavenge::initialize();
+        {
+            // 确当晋升阈值
+            _tenuring_threshold = 7;
+        }
+
         if (UseParallelOldGC) {
             PSParallelCompact::post_initialize();
+            {
+                ParCompactionManager::initialize(mark_bitmap());
+                {
+                    // 多出的一个给VmThread用
+                    _manager_array = NEW_C_HEAP_ARRAY(ParCompactionManager*, parallel_gc_threads + 1, mtGC);
+
+                    _region_list = NEW_C_HEAP_ARRAY(RegionTaskQueue*, parallel_gc_threads + 1, mtGC);
+
+                    _recycled_stack_index = NEW_C_HEAP_ARRAY(uint, parallel_gc_threads, mtGC);
+
+                    for(uint i=0; i < parallel_gc_threads + 1; i++) {
+                        _region_list[i] = new RegionTaskQueue();
+                        region_list(i)->initialize();
+                    }
+
+                    _stack_array = new OopTaskQueueSet(parallel_gc_threads);
+                    _objarray_queues = new ObjArrayTaskQueueSet(parallel_gc_threads);
+                    _region_array = new RegionTaskQueueSet(parallel_gc_threads);
+
+                    for(uint i=0; i < parallel_gc_threads; i++) {
+                        _manager_array[i] = new ParCompactionManager();
+                        stack_array()->register_queue(i, _manager_array[i]->marking_stack());
+                        _objarray_queues->register_queue(i, &_manager_array[i]->_objarray_stack);
+                        region_array()->register_queue(i, region_list(i));
+                    }
+
+                    _manager_array[parallel_gc_threads] = new ParCompactionManager();
+                }
+            }
         } else {
             PSMarkSweep::initialize();
         }
+
         PSPromotionManager::initialize();
+        {
+            // 多出的一个用于平衡工作量
+            _manager_array = PaddedArray<...>::create_unfreeable(ParallelGCThreads + 1);
+
+            _stack_array_depth = new OopStarTaskQueueSet(ParallelGCThreads);
+            for(uint i=0; i<ParallelGCThreads; i++) {
+                stack_array_depth()->register_queue(i, _manager_array[i].claimed_stack_depth());
+            }
+        }
     }
 }
 
@@ -646,7 +690,7 @@ class ParallelScavengeHeap : public CollectedHeap {
 
 分配`tlab`
 
-```c
+```c++
 HeapWord* ParallelScavengeHeap::allocate_new_tlab(size_t size) {
   return young_gen()->allocate(size);
   {
@@ -673,15 +717,390 @@ HeapWord* ParallelScavengeHeap::allocate_new_tlab(size_t size) {
 
 从heap中分配
 
-```c
+```c++
 HeapWord* ParallelScavengeHeap::mem_allocate(size_t size,
                                              bool* gc_overhead_limit_was_exceeded) {
     *gc_overhead_limit_was_exceeded = false;
 
-    HeapWord* result = young_gen()->allocate(size);                                            
+    // 从eden分配内存
+    HeapWord* result = young_gen()->allocate(size);
+    {
+        result = eden_space()->cas_allocate(word_size);
+    }
+
+    while (result == NULL) {
+        // 加锁
+        MutexLocker ml(Heap_lock);
+
+        // 再次尝试eden
+        result = young_gen()->allocate(size);
+        if (result != NULL) {
+            return result;
+        }
+
+        // 尝试从old分配
+        result = mem_allocate_old_gen(size);
+        {
+            return old_gen()->allocate(size);
+            {
+                HeapWord* res = allocate_noexpand(word_size);
+                {
+                    // 指针碰撞
+                    HeapWord* res = object_space()->allocate(word_size);
+                    if (res != NULL) {
+                        // 记录每个512的block内最后一个对象的块内offset
+                        _start_array.allocate_block(res);
+                    }
+                    return res;
+                }
+
+                 if (res == NULL) {
+                    res = expand_and_allocate(word_size);
+                    {
+                        expand(word_size*HeapWordSize);
+                        {
+                            // 至少扩展128k
+                            size_t aligned_expand_bytes = align_size_up(MinHeapDeltaBytes, alignment);
+                            expand_by(aligned_expand_bytes);
+                            {
+                                // commit线性内存
+                                virtual_space()->expand_by(bytes);
+                            }
+                        }
+
+                        return allocate_noexpand(word_size);
+                    }
+                }
+                return res;
+            }
+        }
+
+        if (result != NULL) {
+            return result;
+        }
+
+        // 连续经历了3次gc依然失败
+        if (gclocker_stalled_count > GCLockerRetryAllocationCount) {
+            return NULL;
+        }
+
+        // 别的线程触发gc，当前线程应该尽快进入safepoint
+        if (GC_locker::is_active_and_needs_gc()) {
+            JavaThread* jthr = JavaThread::current();
+            if (!jthr->in_critical()) {
+                MutexUnlocker mul(Heap_lock);
+                // 等待gc结束
+                GC_locker::stall_until_clear();
+                {
+                    while (needs_gc()) {
+                        JNICritical_lock->wait();
+                    }
+                }
+                gclocker_stalled_count += 1;
+                continue;
+            }
+        }
+
+
+        if (result == NULL) {
+            VM_ParallelGCFailedAllocation op(size, gc_count);
+            {
+                _result = heap->failed_mem_allocate(_word_size);
+                {
+                    // young-gc
+                    const bool invoked_full_gc = PSScavenge::invoke();
+                    HeapWord* result = young_gen()->allocate(size);
+
+                    if (result == NULL && !invoked_full_gc) {
+                        // full-gc不回收引用
+                        do_full_collection(false);
+                        // 从eden分配
+                        result = young_gen()->allocate(size);
+                    }
+
+                    if (result == NULL) {
+                        // 从old分配
+                        result = old_gen()->allocate(size);
+                    }
+
+                    if (result == NULL) {
+                        // full-gc回收引用
+                        do_full_collection(true);
+                        // 从eden分配
+                        result = young_gen()->allocate(size);
+                    }
+
+                    if (result == NULL) {
+                        // 从old分配
+                        result = old_gen()->allocate(size);
+                    }
+
+                    return result;
+                }
+            }
+
+            VMThread::execute(&op);
+
+            // oom
+            if (limit_exceeded && softrefs_clear) {
+                *gc_overhead_limit_was_exceeded = true;
+                size_policy()->set_gc_overhead_limit_exceeded(false);
+                if (op.result() != NULL) {
+                    CollectedHeap::fill_with_object(op.result(), size);
+                }
+                return NULL;
+            }
+
+            return op.result();
+        }
+    }                                         
 }
 ```
 
+young-gc
+
+```c++
+bool PSScavenge::invoke() {
+
+    PSScavenge::invoke_no_policy();
+    {
+        // 准备工作
+
+        // tlab空闲内存填充空对象
+        heap->ensure_parsability(true);
+
+        // 清空to_space
+        young_gen->to_space()->clear(SpaceDecorator::Mangle);
+
+        // 初始化gc_task_manager
+        gc_task_manager()->release_all_resources();
+        gc_task_manager()->set_active_gang();
+        gc_task_manager()->task_idle_workers();
+        uint active_workers = gc_task_manager()->active_workers();
+        heap->set_par_threads(active_workers);
+
+        GCTaskQueue* q = GCTaskQueue::create();
+
+        // 多线程并发处理跨代引用
+        uint stripe_total = active_workers;
+        for(uint i=0; i < stripe_total; i++) {
+            q->enqueue(new OldToYoungRootsTask(old_gen, old_top, i, stripe_total));
+            {
+                card_table->scavenge_contents_parallel(...);
+                {
+                    int ssize = 128;
+                    jbyte* start_card = byte_for(sp->bottom());
+                    jbyte* end_card   = byte_for(sp_top - 1) + 1;
+                    size_t slice_width = ssize * stripe_total;
+                    // 多线程扫描cardTable, card=dirty表示上次gc之后引用发生了变化
+                    for (jbyte* slice = start_card; slice < end_card; slice += slice_width) {
+                        jbyte* worker_start_card = slice + stripe_number * ssize;
+                        jbyte* worker_end_card = worker_start_card + ssize;
+                        jbyte* current_card = worker_start_card;
+
+                        // 扫描当前128个card范围内的对象
+                        while (current_card < worker_end_card) {
+                            oop* p = (oop*) start_array->object_start(addr_for(first_unclean_card));
+                            oop* to = (oop*)addr_for(following_clean_card);
+                            while (p < to) {
+                                oop m = oop(p);
+                                m->push_contents(pm);
+                                {
+                                    klass()->oop_push_contents(pm, this);
+                                    {
+                                        res = PSScavenge::should_scavenge(p);
+                                        {
+                                            T heap_oop = oopDesc::load_heap_oop(p);
+                                            return PSScavenge::is_obj_in_young(heap_oop);
+                                        }
+
+                                        if (res) {
+                                            pm->claim_or_forward_depth(p);
+                                            {
+                                                oop o = oopDesc::load_decode_heap_oop_not_null(p);
+                                                if (o->is_forwarded()) {
+                                                    // 对象已经被处理，更新引用指向新地址
+                                                    o = o->forwardee();
+                                                    oopDesc::encode_store_heap_oop_not_null(p, o)
+                                                } else {
+                                                    // 加入pm的队列
+                                                    push_depth(p);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                p += m->size();
+                            }
+
+                            pm->drain_stacks_cond_depth();
+                            {
+                                // 递归处理所有收集到的存活的young代对象
+                                process_popped_location_depth(p);
+                                {
+                                    PSScavenge::copy_and_push_safe_barrier<oop, false>(this, p);
+                                    {
+                                        if (! o->is_forwarded()) {
+                                            pm->copy_to_survivor_space<promote_immediately>(o);
+                                            {
+                                                markOop test_mark = o->mark();
+                                                uint age = test_mark->age();
+                                                if (age < PSScavenge::tenuring_threshold()) {
+                                                    // 没到晋升阀值直接复制到to_space
+                                                    new_obj = (oop) _young_lab.allocate(new_obj_size);
+                                                }
+
+                                                // 晋升或to_space满了则从old分配内存
+                                                if (new_obj == NULL) {
+                                                    new_obj = (oop) _old_lab.allocate(new_obj_size);
+                                                    new_obj_is_tenured = true;
+                                                }
+
+                                                // 晋升失败必须等待full-gc
+                                                if (new_obj == NULL) {
+                                                    _old_gen_is_full = true;
+                                                    return oop_promotion_failed(o, test_mark);
+                                                }
+
+                                                // 复制数据
+                                                Copy::aligned_disjoint_words((HeapWord*)o, (HeapWord*)new_obj, new_obj_size);
+
+                                                // 标记已处理
+                                                if (o->cas_forward_to(new_obj, test_mark)) {
+                                                    // 递归处理
+                                                    new_obj->push_contents(this);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 收集10类root，同上递归处理
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::universe));
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::jni_handles));
+        // 所有java线程和VMThread线程遍历栈帧
+        Threads::create_thread_roots_tasks(q);
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::object_synchronizer));
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::flat_profiler));
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::management));
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::system_dictionary));
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::class_loader_data));
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::jvmti));
+        q->enqueue(new ScavengeRootsTask(ScavengeRootsTask::code_cache));
+
+        // 工作量均衡: 跑的快的帮助跑的慢的
+        ParallelTaskTerminator terminator(active_workers,
+                    (TaskQueueSetSuper*) promotion_manager->stack_array_depth());
+        for (uint j = 0; j < active_workers; j++) {
+            q->enqueue(new StealTask(&terminator));
+        }
+
+        gc_task_manager()->execute_and_wait(q);
+
+        // 清理字符串表
+        PSScavengeRootsClosure root_closure(promotion_manager);
+        StringTable::unlink_or_oops_do(&_is_alive_closure, &root_closure);
+
+        // 出现过晋升失败则必须fullGc
+        promotion_failure_occurred = PSPromotionManager::post_scavenge(_gc_tracer);
+        if (! promotion_failure_occurred) {
+            // 根据数据统计调整参数
+        }
+
+    }
+
+}
+```
+
+full-gc
+
+```c++
+bool PSParallelCompact::invoke_no_policy(bool maximum_heap_compaction) {
+    // 准备工作
+    pre_compact(&pre_gc_values);
+    {
+        heap->ensure_parsability(true);
+    }
+
+    gc_task_manager()->set_active_gang();
+    gc_task_manager()->task_idle_workers();
+    heap->set_par_threads(gc_task_manager()->active_workers());
+
+    // 从root开始递归标记
+    marking_phase(...);
+    {
+        GCTaskQueue* q = GCTaskQueue::create();
+
+        // 从10类root开始递归标记
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::universe));
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::jni_handles));
+        Threads::create_thread_roots_marking_tasks(q);
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::object_synchronizer));
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::flat_profiler));
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::management));
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::system_dictionary));
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::class_loader_data));
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::jvmti));
+        q->enqueue(new MarkFromRootsTask(MarkFromRootsTask::code_cache));
+        {
+            PSParallelCompact::MarkAndPushClosure mark_and_push_closure(cm);
+            {
+                mark_and_push(_compaction_manager, p);
+                {
+                    T heap_oop = oopDesc::load_heap_oop(p);
+                    if (!oopDesc::is_null(heap_oop)) {
+                        oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
+                        if (mark_bitmap()->is_unmarked(obj) && mark_obj(obj)) {
+                            cm->push(obj);
+                        }
+                    }
+                }
+            }
+
+            Threads::oops_do(&mark_and_push_closure, ...);
+
+            // 递归标记
+            cm->follow_marking_stacks();
+            {
+                // 标记oop的class对象
+                PSParallelCompact::follow_klass(cm, obj->klass());
+                PSParallelCompact::mark_and_push(cm, p);
+            }
+        }
+
+        // 平衡工作量
+        for (uint j = 0; j < active_gc_threads; j++) {
+            q->enqueue(new StealMarkingTask(&terminator));
+        }
+
+        gc_task_manager()->execute_and_wait(q);
+
+        SystemDictionary::do_unloading(is_alive_closure());
+        CodeCache::do_unloading(is_alive_closure(), purged_class);
+        Klass::clean_weak_klass_links(is_alive_closure());
+        StringTable::unlink(is_alive_closure());
+        SymbolTable::unlink();
+    }
+
+    // TODO 汇总数据
+    summary_phase(...);
+
+    // 更新引用
+    adjust_roots();
+
+    // 复制整理
+    compact();
+
+    post_compact();
+}
+```
 
 ### gc
 
