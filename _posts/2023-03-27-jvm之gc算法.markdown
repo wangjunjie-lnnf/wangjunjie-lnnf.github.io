@@ -412,7 +412,7 @@ class ParallelScavengeHeap : public CollectedHeap {
         _reserved = MemRegion((HeapWord*)heap_rs.base(),
                               (HeapWord*)(heap_rs.base() + heap_rs.size()));
 
-        // 创建cardTable: 覆盖3个region: eden, from, old
+        // 创建cardTable: 覆盖2个region: young, old
         CardTableExtension* const barrier_set = new CardTableExtension(_reserved, 3);
         {
             _covered = new MemRegion[_max_covered_regions];
@@ -548,14 +548,14 @@ class ParallelScavengeHeap : public CollectedHeap {
                 {
                     // 整个线性地址空间
                     MemRegion limit_reserved((HeapWord*)virtual_space()->low_boundary(), heap_word_size(_max_gen_size));
-                    // 稀疏索引记录对象的起始地址: 每512字节内的第一个对象的地址
+                    // 稀疏索引记录对象相对于block的offset: ((char*)obj_ptr - (char*)block_start) / 8
                     start_array()->initialize(limit_reserved);
 
                     // 已经commited的线性地址
                     MemRegion cmr((HeapWord*)virtual_space()->low(),
                                   (HeapWord*)virtual_space()->high());
 
-                    // 为对应的catdTable申请内存
+                    // 为对应的cardTable申请内存
                     Universe::heap()->barrier_set()->resize_covered_region(cmr);
 
                     // 储存对象
@@ -621,16 +621,69 @@ class ParallelScavengeHeap : public CollectedHeap {
 
                 initialize_block_data();
                 {
-                    // 使用一个BlockData描述一个128B的block
+                    // 使用一个BlockData描述一个128字节的block
                     const size_t count = _region_count << Log2BlocksPerRegion;
                     _block_vspace = create_vspace(count, sizeof(BlockData));
                 }
             }
         }
     }
+
+    void ParallelScavengeHeap::post_initialize() {
+        PSScavenge::initialize();
+        if (UseParallelOldGC) {
+            PSParallelCompact::post_initialize();
+        } else {
+            PSMarkSweep::initialize();
+        }
+        PSPromotionManager::initialize();
+    }
 }
 
 ```
+
+### 内存分配
+
+分配`tlab`
+
+```c
+HeapWord* ParallelScavengeHeap::allocate_new_tlab(size_t size) {
+  return young_gen()->allocate(size);
+  {
+    return eden_space()->cas_allocate(word_size);
+    {
+        // 基于cas的指针碰撞从eden分配
+        do {
+            HeapWord* obj = (HeapWord*)OrderAccess::load_ptr_acquire(top_addr());
+            if (pointer_delta(end(), obj) >= size) {
+                HeapWord* new_top = obj + size;
+                HeapWord* result = (HeapWord*)Atomic::cmpxchg_ptr(new_top, top_addr(), obj);
+                if (result != obj) {
+                    continue;
+                }
+                return obj;
+            } else {
+                return NULL;
+            }
+        } while (true);
+    }
+  }
+}
+```
+
+从heap中分配
+
+```c
+HeapWord* ParallelScavengeHeap::mem_allocate(size_t size,
+                                             bool* gc_overhead_limit_was_exceeded) {
+    *gc_overhead_limit_was_exceeded = false;
+
+    HeapWord* result = young_gen()->allocate(size);                                            
+}
+```
+
+
+### gc
 
 ## G1GC
 
