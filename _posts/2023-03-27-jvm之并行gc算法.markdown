@@ -621,7 +621,7 @@ class ParallelScavengeHeap : public CollectedHeap {
 
                 initialize_block_data();
                 {
-                    // 使用一个BlockData描述一个128字节的block
+                    // 使用一个BlockData描述一个1k字节的block内第一个存活对象的目标地址
                     const size_t count = _region_count << Log2BlocksPerRegion;
                     _block_vspace = create_vspace(count, sizeof(BlockData));
                 }
@@ -659,9 +659,9 @@ class ParallelScavengeHeap : public CollectedHeap {
 
                     for(uint i=0; i < parallel_gc_threads; i++) {
                         _manager_array[i] = new ParCompactionManager();
-                        stack_array()->register_queue(i, _manager_array[i]->marking_stack());
+                        _stack_array->register_queue(i, _manager_array[i]->marking_stack());
                         _objarray_queues->register_queue(i, &_manager_array[i]->_objarray_stack);
-                        region_array()->register_queue(i, region_list(i));
+                        _region_array->register_queue(i, region_list(i));
                     }
 
                     _manager_array[parallel_gc_threads] = new ParCompactionManager();
@@ -1021,6 +1021,31 @@ bool PSScavenge::invoke() {
 
 full-gc
 
+算法描述：
+
+![ps-region](/assets/images/2023-03-27/ps-region.png)
+
+整个heap划分成512k的region，每个region有3个重要属性
+1. dest_addr: 表示此region内第一个存活对象的目标地址
+2. source_region: 表示第一个把对象头复制到此region的源region
+3. dest_count: 表示此region的存活对象会复制到多少其他region中，取值0/1/2，0表示在region内compact
+
+算法的过程如下：
+1. 从root开始递归标记存活对象
+2. 根据收集的数据计算每个region的3个属性
+    * 上图中根据标记过程中产生的bitmap可以计算每个region的dest_addr
+    * 上图中region-0的source_region=region-0, dest_count=0
+    * 上图中region-1的source_region=region-2, dest_count=1
+    * 上图中region-2的source_region=region-4, dest_count=2
+3. 从root开始，更新引用的地址
+4. 开始复制数据: 重点是如何分解为多个子问题并行处理
+    * 从dest_count=0的region开始处理，即region-0
+    * region-0的数据复制完毕后，继续处理region-0的后续region
+    * region-1数据复制完毕后，dest_count减一变成0表示region-1的数据复制完毕
+    * region-2的数据复制到region-1时放不下，能放多少放多少，dest_count减一变成1表示region-2的数据未复制完
+    * 此时region-1的dest_count==0，每个dest_count==0的region都可以并行处理
+    * 照此逻辑直到所有存活数据复制完毕
+
 ```c++
 bool PSParallelCompact::invoke_no_policy(bool maximum_heap_compaction) {
     // 准备工作
@@ -1057,8 +1082,38 @@ bool PSParallelCompact::invoke_no_policy(bool maximum_heap_compaction) {
                     T heap_oop = oopDesc::load_heap_oop(p);
                     if (!oopDesc::is_null(heap_oop)) {
                         oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
-                        if (mark_bitmap()->is_unmarked(obj) && mark_obj(obj)) {
-                            cm->push(obj);
+                        if (mark_bitmap()->is_unmarked(obj)) {
+                            res = mark_obj(obj);
+                            {
+                                if (mark_bitmap()->mark_obj(obj, obj_size)) {
+                                    _summary_data.add_obj(obj, obj_size);
+                                    {
+                                         if (beg_region == end_region) {
+                                            _region_data[beg_region].add_live_obj(len);
+                                            return;
+                                        }
+
+                                        // Middle regions--completely spanned by this object.
+                                        for (size_t region = beg_region + 1; region < end_region; ++region) {
+                                            // 指定region开头的一个部分对象的header和长度
+                                            _region_data[region].set_partial_obj_size(RegionSize);
+                                            _region_data[region].set_partial_obj_addr(addr);
+                                        }
+
+                                        // Last region.
+                                        const size_t end_ofs = region_offset(addr + len - 1);
+                                        // 指定region开头的一个部分对象的header和长度
+                                        _region_data[end_region].set_partial_obj_size(end_ofs + 1);
+                                        _region_data[end_region].set_partial_obj_addr(addr);
+                                    }
+
+                                    return true;
+                                }
+                            }
+
+                            if (res) {
+                                cm->push(obj);
+                            }
                         }
                     }
                 }
@@ -1091,12 +1146,258 @@ bool PSParallelCompact::invoke_no_policy(bool maximum_heap_compaction) {
 
     // TODO 汇总数据
     summary_phase(...);
+    {
+        // 分别计算old/eden/from/to内的对象存活情况
+        summarize_spaces_quick();
+        {
+            for (unsigned int i = 0; i < last_space_id; ++i) {
+                // 把space内的存活对象compact到space的开头
+                // 以512k的region为单位，计算每个region的dest_addr和source_region
+                _summary_data.summarize(..., 
+                                        space->bottom(), space->top(), NULL,
+                                        space->bottom(), space->end(), nta);
+                {
+                    size_t cur_region = addr_to_region_idx(source_beg);
+                    const size_t end_region = addr_to_region_idx(region_align_up(source_end));
 
-    // 更新引用
+                    HeapWord *dest_addr = target_beg;
+                    while (cur_region < end_region) {
+                        // 设置region内第一个存活对象的目标复制地址
+                        _region_data[cur_region].set_destination(dest_addr);
+
+                        // 此变量表示一个region内的存活数据需要复制到除自己外的region的数量
+                        // 用于控制并发：0表示只复制到自己，1表示需要复制到另一个不同的region
+                        //              2表示要复制到两个连续的region
+                        uint destination_count = 0;
+
+                        HeapWord* const last_addr = dest_addr + words - 1;
+                        const size_t dest_region_1 = addr_to_region_idx(dest_addr);
+                        const size_t dest_region_2 = addr_to_region_idx(last_addr);
+
+                        // 只复制到自己count=0，正常只有old的前几个区域可能是这样
+                        destination_count += cur_region == dest_region_2 ? 0 : 1;
+                        if (dest_region_1 != dest_region_2) {
+                            // 跨越region
+                            destination_count += 1;
+                            _region_data[dest_region_2].set_source_region(cur_region);
+                        } else if (region_offset(dest_addr) == 0) {
+                            _region_data[dest_region_1].set_source_region(cur_region);
+                        }
+
+                        _region_data[cur_region].set_destination_count(destination_count);
+                        ++cur_region;
+                    }
+                }
+
+                _space_info[i].set_dense_prefix(space->bottom());
+            }
+        }
+
+        // old已经反复compact，前半部分垃圾率很低，在允许范围内跳过回收
+        summarize_space(old_space_id, maximum_compaction);
+        {
+            HeapWord* dense_prefix_end = compute_dense_prefix(id, maximum_compaction);
+            {
+                // 查找第一个有垃圾对象的region
+                const RegionData* const full_cp = first_dead_space_region(beg_cp, new_top_cp);
+                // 计算存活对象密度
+                const double density = double(space_live) / double(space_capacity);
+                // 允许最多5%的垃圾不回收
+                const size_t min_percent_free = MarkSweepDeadRatio;
+                // 利用正态分布预估多少个region包含5%的垃圾
+                const double limiter = dead_wood_limiter(density, min_percent_free);
+                const size_t dead_wood_max = space_used - space_live;
+                const size_t dead_wood_limit = MIN2(size_t(space_capacity * limiter), dead_wood_max);
+                const RegionData* const limit_cp = dead_wood_limit_region(full_cp, top_cp, dead_wood_limit);
+
+                double best_ratio = 0.0;
+                const RegionData* best_cp = full_cp;
+                for (const RegionData* cp = full_cp; cp < limit_cp; ++cp) {
+                    // 计算第一个有垃圾的region和limit之间最大回收率的位置
+                    double tmp_ratio = reclaimed_ratio(cp, bottom, top, new_top);
+                    if (tmp_ratio > best_ratio) {
+                        best_cp = cp;
+                        best_ratio = tmp_ratio;
+                    }
+                }
+
+                return sd.region_to_addr(best_cp);
+            }
+
+            _space_info[id].set_dense_prefix(dense_prefix_end);
+        }
+
+        // 把eden/from的数据都挪到old
+        SpaceId dst_space_id = old_space_id;
+        for (unsigned int id = eden_space_id; id < last_space_id; ++id) {
+            const size_t live = pointer_delta(_space_info[id].new_top(), space->bottom());
+            const size_t available = pointer_delta(dst_space_end, *new_top_addr);
+
+            if (live > 0 && live <= available) {
+                // old放的下全放old，逻辑同上
+                _summary_data.summarize(...);
+            } else if (live > 0) {
+                // old放不下：能放多少放多少
+                _summary_data.summarize(...);
+
+                // 剩余的原地compact
+                _summary_data.summarize(...);
+            }
+
+        }
+    }
+
+    // 更新引用指向新地址
     adjust_roots();
+    {
+        Universe::oops_do(adjust_pointer_closure());
+        {
+            adjust_pointer(p);
+            {
+                // 计算gc之后的新地址
+                oop new_obj = (oop)summary_data().calc_new_pointer(obj);
+                {
+                    RegionData* const region_ptr = addr_to_region_ptr(obj);
+                    // 查找obj所在region的第一个存活对象的目标地址
+                    HeapWord* result = region_ptr->destination();
+
+                    // 计算region内每个block内第一个存活对象的目标位置，类似于稀疏索引
+                    PSParallelCompact::fill_blocks(addr_to_region_idx(addr));
+
+                    // block内第一个存活对象的offset
+                    const size_t block_offset = addr_to_block_ptr(addr)->offset();
+                    // 根据bitmap计算block内obj的offset
+                    const ParMarkBitMap* bitmap = PSParallelCompact::mark_bitmap();
+                    const size_t live = bitmap->live_words_in_range(block_align_down(addr), oop(addr));
+
+                    result += block_offset + live;
+                    return result;
+                }
+
+                // 更新引用
+                oopDesc::encode_store_heap_oop_not_null(p, new_obj);
+            }
+        }
+
+        JNIHandles::oops_do(adjust_pointer_closure());
+        CLDToOopClosure adjust_from_cld(adjust_pointer_closure());
+        Threads::oops_do(adjust_pointer_closure(), &adjust_from_cld, NULL);
+        ObjectSynchronizer::oops_do(adjust_pointer_closure());
+        FlatProfiler::oops_do(adjust_pointer_closure());
+        Management::oops_do(adjust_pointer_closure());
+        JvmtiExport::oops_do(adjust_pointer_closure());
+        SystemDictionary::oops_do(adjust_pointer_closure());
+        ClassLoaderDataGraph::oops_do(adjust_pointer_closure(), adjust_klass_closure(), true);
+    }
 
     // 复制整理
     compact();
+    {
+        enqueue_region_draining_tasks(q, active_gc_threads);
+        {
+            for (uint j = 0; j < task_count; j++) {
+                q->enqueue(new DrainStacksCompactionTask(j));
+                {
+                    cm->drain_region_stacks();
+                    {
+                        PSParallelCompact::fill_and_update_region(this, region_index);
+                        {
+                            MoveAndUpdateClosure closure(bitmap, cm, start_array, dest_addr, words);
+                            {
+                                if (destination() != source()) {
+                                    // 复制数据
+                                    Copy::aligned_conjoint_words(source(), destination(), words);
+                                }
+
+                                oop moved_oop = (oop) destination();
+                                // 更新引用
+                                moved_oop->update_contents(compaction_manager());
+                            }
+
+                            closure.set_source(first_src_addr(dest_addr, src_space_id, src_region_idx));
+
+                            do {
+
+                                HeapWord* const cur_addr = closure.source();
+                                HeapWord* const end_addr = MIN2(sd.region_align_up(cur_addr + 1), src_space_top);
+                                // 根据bitmap的指引复制存活数据
+                                IterationStatus status = bitmap->iterate(&closure, cur_addr, end_addr);
+
+                                // 重点: 控制线程安全
+                                decrement_destination_counts(cm, src_space_id, src_region_idx, end_addr);
+                                {
+                                     for (RegionData* cur = beg; cur < end; ++cur) {
+                                        // dest_count==0说明存活对象复制完毕
+                                        cur->decrement_destination_count();
+                                        // 已经复制完成的region可以被覆盖了
+                                        if (cur < enqueue_end && cur->available() && cur->claim()) {
+                                            // 放到stack上，空闲的线程可以帮忙处理
+                                            cm->push_region(sd.region(cur));
+                                        }
+                                    }
+                                }
+
+                                src_region_idx = next_src_region(closure, src_space_id, src_space_top, end_addr);
+                            } while (true);
+                        }
+                    }
+                }
+            }
+
+            // 因为stack结构，所以倒着来
+            for (unsigned int id = to_space_id; id + 1 > old_space_id; --id) {
+                const size_t beg_region = sd.addr_to_region_idx(space_info->dense_prefix());
+                const size_t end_region = sd.addr_to_region_idx(sd.region_align_up(new_top));
+                for (size_t cur = end_region - 1; cur + 1 > beg_region; --cur) {
+                    // 此处至关重要：第一批种子只能是dest_count=0的region，这样才能避免live数据在compact时被覆盖
+                    if (sd.region(cur)->claim_unsafe()) {
+                        ParCompactionManager::region_list_push(which++ % task_count, cur);
+                    }
+                }
+            }
+        }
+
+        // old开头的部分垃圾少不需要移动
+        enqueue_dense_prefix_tasks(q, active_gc_threads);
+        {
+            q->enqueue(new UpdateDensePrefixTask(SpaceId(space_id), region_index_start, region_index_end));
+            {
+                PSParallelCompact::update_and_deadwood_in_dense_prefix(...);
+                {
+                    // 活对象更新引用
+                    UpdateOnlyClosure update_closure(mbm, cm, space_id);
+                    // 死对象替换为空对象
+                    FillClosure fill_closure(cm, space_id);
+                    // 根据bitmap扫描对象
+                    mark_bitmap()->iterate(&update_closure, &fill_closure, beg_addr, end_addr, dense_prefix_end);
+                }
+            }
+        }
+
+        // 平衡工作量
+        enqueue_region_stealing_tasks(q, &terminator, active_gc_threads);
+        {
+            for (uint j = 0; j < parallel_gc_threads; j++) {
+                q->enqueue(new StealRegionCompactionTask(terminator_ptr));
+                {
+                    size_t region_index = 0;
+                    int random_seed = 17;
+
+                    while(true) {
+                        // 随机从别的gc线程上获取dest_count==0的region并行处理
+                        if (ParCompactionManager::steal(which, &random_seed, region_index)) {
+                            PSParallelCompact::fill_and_update_region(cm, region_index);
+                            cm->drain_region_stacks();
+                        } else {
+                            if (terminator()->offer_termination()) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     post_compact();
 }
