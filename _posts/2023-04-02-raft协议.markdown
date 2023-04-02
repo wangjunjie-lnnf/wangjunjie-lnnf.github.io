@@ -1,0 +1,1018 @@
+---
+layout: post
+title:  "raft协议"
+date:   2023-04-02 10:22:07 +0000
+categories: jekyll
+tags: raft
+---
+
+# raft
+
+本文以[raft官网](https://raft.github.io/)首页的[hashicorp/raft](https://github.com/hashicorp/raft)为例描述`raft`算法的实现机制
+
+## 状态
+
+![State](/assets/images/2023-04-02/State.png)
+
+持久化存储分两部分，kv存储和log存储
+
+```go
+
+// 持久化kv存储支持三个key: CurrentTerm、LastVoteTerm、LastVoteCand
+type StableStore interface {
+    Set(key []byte, val []byte) error
+
+    Get(key []byte) ([]byte, error)
+
+    SetUint64(key []byte, val uint64) error
+
+    GetUint64(key []byte) (uint64, error)
+}
+
+// log
+type Log struct {
+    // Index holds the index of the log entry.
+    Index uint64
+
+    // Term holds the election term of the log entry.
+    Term uint64
+
+    // Type holds the type of the log entry.
+    // LogCommand: is applied to a user FSM.
+    // LogNoop: is used to assert leadership.
+    // LogBarrier: is used to ensure all preceding operations have been applied to the FSM.
+    // LogConfiguration: establishes a membership change configuration.
+    Type LogType
+
+    // Data holds the log entry's type-specific data.
+    Data []byte
+
+    // Extensions holds an opaque byte slice of information for middleware.
+    // It is up to the client of the library to properly modify it.
+    Extensions []byte
+
+    // AppendedAt stores the time the leader first appended this log to it's LogStore.
+    // Followers will observe the leader's time.
+    // 与raft协议无关，扩展信息
+    AppendedAt time.Time
+}
+
+// log存储
+type LogStore interface {
+    // FirstIndex returns the first index written. 0 for no entries.
+    FirstIndex() (uint64, error)
+
+    // LastIndex returns the last index written. 0 for no entries.
+    LastIndex() (uint64, error)
+
+    // GetLog gets a log entry at a given index.
+    GetLog(index uint64, log *Log) error
+
+    // StoreLog stores a log entry.
+    StoreLog(log *Log) error
+
+    // StoreLogs stores multiple log entries.
+    StoreLogs(logs []*Log) error
+
+    // DeleteRange deletes a range of log entries. The range is inclusive.
+    DeleteRange(min, max uint64) error
+}
+
+```
+
+通用瞬时状态存储
+
+```go
+
+// 缓存了多个字段
+type raftState struct {
+    // The current term, cache of StableStore
+    currentTerm uint64
+
+    // Highest committed log entry
+    commitIndex uint64
+
+    // Last applied log to the FSM
+    lastApplied uint64
+
+    // protects 4 next fields
+    lastLock sync.Mutex
+
+    // Cache the latest snapshot index/term
+    lastSnapshotIndex uint64
+    lastSnapshotTerm  uint64
+
+    // Cache the latest log from LogStore
+    lastLogIndex uint64
+    lastLogTerm  uint64
+
+    // The current state
+    // Follower、Candidate、Leader、Shutdown
+    state RaftState
+}
+
+```
+
+leader瞬时状态存储
+
+```go
+
+type commitment struct {
+    // matchIndex表示已经同步的最大log，初始化为0，根据AppendEntries的结果更新
+    // voter ID to log index: the server stores up through this log entry
+    matchIndexes map[ServerID]uint64
+    // a quorum stores up through this log entry. monotonically increases.
+    commitIndex uint64
+    // the first index of this leader's term: this needs to be replicated to a
+    // majority of the cluster before this leader may mark anything committed
+    startIndex uint64
+}
+
+type followerReplication struct {
+    // currentTerm is the term of this leader, to be included in AppendEntries requests.
+    currentTerm uint64
+
+    // nextIndex表示下次AppendEntries要发送的log，初始化为lastLog+1
+    // nextIndex is the index of the next log entry to send to the follower,
+    // which may fall past the end of the log.
+    nextIndex uint64
+
+    // peer contains the network address and ID of the remote follower.
+    peer Server
+
+    // lastContact is updated to the current time whenever any response is
+    // received from the follower (successful or not). This is used to check
+    // whether the leader should step down (Raft.checkLeaderLease()).
+    lastContact time.Time
+}
+
+type leaderState struct {
+    commitment                   *commitment
+    replState                    map[ServerID]*followerReplication
+}
+
+```
+
+当产生了大量log之后，log的存储和使用都会成为问题，于是引出了镜像和状态机的概念。例如：变量`x`变化了5次，产生了5条log，`x=1, x=2, x=3, x=4, x=5`，在使用时我们不关心`x`的变化轨迹，一般只关心`x`的最新状态。状态机类似于内存中的`Map`结构，存储每个key的最新值。内存中的map结构需要定时持久化生成镜像，包含在镜像中的log就可以安全的删除了，节省存储，而且重启时可以更快的恢复。
+
+状态机
+
+```go
+
+// 镜像持久化
+type FSMSnapshot interface {
+
+    // Persist should dump all necessary state to the WriteCloser 'sink',
+    // and call sink.Close() when finished or call sink.Cancel() on error.
+    Persist(sink SnapshotSink) error
+
+    // Release is invoked when we are finished with the snapshot.
+    Release()
+
+}
+
+// 状态机
+type FSM interface {
+
+    // Apply is called once a log entry is committed by a majority of the cluster.
+    Apply(*Log) interface{}
+
+    // Snapshot returns an FSMSnapshot used to: support log compaction, to
+    // restore the FSM to a previous state, or to bring out-of-date followers up
+    // to a recent log index.
+    Snapshot() (FSMSnapshot, error)
+
+    // Restore is used to restore an FSM from a snapshot.
+    Restore(snapshot io.ReadCloser) error
+
+}
+
+// 镜像管理
+type SnapshotStore interface {
+
+    // Create is used to begin a snapshot at a given index and term, and with
+    // the given committed configuration. The version parameter controls
+    // which snapshot version to create.
+    Create(version SnapshotVersion, index, term uint64, ...) (SnapshotSink, error)
+
+    // List is used to list the available snapshots in the store.
+    List() ([]*SnapshotMeta, error)
+
+    // Open takes a snapshot ID and provides a ReadCloser.
+    Open(id string) (*SnapshotMeta, io.ReadCloser, error)
+
+}
+
+```
+
+有几个关于log的重要指针
+
+1. lastSnapshotIndex: 包含在镜像中的最大log。
+2. lastApplied: 应用到状态机的最大log。
+3. commitIndex: 已经提交的最大log。
+4. lastLogIndex: 最大的log。
+
+很明显他们的关系应该是:
+
+`lastSnapshotIndex <= lastApplied <= commitIndex <= lastLogIndex`
+
+raft集群中节点的表示如下
+
+```go
+type Raft struct {
+    raftState
+
+    // FSM is the client state machine to apply commands to
+    fsm FSM
+
+    // lastContact is the last time we had contact from the
+    // leader node. This can be used to gauge staleness.
+    lastContact     time.Time
+
+    // leaderAddr is the current cluster leader Address
+    leaderAddr ServerAddress
+    // LeaderID is the current cluster leader ID
+    leaderID   ServerID
+
+    // leaderState used only while state is leader
+    leaderState leaderState
+
+    // Stores our local server ID, used to avoid sending RPCs to ourself
+    localID ServerID
+
+    // Stores our local addr
+    localAddr ServerAddress
+
+    // LogStore provides durable storage for logs
+    logs LogStore
+
+    // snapshots is used to store and retrieve snapshots
+    snapshots SnapshotStore
+
+    // stable is a StableStore implementation for durable state
+    // It provides stable storage for many fields in raftState
+    stable StableStore
+
+}
+```
+
+---
+
+节点初始化
+
+```go
+
+// Try to restore the current term.
+currentTerm := stable.GetUint64(keyCurrentTerm)
+
+// Read the index of the last log entry.
+lastIndex := logs.LastIndex()
+
+// Get the last log entry.
+var lastLog Log
+logs.GetLog(lastIndex, &lastLog)
+
+// Initialize as a follower.
+r.setState(Follower)
+
+// Restore the current term and the last log.
+r.setCurrentTerm(currentTerm)
+r.setLastLog(lastLog.Index, lastLog.Term)
+
+// Attempt to restore a snapshot if there are any.
+r.restoreSnapshot()
+{
+    // 加载最新的snap
+    snapshots := r.snapshots.List()
+    snapshot = snapshots[0]
+
+    r.tryRestoreSingleSnapshot(snapshot)
+    {
+        source := r.snapshots.Open(snapshot.ID)
+        // 恢复snap到fsm
+        r.fsm.Restore(source)
+    }
+
+    // Update the lastApplied so we don't replay old logs
+    r.setLastApplied(snapshot.Index)
+
+    // Update the last stable snapshot info
+    r.setLastSnapshot(snapshot.Index, snapshot.Term)
+}
+
+// 应用snap之后的log到fsm
+snapshotIndex := r.getLastSnapshot()
+for index := snapshotIndex + 1; index <= lastLog.Index; index++ {
+    var entry Log
+    r.logs.GetLog(index, &entry)
+    r.fsm.Apply(entry)
+}
+
+r.goFunc(r.run)
+{
+    // 状态决定行为
+    for {
+        switch r.getState() {
+        case Follower:
+            r.runFollower()
+        case Candidate:
+            r.runCandidate()
+        case Leader:
+            r.runLeader()
+        }
+    }
+}
+
+// 接收并应用log到状态机
+r.goFunc(r.runFSM)
+
+// 定时或手工触发生成镜像
+r.goFunc(r.runSnapshots)
+
+```
+
+节点状态变化如下，`状态决定行为`。
+
+![Server-states](/assets/images/2023-04-02/Server-states.png)
+
+
+## Leader选举
+
+![RequestVote-RPC](/assets/images/2023-04-02/RequestVote-RPC.png)
+
+```go
+
+// Follower、Candidate、Leader通用的rpc处理流程
+func (r *Raft) processRPC(rpc RPC) {
+    switch cmd := rpc.Command.(type) {
+        case *AppendEntriesRequest:
+            r.appendEntries(rpc, a)
+            {
+                // Setup a response
+                resp := &AppendEntriesResponse{
+                    RPCHeader:      r.getRPCHeader(),
+                    Term:           r.getCurrentTerm(),
+                    LastLog:        r.getLastIndex(),
+                    Success:        false,
+                    NoRetryBackoff: false,
+                }
+
+                var rpcErr error
+                defer func() {
+                    rpc.Respond(resp, rpcErr)
+                }()
+
+                // Ignore an older term
+                if a.Term < r.getCurrentTerm() {
+                    return
+                }
+
+                // Increase the term if we see a newer one, 
+                // also transition to follower if we ever get an appendEntries call
+                if a.Term > r.getCurrentTerm() || r.getState() != Follower {
+                    r.setState(Follower)
+                    r.setCurrentTerm(a.Term)
+                    resp.Term = a.Term
+                }
+
+                // Save the current leader
+                r.setLeader(r.trans.DecodePeer(a.Addr), ServerID(a.ID))
+
+                // 与leader选举无关的log相关处理
+
+                // Everything went well, set success
+                resp.Success = true
+                r.setLastContact()
+                return
+            }
+
+        case *RequestVoteRequest:
+            r.requestVote(rpc, req)
+            {
+                // Setup a response
+                resp := &RequestVoteResponse{
+                    RPCHeader: r.getRPCHeader(),
+                    Term:      r.getCurrentTerm(),
+                    Granted:   false,
+                }
+
+                var rpcErr error
+                defer func() {
+                    rpc.Respond(resp, rpcErr)
+                }()
+
+                candidate = r.trans.DecodePeer(req.RPCHeader.Addr)
+
+                // 当前leader有效则拒绝投票
+                if leaderAddr, leaderID := r.LeaderWithID(); leaderAddr != "" && leaderAddr != candidate {
+                    return
+                }
+
+                // Ignore an older term
+                if req.Term < r.getCurrentTerm() {
+                    return
+                }
+
+                // Increase the term if we see a newer one
+                if req.Term > r.getCurrentTerm() {
+                    // Ensure transition to follower
+                    r.setState(Follower)
+                    r.setCurrentTerm(req.Term)
+                    resp.Term = req.Term
+                }
+
+                // Check if we have voted yet
+                lastVoteTerm := r.stable.GetUint64(keyLastVoteTerm)
+                lastVoteCandBytes := r.stable.Get(keyLastVoteCand)
+
+                // 此term已经投过票了
+                if lastVoteTerm == req.Term && lastVoteCandBytes != nil {
+                    // 同一个term只能投给一个人
+                    if bytes.Equal(lastVoteCandBytes, candidateBytes) {
+                        resp.Granted = true
+                    }
+                    return
+                }
+
+                // Reject if their term is older
+                lastIdx, lastTerm := r.getLastEntry()
+                if lastTerm > req.LastLogTerm {
+                    return
+                }
+
+                // term相同比较logIndex, 我们的log更新则拒绝
+                if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex {
+                    return
+                }
+
+                // Persist a vote for safety
+                r.persistVote(req.Term, candidateBytes)
+
+                // 全部条件检查通过则批准
+                resp.Granted = true
+                r.setLastContact()
+            }
+    }
+}
+
+func (r *Raft) runFollower() {
+
+    // heartbeat随机超时
+    heartbeatTimer := randomTimeout(r.config().HeartbeatTimeout)
+
+    for r.getState() == Follower {
+        select {
+        case rpc := <-r.rpcCh:
+            r.processRPC(rpc)
+
+        case <-heartbeatTimer:
+            // Restart the heartbeat timer
+            hbTimeout := r.config().HeartbeatTimeout
+            heartbeatTimer = randomTimeout(hbTimeout)
+
+            // 是否刚处理过别的节点的请求
+            lastContact := r.LastContact()
+            if time.Since(lastContact) < hbTimeout {
+                continue
+            }
+
+            // Heartbeat failed! Transition to the candidate state
+            lastLeaderAddr, lastLeaderID := r.LeaderWithID()
+            r.setLeader("", "")
+
+            r.setState(Candidate)
+        }
+    }
+
+}
+
+func (r *Raft) runCandidate() {
+
+    term := r.getCurrentTerm() + 1
+
+    // Start vote for us, and set a timeout
+    voteCh := r.electSelf()
+    {
+        // Create a response channel
+        respCh := make(chan *voteResult, len(r.configurations.latest.Servers))
+
+        // Increment the term
+        r.setCurrentTerm(r.getCurrentTerm() + 1)
+
+        // Construct the request
+        lastIdx, lastTerm := r.getLastEntry()
+
+        req := &RequestVoteRequest{
+            RPCHeader: r.getRPCHeader(),
+            Term:      r.getCurrentTerm(),
+            Candidate:          r.trans.EncodePeer(r.localID, r.localAddr),
+            LastLogIndex:       lastIdx,
+            LastLogTerm:        lastTerm,
+        }
+
+        // For each peer, request a vote
+        for _, server := range r.configurations.latest.Servers {
+            if server.Suffrage == Voter {
+                if server.ID == r.localID {
+                    // 投票给自己
+                    r.persistVote(req.Term, req.RPCHeader.Addr);
+                    {
+                        r.stable.SetUint64(keyLastVoteTerm, term)
+                        r.stable.Set(keyLastVoteCand, candidate)
+                    }
+
+                    // Include our own vote
+                    respCh <- &voteResult{
+                        RequestVoteResponse: RequestVoteResponse{
+                            RPCHeader: r.getRPCHeader(),
+                            Term:      req.Term,
+                            Granted:   true,
+                        },
+                        voterID: r.localID,
+                    }
+                } else {
+                    r.goFunc(func() {
+                        resp := &voteResult{voterID: server.ID}
+                        // 发送rpc请求
+                        err := r.trans.RequestVote(peer.ID, peer.Address, req, &resp.RequestVoteResponse)
+                        if err != nil {
+                            resp.Term = req.Term
+                            resp.Granted = false
+                        }
+                        respCh <- resp
+                    })
+                }
+            }
+        }
+    }
+
+    // 随机超时
+    electionTimeout := r.config().ElectionTimeout
+    electionTimer := randomTimeout(electionTimeout)
+
+    // 获得的投票数
+    grantedVotes := 0
+    // 集群成员的大多数
+    votesNeeded := r.quorumSize()
+
+    for r.getState() == Candidate {
+        select {
+        case rpc := <-r.rpcCh:
+            r.processRPC(rpc)
+
+        // 收到投票结果
+        case vote := <-voteCh:
+            if vote.Term > r.getCurrentTerm() {
+                r.setState(Follower)
+                r.setCurrentTerm(vote.Term)
+                return
+            }
+
+            // Check if the vote is granted
+            if vote.Granted {
+                grantedVotes++
+            }
+
+            // Check if we've become the leader
+            if grantedVotes >= votesNeeded {
+                r.setState(Leader)
+                r.setLeader(r.localAddr, r.localID)
+                return
+            }
+
+        case <-electionTimer:
+            // 直接return返回for循环重新runCandidate
+            return
+        }
+    }
+}
+
+func (r *Raft) runLeader() {
+
+    // Notify that we are the leader
+    overrideNotifyBool(r.leaderCh, true)
+
+    // This is only supposed to be accessed within the leaderloop.
+    r.setupLeaderState()
+
+    // Start a replication routine for each peer
+    r.startStopReplication()
+
+    // 向所有成员发送空Log来确认leader的身份
+    noop := &logFuture{log: Log{Type: LogNoop}}
+    r.dispatchLogs([]*logFuture{noop})
+
+    // Sit in the leader loop until we step down
+    r.leaderLoop()
+    {
+        for r.getState() == Leader {
+            select {
+            case rpc := <-r.rpcCh:
+                r.processRPC(rpc)
+
+            // AppendEntry时发现更大term
+            case <-r.leaderState.stepDown:
+                r.setState(Follower)
+            }
+        }
+    }
+}
+
+```
+
+## Log复制
+
+![AppendEntries-RPC](/assets/images/2023-04-02/AppendEntries-RPC.png)
+
+```go
+
+// follower收到log的处理逻辑
+func (r *Raft) processRPC(rpc RPC) {
+    switch cmd := rpc.Command.(type) {
+        case *AppendEntriesRequest:
+            r.appendEntries(rpc, a)
+            {
+                // Setup a response
+                resp := &AppendEntriesResponse{
+                    RPCHeader:      r.getRPCHeader(),
+                    Term:           r.getCurrentTerm(),
+                    LastLog:        r.getLastIndex(),
+                    Success:        false,
+                    NoRetryBackoff: false,
+                }
+
+                var rpcErr error
+                defer func() {
+                    rpc.Respond(resp, rpcErr)
+                }()
+
+                // Ignore an older term
+                if a.Term < r.getCurrentTerm() {
+                    return
+                }
+
+                // Increase the term if we see a newer one, 
+                // also transition to follower if we ever get an appendEntries call
+                if a.Term > r.getCurrentTerm() || r.getState() != Follower {
+                    r.setState(Follower)
+                    r.setCurrentTerm(a.Term)
+                    resp.Term = a.Term
+                }
+
+                // Save the current leader
+                r.setLeader(r.trans.DecodePeer(a.Addr), ServerID(a.ID))
+
+                // Verify the last log entry
+                if a.PrevLogEntry > 0 {
+                    lastIdx, lastTerm := r.getLastEntry()
+
+                    var prevLogTerm uint64
+                    if a.PrevLogEntry == lastIdx {
+                        prevLogTerm = lastTerm
+                    } else {
+                        var prevLog Log
+                        if err := r.logs.GetLog(a.PrevLogEntry, &prevLog); err != nil {
+                            // 指定的log不存在, NoRetryBackoff表示失败是正常的
+                            resp.NoRetryBackoff = true
+                            return
+                        }
+                        prevLogTerm = prevLog.Term
+                    }
+
+                    // 指定位置的log的term不一致, NoRetryBackoff表示失败是正常的
+                    if a.PrevLogTerm != prevLogTerm {
+                        resp.NoRetryBackoff = true
+                        return
+                    }
+                }
+
+                // Process any new entries
+                if len(a.Entries) > 0 {
+                    // Delete any conflicting entries, skip any duplicates
+                    lastLogIdx, _ := r.getLastLog()
+
+                    for i, entry := range a.Entries {
+                        if entry.Index > lastLogIdx {
+                            newEntries = a.Entries[i:]
+                            break
+                        }
+
+                        var storeEntry Log
+                        r.logs.GetLog(entry.Index, &storeEntry)
+
+                        if entry.Term != storeEntry.Term {
+                            // 从第一个冲突的log开始全部删除
+                            r.logs.DeleteRange(entry.Index, lastLogIdx)
+                            newEntries = a.Entries[i:]
+                            break
+                        }
+                    }
+
+                    // Append the new entries
+                    r.logs.StoreLogs(newEntries)
+
+                    // Update the lastLog
+                    last := newEntries[n-1]
+                    r.setLastLog(last.Index, last.Term)
+                }
+
+                // Update the commit index
+                if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() {
+                    start := time.Now()
+                    idx := min(a.LeaderCommitIndex, r.getLastIndex())
+                    r.setCommitIndex(idx)
+                    // 把commit的log应用到fsm
+                    r.processLogs(idx, nil)
+                }
+
+                // Everything went well, set success
+                resp.Success = true
+                r.setLastContact()
+                return
+            }
+    }
+}
+
+func (r *Raft) runLeader() {
+
+    // Notify that we are the leader
+    overrideNotifyBool(r.leaderCh, true)
+
+    // This is only supposed to be accessed within the leaderloop.
+    r.setupLeaderState()
+    {
+        r.leaderState.commitment = newCommitment(..., r.configurations.latest, r.getLastIndex()+1)
+        {
+            // matchIndexes都初始化为0，根据AppendEntries的响应信息更新
+            matchIndexes := make(map[ServerID]uint64)
+            for _, server := range configuration.Servers {
+                if server.Suffrage == Voter {
+                    matchIndexes[server.ID] = 0
+                }
+            }
+            return &commitment{
+                commitCh:     commitCh,
+                matchIndexes: matchIndexes,
+                commitIndex:  0,
+                startIndex:   startIndex,
+            }
+        }
+        r.leaderState.replState = make(map[ServerID]*followerReplication)
+    }
+
+    // 跟每个peer建立链接发送log
+    // Start a replication routine for each peer
+    r.startStopReplication()
+    {
+        // Start replication goroutines that need starting
+        for _, server := range r.configurations.latest.Servers {
+            if server.ID == r.localID {
+                continue
+            }
+
+            s = &followerReplication{
+                peer:                server,
+                commitment:          r.leaderState.commitment,
+                currentTerm:         r.getCurrentTerm(),
+                // 默认发送最新的log
+                nextIndex:           lastIdx + 1,
+                lastContact:         time.Now(),
+            }
+
+            r.leaderState.replState[server.ID] = s
+
+            // leader向follower发送heartbeat
+            r.goFunc(func() { r.replicate(s) })
+            {
+                // 定时发送heartbeat: append空log避免timeout
+                r.goFunc(func() { r.heartbeat(s, stopHeartbeat) })
+                {
+                    for {
+                        // Wait for the next heartbeat interval or forced notify
+                        select {
+                        case <-s.notifyCh:
+                        case <-randomTimeout(r.config().HeartbeatTimeout / 10):
+                        }
+
+                        r.trans.AppendEntries(peer.ID, peer.Address, &req, &resp)
+                    }
+                }
+
+                for !shouldStop {
+                    select {
+                        // 收到newlog通知
+                        case <-s.triggerCh:
+                            lastIndex := r.getLastLog()
+                            shouldStop = r.replicateTo(s, lastIndex)
+                            {
+                            START:
+                                err := r.setupAppendEntries(s, &req, atomic.LoadUint64(&s.nextIndex), lastIndex)
+                                {
+                                    req.RPCHeader = r.getRPCHeader()
+                                    req.Term = s.currentTerm
+                                    req.Leader = r.trans.EncodePeer(r.localID, r.localAddr)
+                                    req.LeaderCommitIndex = r.getCommitIndex()
+
+                                    // 根据nextIndex设置req.PrevLogEntry和req.PrevLogTerm
+                                    r.setPreviousLog(req, nextIndex)
+
+                                    // 从nextIndex开始插入一批log到req
+                                    r.setNewLogs(req, nextIndex, lastIndex)
+                                }
+
+                                if err == ErrLogNotFound {
+                                    // nextIndex不存在则发送snap
+                                    r.sendLatestSnapshot(s)
+                                } else {
+                                    r.trans.AppendEntries(peer.ID, peer.Address, &req, &resp)
+
+                                    // Check for a newer term, stop running
+                                    if resp.Term > req.Term {
+                                        r.handleStaleTerm(s)
+                                        {
+                                            // 通知leader转为follower
+                                            asyncNotifyCh(s.stepDown)
+                                        }
+                                        return true
+                                    }
+
+                                    // Update the last contact
+                                    s.setLastContact()
+
+                                    // Update s based on success
+                                    if resp.Success {
+                                        updateLastAppended(s, &req)
+                                        {
+                                            if logs := req.Entries; len(logs) > 0 {
+                                                last := logs[len(logs)-1]
+                                                // 更新nextIndex
+                                                atomic.StoreUint64(&s.nextIndex, last.Index+1)
+                                        
+                                                s.commitment.match(s.peer.ID, last.Index)
+                                                {
+                                                    // 更新matchIndex
+                                                    s.commitment.matchIndexes[s.peer.ID] = last.Index
+
+                                                    // 所有的matchIndexes排序
+                                                    matched := make([]uint64, 0, len(c.matchIndexes))
+                                                    for _, idx := range c.matchIndexes {
+                                                        matched = append(matched, idx)
+                                                    }
+                                                    sort.Sort(uint64Slice(matched))
+                                                    quorumMatchIndex := matched[(len(matched)-1)/2]
+
+                                                    if quorumMatchIndex > c.commitIndex && quorumMatchIndex >= c.startIndex {
+                                                        // 更新commitIndex
+                                                        c.commitIndex = quorumMatchIndex
+                                                        // 通知leader应用log到fsm
+                                                        asyncNotifyCh(c.commitCh)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // 更新nextIndex
+                                        atomic.StoreUint64(&s.nextIndex, max(min(s.nextIndex-1, resp.LastLog+1), 1))
+                                        // NoRetryBackoff表示失败是正常的
+                                        if resp.NoRetryBackoff {
+                                            s.failures = 0
+                                        } else {
+                                            s.failures++
+                                        }
+                                    }
+                                }
+
+                                // 接着发送
+                                if atomic.LoadUint64(&s.nextIndex) <= lastIndex {
+                                    goto START
+                                }
+                            }
+
+                        case <-randomTimeout(r.config().CommitTimeout):
+                            lastLogIdx := r.getLastLog()
+                            // 空闲时定时触发
+                            shouldStop = r.replicateTo(s, lastLogIdx)
+                    }
+                }
+            }
+        }
+    }
+
+    // 向所有成员发送空Log来确认leader的身份
+    noop := &logFuture{log: Log{Type: LogNoop}}
+    r.dispatchLogs([]*logFuture{noop})
+
+    // Sit in the leader loop until we step down
+    r.leaderLoop()
+    {
+        for r.getState() == Leader {
+            select {
+            case rpc := <-r.rpcCh:
+                r.processRPC(rpc)
+
+            // AppendEntry之后更新commitIndex
+            case <-r.leaderState.commitCh:
+                // Process the newly committed entries
+                oldCommitIndex := r.getCommitIndex()
+                commitIndex := r.leaderState.commitment.getCommitIndex()
+                r.setCommitIndex(commitIndex)
+
+                // Pull all inflight logs that are committed off the queue.
+                for e := r.leaderState.inflight.Front(); e != nil; e = e.Next() {
+                    commitLog := e.Value.(*logFuture)
+                    idx := commitLog.log.Index
+                    if idx > commitIndex {
+                        // Don't go past the committed index
+                        break
+                    }
+
+                    groupReady = append(groupReady, e)
+                    groupFutures[idx] = commitLog
+                    lastIdxInGroup = idx
+                }
+
+                if len(groupReady) != 0 {
+                    // 应用到状态机
+                    r.processLogs(lastIdxInGroup, groupFutures)
+                    {
+                        index := lastIdxInGroup
+                        futures := groupFutures
+
+                        // Reject logs we've applied already
+                        lastApplied := r.getLastApplied()
+                        if index <= lastApplied {
+                            return
+                        }
+
+                        // Apply all the preceding logs
+                        for idx := lastApplied + 1; idx <= index; idx++ {
+                            future := futures[idx]
+                            batch = append(batch, future)
+                        }
+
+                        // Send it to the FSM
+                        applyBatch(batch)
+                        {
+                            r.fsm.Apply(batch);
+                        }
+
+                        // Update the lastApplied index and term
+                        r.setLastApplied(index)
+                    }
+
+                    // 清除commit的log
+                    for _, e := range groupReady {
+                        r.leaderState.inflight.Remove(e)
+                    }
+                }
+
+
+            // 收到新的log
+            case newLog := <-r.applyCh:
+                // 收集一批一块处理
+                applyLogs := []*logFuture{newLog}
+                r.dispatchLogs(applyLogs)
+                {
+                    term := r.getCurrentTerm()
+                    lastIndex := r.getLastIndex()
+
+                    n := len(applyLogs)
+                    logs := make([]*Log, n)
+
+                    for idx, applyLog := range applyLogs {
+                        applyLog.dispatch = now
+                        lastIndex++
+                        applyLog.log.Index = lastIndex
+                        applyLog.log.Term = term
+                        applyLog.log.AppendedAt = now
+                        logs[idx] = &applyLog.log
+                        // 未提交的log先保存在此
+                        r.leaderState.inflight.PushBack(applyLog)
+                    }
+
+                    // Write the log entry locally
+                    r.logs.StoreLogs(logs)
+
+                    // 更新matchIndex
+                    r.leaderState.commitment.matchIndexes[r.localID] = lastIndex
+
+                    // Update the last log since it's on disk now
+                    r.setLastLog(lastIndex, term)
+
+                    // 通知routine发送log
+                    // Notify the replicators of the new log
+                    for _, f := range r.leaderState.replState {
+                        asyncNotifyCh(f.triggerCh)
+                    }
+                }
+            }
+        }
+    }
+}
+
+```
+
+
+## 集群成员变更
+
+TODO
