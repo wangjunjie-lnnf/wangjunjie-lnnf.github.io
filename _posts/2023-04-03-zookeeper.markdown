@@ -12,99 +12,103 @@ tags: zookeeper
 
 ```java
 
-public static void main(String[] args) {
+public class ZooKeeperServerMain {
 
-    initializeAndRun(args);
-    {
-        // 配置文件解析
-        ServerConfig config = new ServerConfig();
-        if (args.length == 1) {
-            config.parse(args[0]);
-        } else {
-            config.parse(args);
-        }
+    public static void main(String[] args) {
+        ZooKeeperServerMain main = new ZooKeeperServerMain();
 
-        runFromConfig(config);
+        main.initializeAndRun(args);
         {
-            // 读写snap和log
-            FileTxnSnapLog snapLog = new FileTxnSnapLog(config.dataLogDir, config.dataDir);
-            final ZooKeeperServer zks = new ZooKeeperServer(..., snapLog, config.tickTime, ...);
-
-            cnxnFactory = ServerCnxnFactory.createFactory();
-            cnxnFactory.configure(config.getClientPortAddress(), ...);
-            {
-                // 处理idle连接，默认10s超时
-                cnxnExpiryQueue = new ExpiryQueue<NIOServerCnxn>(sessionlessCnxnTimeout);
-                expirerThread = new ConnectionExpirerThread();
-
-                // 处理client的连接
-                for (int i = 0; i < numSelectorThreads; ++i) {
-                    selectorThreads.add(new SelectorThread(i));
-                }
-
-                // 绑定端口
-                ss = ServerSocketChannel.open();
-                ss.socket().setReuseAddress(true);
-                ss.socket().bind(addr, listenBacklog);
-                ss.configureBlocking(false);
-
-                // 接收client的连接
-                acceptThread = new AcceptThread(ss, addr, selectorThreads);
+            // 配置文件解析
+            ServerConfig config = new ServerConfig();
+            if (args.length == 1) {
+                config.parse(args[0]);
+            } else {
+                config.parse(args);
             }
 
-            cnxnFactory.startup(zks);
+            runFromConfig(config);
             {
-                start();
+                // 读写snap和log
+                FileTxnSnapLog snapLog = new FileTxnSnapLog(config.dataLogDir, config.dataDir);
+                final ZooKeeperServer zks = new ZooKeeperServer(..., snapLog, config.tickTime, ...);
+
+                cnxnFactory = ServerCnxnFactory.createFactory();
+                cnxnFactory.configure(config.getClientPortAddress(), ...);
                 {
-                    // executor线程池处理io
-                    workerPool = new WorkerService("NIOWorker", numWorkerThreads, false);
-                    {
-                        workers.add(Executors.newFixedThreadPool(numWorkerThreads, ...));
+                    // 处理idle连接，默认10s超时
+                    cnxnExpiryQueue = new ExpiryQueue<NIOServerCnxn>(sessionlessCnxnTimeout);
+                    expirerThread = new ConnectionExpirerThread();
+
+                    // 处理client的连接
+                    for (int i = 0; i < numSelectorThreads; ++i) {
+                        selectorThreads.add(new SelectorThread(i));
                     }
 
-                    for (SelectorThread thread : selectorThreads) {
-                        thread.start();
-                    }
+                    // 绑定端口
+                    ss = ServerSocketChannel.open();
+                    ss.socket().setReuseAddress(true);
+                    ss.socket().bind(addr, listenBacklog);
+                    ss.configureBlocking(false);
 
-                    // 接收client连接
-                    acceptThread.start();
-
-                    // 定时清理idle链接
-                    expirerThread.start();
+                    // 接收client的连接
+                    acceptThread = new AcceptThread(ss, addr, selectorThreads);
                 }
 
-                zks.setServerCnxnFactory(this);
-
-                zks.startdata();
+                cnxnFactory.startup(zks);
                 {
-                    zkDb = new ZKDatabase(this.txnLogFactory);
-                    // 从磁盘恢复数据
-                    loadData();
-                }
-
-                zks.startup();
-                {
-                    // 清理过期的瞬时节点
-                    sessionTracker = new SessionTrackerImpl(this, zkDb.getSessionWithTimeOuts(), tickTime, ...);
-                    sessionTracker.start();
-
-                    setupRequestProcessors();
+                    start();
                     {
-                        RequestProcessor finalProcessor = new FinalRequestProcessor(this);
-                        RequestProcessor syncProcessor = new SyncRequestProcessor(this, finalProcessor);
-                        ((SyncRequestProcessor) syncProcessor).start();
-                        firstProcessor = new PrepRequestProcessor(this, syncProcessor);
-                        ((PrepRequestProcessor) firstProcessor).start();
+                        // executor线程池处理io
+                        workerPool = new WorkerService("NIOWorker", numWorkerThreads, false);
+                        {
+                            workers.add(Executors.newFixedThreadPool(numWorkerThreads, ...));
+                        }
+
+                        for (SelectorThread thread : selectorThreads) {
+                            thread.start();
+                        }
+
+                        // 接收client连接
+                        acceptThread.start();
+
+                        // 定时清理idle链接
+                        expirerThread.start();
                     }
 
-                    // 控制请求速度
-                    requestThrottler = createRequestThrottler();
-                    requestThrottler.start();
+                    zks.setServerCnxnFactory(this);
+
+                    zks.startdata();
+                    {
+                        zkDb = new ZKDatabase(this.txnLogFactory);
+                        // 从磁盘恢复数据
+                        loadData();
+                    }
+
+                    zks.startup();
+                    {
+                        // 清理过期的瞬时节点
+                        sessionTracker = new SessionTrackerImpl(this, zkDb.getSessionWithTimeOuts(), tickTime, ...);
+                        sessionTracker.start();
+
+                        setupRequestProcessors();
+                        {
+                            RequestProcessor finalProcessor = new FinalRequestProcessor(this);
+                            RequestProcessor syncProcessor = new SyncRequestProcessor(this, finalProcessor);
+                            ((SyncRequestProcessor) syncProcessor).start();
+                            firstProcessor = new PrepRequestProcessor(this, syncProcessor);
+                            ((PrepRequestProcessor) firstProcessor).start();
+                        }
+
+                        // 控制请求速度
+                        requestThrottler = createRequestThrottler();
+                        requestThrottler.start();
+                    }
                 }
             }
         }
-    }
 
+    }
 }
 
 ```
@@ -1040,5 +1044,1090 @@ public class FinalRequestProcessor implements RequestProcessor {
 
 ```
 
+---
+
 # zookeeper集群
+
+## 启动过程
+
+```java
+
+public class QuorumPeerMain {
+
+    public static void main(String[] args) {
+        QuorumPeerMain main = new QuorumPeerMain();
+
+        main.initializeAndRun(args);
+        {
+            QuorumPeerConfig config = new QuorumPeerConfig();
+            if (args.length == 1) {
+                // 配置文件解析
+                config.parse(args[0]);
+            }
+
+            if (args.length == 1 && config.isDistributed()) {
+                // 集群模式
+                runFromConfig(config);
+                {
+                    // 同单节点模式: 处理client连接
+                    if (config.getClientPortAddress() != null) {
+                        cnxnFactory = ServerCnxnFactory.createFactory();
+                        cnxnFactory.configure(config.getClientPortAddress(), config.getMaxClientCnxns(), ...);
+                    }
+
+                    quorumPeer = new QuorumPeer();
+                    // 管理snap和log
+                    quorumPeer.setTxnFactory(new FileTxnSnapLog(config.getDataLogDir(), config.getDataDir()));
+                    // 选举算法
+                    quorumPeer.setElectionType(config.getElectionAlg());
+                    // 核心参数
+                    quorumPeer.setMyid(config.getServerId());
+                    quorumPeer.setTickTime(config.getTickTime());
+                    quorumPeer.setMinSessionTimeout(config.getMinSessionTimeout());
+                    quorumPeer.setMaxSessionTimeout(config.getMaxSessionTimeout());
+                    quorumPeer.setInitLimit(config.getInitLimit());
+                    quorumPeer.setSyncLimit(config.getSyncLimit());
+                    // 内存DataTree
+                    quorumPeer.setZKDatabase(new ZKDatabase(quorumPeer.getTxnFactory()));
+                    // 集群成员管理
+                    quorumPeer.setQuorumVerifier(config.getQuorumVerifier(), false);
+                    // 网络IO
+                    quorumPeer.setCnxnFactory(cnxnFactory);
+
+                    quorumPeer.start();
+                    {
+                        loadDataBase();
+                        {
+                            // 加载snap和log
+                            zkDb.loadDataBase();
+                        }
+
+                        startServerCnxnFactory();
+                        {
+                            cnxnFactory.start();
+                        }
+
+                        startLeaderElection();
+                        {
+                            // 初始状态：投票给自己
+                            if (getPeerState() == ServerState.LOOKING) {
+                                currentVote = new Vote(myid, getLastLoggedZxid(), getCurrentEpoch());
+                            }
+
+                            this.electionAlg = createElectionAlgorithm(electionType);
+                            {
+                                QuorumCnxManager qcm = new QuorumCnxManager(this, this.getMyId(), ...);
+                                {
+                                    this.connectionExecutor = new ThreadPoolExecutor(3, ...);
+                                    this.connectionExecutor.allowCoreThreadTimeOut(true);
+
+                                    // 消息接收队列
+                                    this.recvQueue = new CircularBlockingQueue<Message>(RECV_CAPACITY);
+                                    // 消息发送队列，key为节点id
+                                    this.queueSendMap = new ConcurrentHashMap<Long, BlockingQueue<ByteBuffer>>();
+                                    // 消息收发线程，key为节点id
+                                    this.senderWorkerMap = new ConcurrentHashMap<Long, SendWorker>();
+                                    // 发送的最后一条消息，key为节点id，用于丢包时重发
+                                    this.lastMessageSent = new ConcurrentHashMap<Long, ByteBuffer>();
+
+                                    listener = new Listener();
+                                }
+
+                                QuorumCnxManager.Listener listener = qcm.listener;
+                                listener.start();
+                                {
+                                    addresses = self.getElectionAddress().getAllAddresses();
+
+                                    listenerHandlers = addresses.stream().map(address ->
+                                                new ListenerHandler(address, self.shouldUsePortUnification(), self.isSslQuorum(), latch))
+                                            .collect(Collectors.toList());
+
+                                    // 提交listener到executor
+                                    final ExecutorService executor = Executors.newFixedThreadPool(addresses.size());
+                                    listenerHandlers.forEach(executor::submit);
+                                }
+
+                                FastLeaderElection fle = new FastLeaderElection(this, qcm);
+                                {
+                                    // 发送队列
+                                    sendqueue = new LinkedBlockingQueue<ToSend>();
+                                    // 接收队列
+                                    recvqueue = new LinkedBlockingQueue<Notification>();
+                                    this.messenger = new Messenger(manager);
+                                }
+
+                                fle.start();
+                                {
+                                    this.messenger.start();
+                                }
+                            }
+                        }
+
+                        // 启动peer线程
+                        super.start();
+                    }
+
+                    quorumPeer.join();
+                }
+            } else {
+                // there is only server in the quorum -- run as standalone
+                ZooKeeperServerMain.main(args);
+            }
+        }
+    }
+
+}
+
+```
+
+## 选举连接
+
+![leader-election](/assets/images/2023-04-03/leader-election.png)
+
+所有集群成员之间两两建立长连接
+
+```java
+
+class ListenerHandler implements Runnable {
+
+    ListenerHandler(InetSocketAddress address, ...) {
+        this.address = address;
+    }
+
+    @Override
+    public void run() {
+        acceptConnections();
+        {
+            serverSocket = createNewServerSocket();
+
+            while (!shutdown) {
+                sock = serverSocket.accept();
+
+                sock.setTcpNoDelay(true);
+                sock.setKeepAlive(tcpKeepAlive);
+                sock.setSoTimeout(this.socketTimeout);
+
+                receiveConnection(sock);
+                {
+                    DataInputStream din = new DataInputStream(new BufferedInputStream(sock.getInputStream()));
+                    handleConnection(sock, din);
+                    {
+                        // tcp自身就是双向链接，sid较大者主动连接
+                        if (sid < self.getMyId()) {
+                            SendWorker sw = senderWorkerMap.get(sid);
+                            if (sw != null) {
+                                sw.finish();
+                            }
+
+                            closeSocket(sock);
+
+                            connectOne(sid, electionAddr);
+                            {
+                                initiateConnection(electionAddr, sid);
+                                {
+                                    Socket sock = SOCKET_FACTORY.get();
+                                    sock.connect(electionAddr.getReachableOrOne(), cnxTO);
+
+                                    startConnection(sock, sid);
+                                    {
+                                        // 发送我们的选举地址
+                                        BufferedOutputStream buf = new BufferedOutputStream(sock.getOutputStream());
+                                        DataOutputStream dout = new DataOutputStream(buf);
+                                        dout.writeLong(protocolVersion);
+                                        dout.writeLong(self.getMyId());
+                                        String addr = addressesToSend.stream().collect(Collectors.joining("|"));
+                                        byte[] addr_bytes = addr.getBytes();
+                                        dout.writeInt(addr_bytes.length);
+                                        dout.write(addr_bytes);
+                                        dout.flush();
+
+                                        
+                                        // 建立数据收发通道
+                                        DataInputStream din = new DataInputStream(new BufferedInputStream(sock.getInputStream()));
+
+                                        SendWorker sw = new SendWorker(sock, sid);
+                                        RecvWorker rw = new RecvWorker(sock, din, sid, sw);
+                                        sw.setRecv(rw);
+
+                                        senderWorkerMap.put(sid, sw);
+                                        
+                                        // 发送队列
+                                        queueSendMap.putIfAbsent(sid, new CircularBlockingQueue<>(SEND_CAPACITY));
+
+                                        sw.start();
+                                        rw.start();
+                                    }
+                                }
+                            }
+                        } else if (sid == self.getMyId()) {
+                            // we saw this case in ZOOKEEPER-2164
+                        } else { // Otherwise start worker threads to receive data.
+                            // 建立数据收发通道
+                            // 发送queueSendMap队列中的消息
+                            SendWorker sw = new SendWorker(sock, sid);
+                            // 接收消息放到recvQueue
+                            RecvWorker rw = new RecvWorker(sock, din, sid, sw);
+                            sw.setRecv(rw);
+
+                            senderWorkerMap.put(sid, sw);
+                            
+                            // 发送队列
+                            queueSendMap.putIfAbsent(sid, new CircularBlockingQueue<>(SEND_CAPACITY));
+
+                            sw.start();
+                            rw.start();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+}
+
+class Messenger {
+
+    Messenger(QuorumCnxManager manager) {
+        // 把sendqueue中的消息插入queueSendMap中的队列
+        this.ws = new WorkerSender(manager);
+        this.wsThread = new Thread(this.ws, "WorkerSender[myid=" + self.getMyId() + "]");
+        this.wsThread.setDaemon(true);
+
+        // 选举阶段从recvQueue接收消息放入队列recvqueue
+        this.wr = new WorkerReceiver(manager);
+        this.wrThread = new Thread(this.wr, "WorkerReceiver[myid=" + self.getMyId() + "]");
+        this.wrThread.setDaemon(true);
+    }
+
+    void start() {
+        this.wsThread.start();
+        this.wrThread.start();
+        {
+            while (!stop) {
+                response = manager.pollRecvQueue(3000, TimeUnit.MILLISECONDS);
+                if (response == null) {
+                    continue;
+                }
+
+                int rstate = response.buffer.getInt();
+                long rleader = response.buffer.getLong();
+                long rzxid = response.buffer.getLong();
+                long relectionEpoch = response.buffer.getLong();
+
+                if (self.getPeerState() == QuorumPeer.ServerState.LOOKING) {
+                    // 插入接收队列
+                    recvqueue.offer(n);
+
+                    // 通知发送方更新logicalclock
+                    if ((ackstate == QuorumPeer.ServerState.LOOKING)
+                        && (n.electionEpoch < logicalclock.get())) {
+                        Vote v = getVote();
+                        QuorumVerifier qv = self.getQuorumVerifier();
+                        ToSend notmsg = new ToSend(ToSend.mType.notification, v.getId(), ...);
+                        sendqueue.offer(notmsg);
+                    }
+                } else {
+                    // 通知对方我们的leader
+                    Vote current = self.getCurrentVote();
+                    if (ackstate == QuorumPeer.ServerState.LOOKING) {
+                        QuorumVerifier qv = self.getQuorumVerifier();
+                        ToSend notmsg = new ToSend(ToSend.mType.notification, current.getId(), ...);
+                        sendqueue.offer(notmsg);
+                    }
+                }
+            }
+        }
+    }
+
+}
+
+```
+
+## 选举算法
+
+```java
+
+public class QuorumPeer {
+
+    @Override
+    public void run() {
+        
+        // 状态决定行为
+        while (running) {
+            
+            switch (getPeerState()) {
+            case LOOKING:
+
+                // leader选举
+                setCurrentVote(makeLEStrategy().lookForLeader());
+
+                break;
+            case OBSERVING:
+                
+                // 创建ObserverZooKeeperServer
+                setObserver(makeObserver(logFactory));
+                observer.observeLeader();
+            
+                break;
+            case FOLLOWING:
+                
+                // 创建FollowerZooKeeperServer
+                setFollower(makeFollower(logFactory));
+                follower.followLeader();
+                
+                break;
+            case LEADING:
+                
+                // 创建LeaderZooKeeperServer
+                setLeader(makeLeader(logFactory));
+                // #peer#3.4 leader.lead()
+                leader.lead();
+
+                setLeader(null);
+
+                break;
+            }
+        }
+
+    }
+
+}
+
+// leader选举
+public Vote lookForLeader() {
+
+    Map<Long, Vote> recvset = new HashMap<Long, Vote>();
+
+    // 收到非LOOKING状态且logicalclock更大的通知
+    Map<Long, Vote> outofelection = new HashMap<Long, Vote>();
+
+
+    // 选举自己
+    synchronized (this) {
+        logicalclock.incrementAndGet();
+        updateProposal(getInitId(), getInitLastLoggedZxid(), getPeerEpoch());
+    }
+
+    // 通知所有投票者
+    sendNotifications();
+    {
+        for (long sid : self.getCurrentAndNextConfigVoters()) {
+            QuorumVerifier qv = self.getQuorumVerifier();
+            ToSend notmsg = new ToSend(..., proposedLeader, proposedZxid, ...);
+            sendqueue.offer(notmsg);    
+        }
+    }
+
+    while (self.getPeerState() == ServerState.LOOKING) {
+        Notification n = recvqueue.poll(notTimeout, ...);
+
+        if (n == null) {
+            if (manager.haveDelivered()) {
+                // 消息已发送但没收到通知则重复通知
+                sendNotifications();
+            } else {
+                // 重新建立连接
+                manager.connectAll();
+            }
+
+            continue;
+        }
+
+        if (validVoter(n.sid) && validVoter(n.leader)) {
+            switch (n.state) {
+                case LOOKING:
+                    // If notification > current, replace and send messages out
+                    if (n.electionEpoch > logicalclock.get()) {
+                        logicalclock.set(n.electionEpoch);
+                        recvset.clear();
+
+                        // 收到更高投票则更新proposal并群发通知
+                        // order by epoch, zxid, sid
+                        if (totalOrderPredicate(n.leader, n.zxid, n.peerEpoch, getInitId(), getInitLastLoggedZxid(), getPeerEpoch())) {
+                            updateProposal(n.leader, n.zxid, n.peerEpoch);
+                        } else {
+                            updateProposal(getInitId(), getInitLastLoggedZxid(), getPeerEpoch());
+                        }
+                        sendNotifications();
+                    } else if (n.electionEpoch < logicalclock.get()) {
+                        break;
+                    } else if (totalOrderPredicate(n.leader, n.zxid, n.peerEpoch, proposedLeader, proposedZxid, proposedEpoch)) {
+                        // 收到更高投票则更新proposal并群发通知
+                        updateProposal(n.leader, n.zxid, n.peerEpoch);
+                        sendNotifications();
+                    }
+
+                    // don't care about the version if it's in LOOKING state
+                    recvset.put(n.sid, new Vote(n.leader, n.zxid, n.electionEpoch, n.peerEpoch));
+
+                    voteSet = getVoteTracker(recvset, new Vote(proposedLeader, proposedZxid, logicalclock.get(), proposedEpoch));
+                    {
+                        // 收集所有跟我的proposal一样的vote
+                        for (Map.Entry<Long, Vote> entry : votes.entrySet()) {
+                            if (vote.equals(entry.getValue())) {
+                                voteSet.addAck(entry.getKey());
+                            }
+                        }
+
+                        return voteSet;
+                    }
+
+                    // 超过半数投票跟我的proposal一样
+                    if (voteSet.hasAllQuorums()) {
+                        
+                        // 等待200ms观察是否有延迟的更高的vote
+                        // Verify if there is any change in the proposed leader
+                        while ((n = recvqueue.poll(finalizeWait, ...)) != null) {
+                            if (totalOrderPredicate(n.leader, n.zxid, n.peerEpoch, proposedLeader, proposedZxid, proposedEpoch)) {
+                                recvqueue.put(n);
+                                break;
+                            }
+                        }
+
+                        /*
+                        * This predicate is true once we don't read any new
+                        * relevant message from the reception queue
+                        */
+                        if (n == null) {
+                            // leader确定
+                            setPeerState(proposedLeader, voteSet);
+                            Vote endVote = new Vote(proposedLeader, proposedZxid, logicalclock.get(), proposedEpoch);
+                            recvqueue.clear();
+                            return endVote;
+                        }
+                    }
+                    break;
+
+                case OBSERVING:
+                    break;
+
+                case FOLLOWING:
+                    // 判断此follower的leader的是否合法
+                    Vote resultFN = receivedFollowingNotification(recvset, outofelection, voteSet, n);
+                    {
+                        Vote vote = new Vote(n.leader, n.zxid, n.electionEpoch, n.peerEpoch, n.state);
+                        /*
+                        * Consider all notifications from the same epoch together.
+                        */
+                        if (n.electionEpoch == logicalclock.get()) {
+                            recvset.put(n.sid, vote);
+                            voteSet = getVoteTracker(recvset, vote);
+                            if (voteSet.hasAllQuorums() && checkLeader(recvset, n.leader, n.electionEpoch)) {
+                                setPeerState(n.leader, voteSet);
+                                Vote endVote = new Vote(n.leader, n.zxid, n.electionEpoch, n.peerEpoch);
+                                leaveInstance(endVote);
+                                return endVote;
+                            }
+                        }
+
+                        /*
+                        * Before joining an established ensemble, verify that
+                        * a majority are following the same leader.
+                        */
+                        outofelection.put(n.sid, vote);
+                        voteSet = getVoteTracker(outofelection, vote);
+                        if (voteSet.hasAllQuorums() && checkLeader(outofelection, n.leader, n.electionEpoch)) {
+                            synchronized (this) {
+                                logicalclock.set(n.electionEpoch);
+                                setPeerState(n.leader, voteSet);
+                            }
+                            Vote endVote = new Vote(n.leader, n.zxid, n.electionEpoch, n.peerEpoch);
+                            leaveInstance(endVote);
+                            return endVote;
+                        }
+
+                        return null;
+                    }
+
+                    if (resultFN == null) {
+                        break;
+                    } else {
+                        return resultFN;
+                    }
+
+                case LEADING:
+                    Vote resultLN = receivedLeadingNotification(recvset, outofelection, voteSet, n);
+                    {
+                        return receivedFollowingNotification(recvset, outofelection, voteSet, n);
+                    }
+
+                    if (resultLN == null) {
+                        break;
+                    } else {
+                        return resultLN;
+                    }
+            }
+        }
+    }
+
+}
+
+```
+
+## log复制
+
+### leader
+
+```java
+
+// 处理客户端请求
+public class LeaderZooKeeperServer extends QuorumZooKeeperServer {
+
+    // 跟单节点zk比主要是替换了处理链
+    @Override
+    protected void setupRequestProcessors() {
+        RequestProcessor finalProcessor = new FinalRequestProcessor(this);
+        RequestProcessor toBeAppliedProcessor = new Leader.ToBeAppliedRequestProcessor(finalProcessor, getLeader());
+        commitProcessor = new CommitProcessor(toBeAppliedProcessor, ...);
+        commitProcessor.start();
+        // 发送proposal，等待收到超过半数ack则commit
+        ProposalRequestProcessor proposalProcessor = new ProposalRequestProcessor(this, commitProcessor);
+        proposalProcessor.initialize();
+        prepRequestProcessor = new PrepRequestProcessor(this, proposalProcessor);
+        prepRequestProcessor.start();
+        firstProcessor = new LeaderRequestProcessor(this, prepRequestProcessor);
+    }
+
+}
+
+public class Leader extends LearnerMaster {
+
+    private final List<ServerSocket> serverSockets = new LinkedList<>();
+
+    public Leader(QuorumPeer self, LeaderZooKeeperServer zk) {
+        this.self = self;
+        this.zk = zk;
+
+        addresses = self.getQuorumAddress().getAllAddresses();
+
+        // 监听集群通信端口
+        addresses.stream()
+          .map(address -> createServerSocket(address, ...))
+          .filter(Optional::isPresent)
+          .map(Optional::get)
+          .forEach(serverSockets::add);
+    }
+
+    void lead() {
+
+        zk.loadData();
+
+        cnxAcceptor = new LearnerCnxAcceptor();
+        cnxAcceptor.start();
+        {
+
+            ExecutorService executor = Executors.newFixedThreadPool(serverSockets.size());
+            serverSockets.forEach(serverSocket ->
+                        executor.submit(new LearnerCnxAcceptorHandler(serverSocket, latch)));
+                        {
+                            while (!stop.get()) {
+                                acceptConnections();
+                                {
+                                    socket = serverSocket.accept();
+                                    socket.setSoTimeout(self.tickTime * self.initLimit);
+                                    BufferedInputStream is = new BufferedInputStream(socket.getInputStream());
+                                    // 每个线程处理一个连接
+                                    LearnerHandler fh = new LearnerHandler(socket, is, Leader.this);
+                                    fh.start();
+                                }
+                            }
+                        }
+        }
+
+        long epoch = getEpochToPropose(self.getMyId(), self.getAcceptedEpoch());
+        zk.setZxid(ZxidUtils.makeZxid(epoch, 0));
+
+        newLeaderProposal.packet = new QuorumPacket(NEWLEADER, zk.getZxid(), null, null);
+        newLeaderProposal.addQuorumVerifier(self.getQuorumVerifier());
+
+        // 等待收到超过半数的follower的连接
+        waitForEpochAck(self.getMyId(), leaderStateSummary);
+        {
+            synchronized (electingFollowers) {
+                electingFollowers.add(id);
+
+                QuorumVerifier verifier = self.getQuorumVerifier();
+                if (electingFollowers.contains(self.getMyId()) && verifier.containsQuorum(electingFollowers)) {
+                    electionFinished = true;
+                    electingFollowers.notifyAll();
+                } else {
+                    long cur = start;
+                    long end = start + self.getInitLimit() * self.getTickTime();
+                    while (!electionFinished && cur < end) {
+                        electingFollowers.wait(end - cur);
+                    }
+                    if (!electionFinished) {
+                        throw new InterruptedException("Timeout while waiting for epoch to be acked by quorum");
+                    }
+                }
+            }
+        }
+
+        // 等待NEWLEADER命令收到超过半数的响应
+        waitForNewLeaderAck(self.getMyId(), zk.getZxid());
+        {
+            synchronized (newLeaderProposal.qvAcksetPairs) {
+
+                newLeaderProposal.addAck(sid);
+
+                if (newLeaderProposal.hasAllQuorums()) {
+                    quorumFormed = true;
+                    newLeaderProposal.qvAcksetPairs.notifyAll();
+                } else {
+                    long cur = start;
+                    long end = start + self.getInitLimit() * self.getTickTime();
+                    while (!quorumFormed && cur < end) {
+                        newLeaderProposal.qvAcksetPairs.wait(end - cur);
+                    }
+                    if (!quorumFormed) {
+                        throw new InterruptedException("Timeout while waiting for NEWLEADER to be acked by quorum");
+                    }
+                }
+            }
+        }
+
+        // 开始处理client请求
+        startZkServer();
+
+        boolean tickSkip = true;
+
+        while (true) {
+            // 定时tick
+            long cur = start;
+            long end = start + self.tickTime / 2;
+            while (cur < end) {
+                wait(end - cur);
+            }
+
+            SyncedLearnerTracker syncedAckSet = new SyncedLearnerTracker();
+            syncedAckSet.addQuorumVerifier(self.getQuorumVerifier());
+
+            syncedAckSet.addAck(self.getMyId());
+            for (LearnerHandler f : getLearners()) {
+                if (f.synced()) {
+                    syncedAckSet.addAck(f.getSid());
+                }
+            }
+
+            // 心跳响应不过半
+            if (!tickSkip && !syncedAckSet.hasAllQuorums()) {
+                break;
+            }
+
+            // 隔次检查
+            tickSkip = !tickSkip;
+
+            // 定时发送心跳
+            for (LearnerHandler f : getLearners()) {
+                f.ping();
+            }
+        }
+    }
+
+}
+
+// 处理follower连接的线程
+public class LearnerHandler {
+
+    LearnerHandler(Socket sock, ...) {
+        this.sock = sock;
+    }
+
+    @Override
+    public void run() {
+        learnerMaster.addLearnerHandler(this);
+
+        ia = BinaryInputArchive.getArchive(bufferedInput);
+        oa = BinaryOutputArchive.getArchive(new BufferedOutputStream(sock.getOutputStream()));
+
+        // 等待接收FOLLOWERINFO
+        QuorumPacket qp = new QuorumPacket();
+        ia.readRecord(qp, "packet");
+
+        // 发送LEADERINFO
+        QuorumPacket newEpochPacket = new QuorumPacket(Leader.LEADERINFO, newLeaderZxid, ver, null);
+        oa.writeRecord(newEpochPacket, "packet");
+        
+        // 等待接收ACKEPOCH
+        QuorumPacket ackEpochPacket = new QuorumPacket();
+        ia.readRecord(ackEpochPacket, "packet");
+        ss = new StateSummary(bbepoch.getInt(), ackEpochPacket.getZxid());
+        learnerMaster.waitForEpochAck(this.getSid(), ss);
+
+        boolean needSnap = syncFollower(peerLastZxid, learnerMaster);
+        if (needSnap) {
+            // 发送镜像给follower
+            long zxidToSend = learnerMaster.getZKDatabase().getDataTreeLastProcessedZxid();
+            oa.writeRecord(new QuorumPacket(Leader.SNAP, zxidToSend, null, null), "packet");
+            learnerMaster.getZKDatabase().serializeSnapshot(oa);
+            oa.writeString("BenWasHere", "signature");        
+        }
+
+        QuorumPacket newLeaderQP = new QuorumPacket(Leader.NEWLEADER, newLeaderZxid, ...);
+        queuedPackets.add(newLeaderQP);
+
+        // 发送packet给follower
+        startSendingPackets();
+        {
+            new Thread() {
+                public void run() {
+                    sendPackets();
+                    {
+                        while (true) {
+                            QuorumPacket p = queuedPackets.poll();
+                            oa.writeRecord(p, "packet");
+                        }
+                    }
+                }
+            }.start();
+        }
+
+        // 等待ACK
+        qp = new QuorumPacket();
+        ia.readRecord(qp, "packet");
+
+        // 发送UPTODATE标识数据同步完毕
+        queuedPackets.add(new QuorumPacket(Leader.UPTODATE, -1, null, null));
+
+        // 处理follower的命令
+        while (true) {
+            qp = new QuorumPacket();
+            ia.readRecord(qp, "packet");
+
+            switch (qp.getType()) {
+            case Leader.ACK:
+                // 处理proposal的ack，超过半数则commit
+                learnerMaster.processAck(this.sid, qp.getZxid(), sock.getLocalSocketAddress());
+                {
+                    Proposal p = outstandingProposals.get(zxid);
+                    // 收集ack
+                    p.addAck(sid);
+
+                    tryToCommit(p, zxid, followerAddr);
+                    {
+                        // make sure that ops are committed in order.
+                        if (outstandingProposals.containsKey(zxid - 1)) {
+                            return false;
+                        }
+
+                        if (!p.hasAllQuorums()) {
+                            return false;
+                        }
+
+                        outstandingProposals.remove(zxid);
+
+                        if (p.request != null) {
+                            toBeApplied.add(p);
+                        }
+
+                        // 超过半数则提交
+                        commit(zxid);
+                        {
+                            QuorumPacket qp = new QuorumPacket(Leader.COMMIT, zxid, null, null);
+                            sendPacket(qp);
+                            {
+                                synchronized (forwardingFollowers) {
+                                    for (LearnerHandler f : forwardingFollowers) {
+                                        f.queuePacket(qp);
+                                    }
+                                }
+                            }
+                        }
+
+                        zk.commitProcessor.commit(p.request);
+                    }
+                }
+
+                break;
+            case Leader.PING:
+                // Process the touches
+                ByteArrayInputStream bis = new ByteArrayInputStream(qp.getData());
+                DataInputStream dis = new DataInputStream(bis);
+                while (dis.available() > 0) {
+                    long sess = dis.readLong();
+                    int to = dis.readInt();
+                    learnerMaster.touch(sess, to);
+                }
+                break;
+            case Leader.REQUEST:
+                bb = ByteBuffer.wrap(qp.getData());
+                sessionId = bb.getLong();
+                cxid = bb.getInt();
+                type = bb.getInt();
+                bb = bb.slice();
+                Request si;
+                if (type == OpCode.sync) {
+                    si = new LearnerSyncRequest(this, sessionId, cxid, type, bb, qp.getAuthinfo());
+                } else {
+                    si = new Request(null, sessionId, cxid, type, bb, qp.getAuthinfo());
+                }
+                si.setOwner(this);
+                learnerMaster.submitLearnerRequest(si);
+                break;
+            }
+        }
+    }
+
+}
+
+
+```
+
+### follower
+
+```java
+
+public class FollowerZooKeeperServer extends LearnerZooKeeperServer {
+
+    // 跟单节点zk比主要是替换了处理链
+    @Override
+    protected void setupRequestProcessors() {
+        RequestProcessor finalProcessor = new FinalRequestProcessor(this);
+        commitProcessor = new CommitProcessor(finalProcessor, ...);
+        commitProcessor.start();
+        firstProcessor = new FollowerRequestProcessor(this, commitProcessor);
+        ((FollowerRequestProcessor) firstProcessor).start();
+        syncProcessor = new SyncRequestProcessor(this, new SendAckRequestProcessor(getFollower()));
+        syncProcessor.start();
+    }
+
+}
+
+public class Follower extends Learner {
+
+     Follower(final QuorumPeer self, final FollowerZooKeeperServer zk) {
+        this.self = self;
+        this.fzk = zk;
+        this.zk = zk;
+    }
+
+    void followLeader() {
+        // 根据当前的投票确定leader
+        QuorumServer leaderServer = findLeader();
+
+        connectToLeader(leaderServer.addr, leaderServer.hostname);
+        {
+            ExecutorService executor = Executors.newFixedThreadPool(addresses.size());
+            AtomicReference<Socket> socket = new AtomicReference<>(null);
+            addresses.stream().map(address -> new LeaderConnector(address, socket, latch)).forEach(executor::submit);
+            {
+                Socket sock = new Socket();
+
+                // 重试5次直到超时
+                for (int tries = 0; tries < 5 && socket.get() == null; tries++) {
+                    remainingTimeout = connectTimeout - (int) ((nanoTime() - startNanoTime) / 1_000_000);
+                    if (remainingTimeout <= 0) {
+                        throw new IOException("connectToLeader exceeded on retries.");
+                    }
+
+                    sock.connect(address, Math.min(connectTimeout, remainingTimeout));
+                    break;
+                }
+
+                socket.compareAndSet(null, sock);
+            }
+
+            sock = socket.get();
+
+            // 收发通道
+            leaderIs = BinaryInputArchive.getArchive(new BufferedInputStream(sock.getInputStream()));
+            leaderOs = BinaryOutputArchive.getArchive(new BufferedOutputStream(sock.getOutputStream()));
+        }
+
+        long newEpochZxid = registerWithLeader(Leader.FOLLOWERINFO);
+        {
+            QuorumPacket qp = new QuorumPacket();
+            qp.setType(pktType);
+            qp.setZxid(ZxidUtils.makeZxid(self.getAcceptedEpoch(), 0));
+
+            LearnerInfo li = new LearnerInfo(self.getMyId(), 0x10000, self.getQuorumVerifier().getVersion());
+            boa.writeRecord(li, "LearnerInfo");
+            qp.setData(bsid.toByteArray());
+
+            // 向leader发送FOLLOWERINFO
+            writePacket(qp, true);
+            // 等待leader响应
+            readPacket(qp);
+
+            final long newEpoch = ZxidUtils.getEpochFromZxid(qp.getZxid());
+            if (qp.getType() == Leader.LEADERINFO) {
+                // 向leader发送ACKEPOCH
+                QuorumPacket ackNewEpoch = new QuorumPacket(Leader.ACKEPOCH, lastLoggedZxid, epochBytes, null);
+                writePacket(ackNewEpoch, true);
+                return ZxidUtils.makeZxid(newEpoch, 0);
+            }
+        }
+
+        syncWithLeader(newEpochZxid);
+        {
+            // 读取log差异信息
+            QuorumPacket qp = new QuorumPacket();
+            readPacket(qp);
+
+            // log有差异
+            if (qp.getType() == Leader.DIFF) {
+                self.setSyncMode(QuorumPeer.SyncMode.DIFF);
+                if (zk.shouldForceWriteInitialSnapshotAfterLeaderElection()) {
+                    snapshotNeeded = true;
+                    syncSnapshot = true;
+                } else {
+                    snapshotNeeded = false;
+                }
+            } else if (qp.getType() == Leader.SNAP) {
+                // 需要解析leader发送的snap
+                self.setSyncMode(QuorumPeer.SyncMode.SNAP);
+                zk.getZKDatabase().deserializeSnapshot(leaderIs);
+                zk.getZKDatabase().setlastProcessedZxid(qp.getZxid());
+                // immediately persist the latest snapshot when there is txn log gap
+                syncSnapshot = true;
+            } else if (qp.getType() == Leader.TRUNC) {
+                // trunc到leader指定的位置
+                //we need to truncate the log to the lastzxid of the leader
+                self.setSyncMode(QuorumPeer.SyncMode.TRUNC);
+                boolean truncated = zk.getZKDatabase().truncateLog(qp.getZxid());
+                if (!truncated) {
+                    ServiceUtils.requestSystemExit(ExitCode.QUORUM_PACKET_ERROR.getValue());
+                }
+                zk.getZKDatabase().setlastProcessedZxid(qp.getZxid());
+            } else {
+                ServiceUtils.requestSystemExit(ExitCode.QUORUM_PACKET_ERROR.getValue());
+            }
+
+            zk.getZKDatabase().initConfigInZKDatabase(self.getQuorumVerifier());
+            zk.createSessionTracker();
+
+            outerLoop:
+            while (self.isRunning()) {
+                readPacket(qp);
+
+                // Leader.DIFF模式需要接收有差异的proposal
+                switch (qp.getType()) {
+                case Leader.PROPOSAL:
+                    PacketInFlight pif = new PacketInFlight();
+                    logEntry = SerializeUtils.deserializeTxn(qp.getData());
+                    pif.hdr = logEntry.getHeader();
+                    pif.rec = logEntry.getTxn();
+                    pif.digest = logEntry.getDigest();
+                    // 接收proposal
+                    packetsNotCommitted.add(pif);
+                    break;
+                
+                case Leader.COMMIT:
+                    pif = packetsNotCommitted.peekFirst();
+                    // commit proposal
+                    zk.processTxn(pif.hdr, pif.rec);
+                    packetsNotCommitted.remove();
+                    break;
+                
+                // log同步完毕退出循环
+                case Leader.UPTODATE:
+                    self.setZooKeeperServer(zk);
+                    break outerLoop;
+                
+                case Leader.NEWLEADER: // Getting NEWLEADER here instead of in discovery
+                    if (snapshotNeeded) {
+                        zk.takeSnapshot(syncSnapshot);
+                    }
+
+                    self.setCurrentEpoch(newEpoch);
+                    writeToTxnLog = true;
+
+                    // ZOOKEEPER-3911: make sure sync the uncommitted logs before commit them (ACK NEWLEADER).
+                    sock.setSoTimeout(self.tickTime * self.syncLimit);
+                    self.setSyncMode(QuorumPeer.SyncMode.NONE);
+
+                    // 启动zk
+                    zk.startupWithoutServing();
+
+                    if (zk instanceof FollowerZooKeeperServer) {
+                        FollowerZooKeeperServer fzk = (FollowerZooKeeperServer) zk;
+                        for (PacketInFlight p : packetsNotCommitted) {
+                            // 把未commit的log写入log文件
+                            fzk.logRequest(p.hdr, p.rec, p.digest);
+                        }
+                        packetsNotCommitted.clear();
+                    }
+
+                    // 收到NEWLEADER发送ACK
+                    writePacket(new QuorumPacket(Leader.ACK, newLeaderZxid, null, null), true);
+                    break;
+                }
+            }
+
+            // 发送ack
+            QuorumPacket ack = new QuorumPacket(Leader.ACK, 0, null, null);
+            ack.setZxid(ZxidUtils.makeZxid(newEpoch, 0));
+
+            writePacket(ack, true);
+            // 开始处理client连接
+            zk.startServing();
+
+            // We need to log the stuff that came in between the snapshot and the uptodate
+            if (zk instanceof FollowerZooKeeperServer) {
+                FollowerZooKeeperServer fzk = (FollowerZooKeeperServer) zk;
+                for (PacketInFlight p : packetsNotCommitted) {
+                    fzk.logRequest(p.hdr, p.rec, p.digest);
+                }
+                for (Long zxid : packetsCommitted) {
+                    fzk.commit(zxid);
+                }
+            }
+        }
+
+        // 缓存未commit的请求
+        LinkedBlockingQueue<Request> pendingTxns = new LinkedBlockingQueue<Request>();
+
+        // 处理leader指令
+        QuorumPacket qp = new QuorumPacket();
+        while (this.isRunning()) {
+            readPacket(qp);
+            processPacket(qp);
+            {
+                switch (qp.getType()) {
+                case Leader.PING:
+                    ping(qp);
+                    break;
+                
+                case Leader.PROPOSAL:
+                    TxnLogEntry logEntry = SerializeUtils.deserializeTxn(qp.getData());
+                    TxnHeader hdr = logEntry.getHeader();
+                    Record txn = logEntry.getTxn();
+                    TxnDigest digest = logEntry.getDigest();
+                    
+                    fzk.logRequest(hdr, txn, digest);
+                    {
+                        Request request = new Request(hdr.getClientId(), hdr.getCxid(), hdr.getType(), hdr, txn, hdr.getZxid());
+                        pendingTxns.add(request);
+                        // 写入log文件，参靠上文单节点zk
+                        syncProcessor.processRequest(request);
+                    }
+                    break;
+                
+                case Leader.COMMIT:
+                    fzk.commit(qp.getZxid());
+                    {
+                        long firstElementZxid = pendingTxns.element().zxid;
+                        if (firstElementZxid != zxid) {
+                            ServiceUtils.requestSystemExit(ExitCode.UNMATCHED_TXN_COMMIT.getValue());
+                        }
+                        Request request = pendingTxns.remove();
+                        // 应用到状态机，参靠上文单节点zk
+                        commitProcessor.commit(request);
+                    }
+                    break;
+
+                case Leader.COMMITANDACTIVATE:
+                    // 集群成员变更
+                    break;
+                case Leader.SYNC:
+                    fzk.sync();
+                    break;
+                }
+            }
+        }
+    }
+
+}
+
+```
 
