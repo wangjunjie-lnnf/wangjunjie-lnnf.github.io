@@ -379,7 +379,7 @@ void InterpreterRuntime::monitorenter(JavaThread* thread, BasicObjectLock* elem)
 
                 // 递归锁重入
                 if (cur == Self) {
-                    _recursions ++;
+                    _recursions++;
                     return;
                 }
 
