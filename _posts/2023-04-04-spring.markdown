@@ -1,0 +1,1263 @@
+---
+layout: post
+title:  "spring"
+date:   2023-04-04 22:22:07 +0000
+categories: jekyll
+tags: spring mvc boot
+---
+
+# bean定义
+
+## xml
+
+```java
+
+public class GenericXmlApplicationContext extends GenericApplicationContext {
+
+	private final XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(this);
+
+    public void load(String... resourceLocations) {
+		this.reader.loadBeanDefinitions(resourceLocations);
+        {
+            // ResourceLoader用于定位xml配置文件
+            ResourceLoader resourceLoader = getResourceLoader();
+
+            Resource[] resources = ((ResourcePatternResolver) resourceLoader).getResources(location);
+
+			loadBeanDefinitions(resources);
+            {
+                Document doc = doLoadDocument(inputSource, resource);
+			    registerBeanDefinitions(doc, resource);
+                {
+                    BeanDefinitionDocumentReader documentReader = new DefaultBeanDefinitionDocumentReader();
+
+                    XmlReaderContext context = new XmlReaderContext(..., this, getNamespaceHandlerResolver());
+
+                    documentReader.registerBeanDefinitions(doc, context);
+                    {
+                        Element root = doc.getDocumentElement();
+
+                        BeanDefinitionParserDelegate parent = this.delegate;
+		                this.delegate = createDelegate(getReaderContext(), root, parent);
+
+                        // 判断profile是否生效
+                        if (this.delegate.isDefaultNamespace(root)) {
+                            String profileSpec = root.getAttribute(PROFILE_ATTRIBUTE);
+                            if (StringUtils.hasText(profileSpec)) {
+                                String[] specifiedProfiles = StringUtils.tokenizeToStringArray(profileSpec, ...);
+                                if (!getReaderContext().getEnvironment().acceptsProfiles(specifiedProfiles)) {
+                                    return;
+                                }
+                            }
+                        }
+
+                        parseBeanDefinitions(root, this.delegate);
+                        {
+                            if (delegate.isDefaultNamespace(root)) {
+                                NodeList nl = root.getChildNodes();
+                                for (int i = 0; i < nl.getLength(); i++) {
+                                    Node node = nl.item(i);
+                                    if (node instanceof Element) {
+                                        Element ele = (Element) node;
+                                        if (delegate.isDefaultNamespace(ele)) {
+                                            // 默认解析逻辑
+                                            parseDefaultElement(ele, delegate);
+                                            {
+                                                if (delegate.nodeNameEquals(ele, IMPORT_ELEMENT)) {
+                                                    // 解析<import/>
+                                                    importBeanDefinitionResource(ele);
+                                                }
+                                                else if (delegate.nodeNameEquals(ele, ALIAS_ELEMENT)) {
+                                                    // 解析<alias/>
+                                                    processAliasRegistration(ele);
+                                                }
+                                                else if (delegate.nodeNameEquals(ele, BEAN_ELEMENT)) {
+                                                    // 解析<bean/>
+                                                    processBeanDefinition(ele, delegate);
+                                                }
+                                                else if (delegate.nodeNameEquals(ele, NESTED_BEANS_ELEMENT)) {
+                                                    // 递归解析嵌套的<beans/>
+                                                    doRegisterBeanDefinitions(ele);
+                                                }
+                                            }
+                                        }
+                                        else {
+                                            // 每个node也可以利用namespace实现自定义解析
+                                            delegate.parseCustomElement(ele);
+                                        }
+                                    }
+                                }
+                            }
+                            else {
+                                // 根据xml的namespace自定义解析逻辑，实现类似dubbo的配置文件的效果
+                                // 默认从META-INF/spring.handlers加载NamespaceHandler
+                                delegate.parseCustomElement(root);
+                        }
+                    }
+                }
+            }
+
+        }
+	}
+
+}
+
+public class DefaultBeanDefinitionDocumentReader {
+
+    protected void processBeanDefinition(Element ele, BeanDefinitionParserDelegate delegate) {
+		BeanDefinitionHolder bdHolder = delegate.parseBeanDefinitionElement(ele);
+        {
+            String id = ele.getAttribute(ID_ATTRIBUTE);
+            String nameAttr = ele.getAttribute(NAME_ATTRIBUTE);
+
+            // name可以指定多个字符串表示id的别名
+            List<String> aliases = new ArrayList<>();
+            if (StringUtils.hasLength(nameAttr)) {
+                String[] nameArr = StringUtils.tokenizeToStringArray(nameAttr, ",; ");
+                aliases.addAll(Arrays.asList(nameArr));
+            }
+
+            // 未指定id则取第一个name
+            String beanName = id;
+            if (!StringUtils.hasText(beanName) && !aliases.isEmpty()) {
+                beanName = aliases.remove(0);
+            }
+
+            parseBeanDefinitionElement(ele, beanName, ...);
+            {
+                String className = null;
+                if (ele.hasAttribute(CLASS_ATTRIBUTE)) {
+                    className = ele.getAttribute(CLASS_ATTRIBUTE).trim();
+                }
+                String parent = null;
+                if (ele.hasAttribute(PARENT_ATTRIBUTE)) {
+                    parent = ele.getAttribute(PARENT_ATTRIBUTE);
+                }
+
+                // 创建GenericBeanDefinition
+                AbstractBeanDefinition bd = createBeanDefinition(className, parent);
+
+                // 解析各种attr: autowired/init-method/scope/depends-on/factory-method
+                parseBeanDefinitionAttributes(ele, beanName, containingBean, bd);
+
+                // 解析子节点<meta key="" value=""/>
+                parseMetaElements(ele, bd);
+                // 解析<lookup-method name="" bean=""/>
+                parseLookupOverrideSubElements(ele, bd.getMethodOverrides());
+                // 解析<replaced-method name="" replacer=""><arg-type match=""/></replaced-method>
+                parseReplacedMethodSubElements(ele, bd.getMethodOverrides());
+
+                // 解析<constructor-arg index="" type="" name="" ref="" value="" />
+                parseConstructorArgElements(ele, bd);
+                // 解析<property name="" ref="" value="" />
+                parsePropertyElements(ele, bd);
+                // 解析<qualifier type="" value="" />
+                parseQualifierElements(ele, bd);
+            }
+        }
+
+        bdHolder = delegate.decorateBeanDefinitionIfRequired(ele, bdHolder);
+        {
+            // Decorate based on custom attributes first.
+            // <bean pre:xxx="123" xmlns:pre="ns1" />
+            NamedNodeMap attributes = ele.getAttributes();
+            for (int i = 0; i < attributes.getLength(); i++) {
+                Node node = attributes.item(i);
+                // 根据attr的自定义namespace处理
+                finalDefinition = decorateIfRequired(node, finalDefinition, containingBd);
+            }
+
+            // Decorate based on custom nested elements.
+            // <bean><pre:my xmlns:pre="ns1" /></bean>
+            NodeList children = ele.getChildNodes();
+            for (int i = 0; i < children.getLength(); i++) {
+                Node node = children.item(i);
+                if (node.getNodeType() == Node.ELEMENT_NODE) {
+                    // 根据子节点的自定义namespace处理
+                    finalDefinition = decorateIfRequired(node, finalDefinition, containingBd);
+                }
+            }
+        }
+
+        // 注册bean定义和别名
+        BeanDefinitionReaderUtils.registerBeanDefinition(bdHolder, getReaderContext().getRegistry());	
+	}
+
+}
+
+```
+
+## 注解
+
+```java
+
+public class AnnotationConfigApplicationContext {
+
+    private final AnnotatedBeanDefinitionReader reader;
+
+	private final ClassPathBeanDefinitionScanner scanner;
+
+    public AnnotationConfigApplicationContext() {
+		// 注册ConfigurationClassPostProcessor等处理@Configuration和@Autowire
+		this.reader = new AnnotatedBeanDefinitionReader(this);
+        {
+            AnnotationConfigUtils.registerAnnotationConfigProcessors(this.registry);
+            {
+                // 处理@Configuration注解，此处是去除xml配置的核心点
+                RootBeanDefinition def = new RootBeanDefinition(ConfigurationClassPostProcessor.class);
+                registerPostProcessor(registry, def, ...);
+                
+                // 处理@Autowired注解
+                RootBeanDefinition def = new RootBeanDefinition(AutowiredAnnotationBeanPostProcessor.class);
+                registerPostProcessor(registry, def, ...);
+
+                // 处理@Resource/@PostConstruct/@PreDestory注解
+                RootBeanDefinition def = new RootBeanDefinition(CommonAnnotationBeanPostProcessor.class);
+                registerPostProcessor(registry, def, ...);
+            }
+        }
+
+		this.scanner = new ClassPathBeanDefinitionScanner(this);
+	}
+
+    @Override
+	public void register(Class<?>... componentClasses) {
+        // 此处正是spring-boot的其中一个启动过程
+		this.reader.register(componentClasses);
+        {
+            AnnotatedGenericBeanDefinition abd = new AnnotatedGenericBeanDefinition(beanClass);
+            
+            // 根据@Conditional判断是否跳过: 此处正是spring-boot各种starter的实现机制
+            skip = this.conditionEvaluator.shouldSkip(abd.getMetadata());
+            {
+                if (!metadata.isAnnotated(Conditional.class.getName())) {
+                    return false;
+                }
+
+                // @Conditional({XxxCondition, YyyCondition})
+                List<Condition> conditions = new ArrayList<>();
+                for (String[] conditionClasses : getConditionClasses(metadata)) {
+                    for (String conditionClass : conditionClasses) {
+                        Condition condition = getCondition(conditionClass, this.context.getClassLoader());
+                        conditions.add(condition);
+                    }
+                }
+
+                // 实现接口Ordered或用@Order注解
+		        AnnotationAwareOrderComparator.sort(conditions);
+
+                for (Condition condition : conditions) {
+                    if (!condition.matches(this.context, metadata)) {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (skip) {
+                return;
+            }
+
+            // 解析@Scope注解
+            ScopeMetadata scopeMetadata = this.scopeMetadataResolver.resolveScopeMetadata(abd);
+            abd.setScope(scopeMetadata.getScopeName());
+
+            // 默认name是类名首字母小写
+            String beanName = (name != null ? name : this.beanNameGenerator.generateBeanName(abd, this.registry));
+
+            AnnotationConfigUtils.processCommonDefinitionAnnotations(abd);
+            {
+                // 解析@Lazy
+                AnnotationAttributes lazy = attributesFor(metadata, Lazy.class);
+                abd.setLazyInit(lazy.getBoolean("value"));
+
+                // 解析@Primary
+                if (metadata.isAnnotated(Primary.class.getName())) {
+                    abd.setPrimary(true);
+                }
+
+                // 解析@DependsOn
+                AnnotationAttributes dependsOn = attributesFor(metadata, DependsOn.class);
+                if (dependsOn != null) {
+                    abd.setDependsOn(dependsOn.getStringArray("value"));
+                }
+
+                // 解析@Role
+                AnnotationAttributes role = attributesFor(metadata, Role.class);
+                if (role != null) {
+                    abd.setRole(role.getNumber("value").intValue());
+                }
+            }
+
+            // 自定义修改bean定义
+            if (customizers != null) {
+                for (BeanDefinitionCustomizer customizer : customizers) {
+                    customizer.customize(abd);
+                }
+            }
+
+            BeanDefinitionHolder definitionHolder = new BeanDefinitionHolder(abd, beanName);
+            // 处理proxyTargetClass
+            definitionHolder = AnnotationConfigUtils.applyScopedProxyMode(scopeMetadata, definitionHolder, this.registry);
+            BeanDefinitionReaderUtils.registerBeanDefinition(definitionHolder, this.registry);
+        }
+	}
+
+    @Override
+	public void scan(String... basePackages) {
+		this.scanner.scan(basePackages);
+        {
+            for (String basePackage : basePackages) {
+                // 所有被@Component注解的类
+                Set<BeanDefinition> candidates = findCandidateComponents(basePackage);
+                {
+                    // classpath*:/a/b/c/**/*.class
+                    String packageSearchPath = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX +
+                            resolveBasePackage(basePackage) + '/' + this.resourcePattern;
+                    // 获取所有.class文件
+                    Resource[] resources = getResourcePatternResolver().getResources(packageSearchPath);
+                    {
+                        findPathMatchingResources(locationPattern);
+                        {
+                            if (ResourceUtils.isJarURL(rootDirUrl) || isJarResource(rootDirResource)) {
+                                // 解析jar文件获取.class文件
+                                result.addAll(doFindPathMatchingJarResources(rootDirResource, rootDirUrl, subPattern));
+                            } else {
+                                // .class文件
+                                result.addAll(doFindPathMatchingFileResources(rootDirResource, subPattern));
+                            }
+                        }
+                    }
+
+                    // 不加载类，直接解析class文件获取所有注解！！！
+					MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
+					// 判断是否有@Component注解
+					if (isCandidateComponent(metadataReader)) {
+						ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);
+						if (isCandidateComponent(sbd)) {
+							candidates.add(sbd);
+						}
+					}
+                }
+
+                for (BeanDefinition candidate : candidates) {
+                    
+                    ScopeMetadata scopeMetadata = this.scopeMetadataResolver.resolveScopeMetadata(candidate);
+                    candidate.setScope(scopeMetadata.getScopeName());
+                    String beanName = this.beanNameGenerator.generateBeanName(candidate, this.registry);
+                    if (candidate instanceof AbstractBeanDefinition) {
+                        // 设置默认属性
+                        postProcessBeanDefinition((AbstractBeanDefinition) candidate, beanName);
+                    }
+                    if (candidate instanceof AnnotatedBeanDefinition) {
+                        // 同上，解析常见注解
+                        AnnotationConfigUtils.processCommonDefinitionAnnotations((AnnotatedBeanDefinition) candidate);
+                    }
+
+                    BeanDefinitionHolder definitionHolder = new BeanDefinitionHolder(candidate, beanName);
+                    definitionHolder = AnnotationConfigUtils.applyScopedProxyMode(scopeMetadata, definitionHolder, this.registry);
+                    registerBeanDefinition(definitionHolder, this.registry);
+                }
+            }
+        }
+	}
+
+}
+
+```
+
+# BeanFactory
+
+```java
+
+public interface BeanFactory {
+
+    Object getBean(String name);
+    {
+        // 如果没有指定bean的定义则委托给parent
+        BeanFactory parentBeanFactory = getParentBeanFactory();
+        if (parentBeanFactory != null && !containsBeanDefinition(beanName)) {
+            return (T) parentBeanFactory.getBean(nameToLookup);
+        }
+
+        // 如果bean定义时指定了parent则要合并父子bean的定义
+        RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);
+
+        String[] dependsOn = mbd.getDependsOn();
+        for (String dep : dependsOn) {
+            // 检查循环依赖
+            if (isDependent(beanName, dep)) {
+                throw new BeanCreationException("Circular depends-on relationship");
+            }
+            // 先加载依赖的bean
+            getBean(dep);
+        }
+
+        if (mbd.isSingleton()) {
+            sharedInstance = getSingleton(beanName, () -> {
+                return createBean(beanName, mbd, args);
+                {
+                    // Give BeanPostProcessors a chance to return a proxy instead of the target bean instance.
+                    Object bean = resolveBeforeInstantiation(beanName, mbd);
+                    {
+                        Class<?> targetType = determineTargetType(beanName, mbd);
+
+                        bean = applyBeanPostProcessorsBeforeInstantiation(targetType, beanName);
+                        {
+                            // aop正是基于AbstractAutoProxyCreator实现
+                            for (InstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().instantiationAware) {
+                                Object result = bp.postProcessBeforeInstantiation(beanClass, beanName);
+                                if (result != null) {
+                                    return result;
+                                }
+                            }
+                        }
+
+                        if (bean != null) {
+                            bean = applyBeanPostProcessorsAfterInitialization(bean, beanName);
+                            {
+                                for (BeanPostProcessor processor : getBeanPostProcessors()) {
+                                    Object current = processor.postProcessAfterInitialization(result, beanName);
+                                    if (current == null) {
+                                        return result;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (bean != null) {
+                        return bean;
+                    }
+
+                    instanceWrapper = createBeanInstance(beanName, mbd, args);
+                    {
+                        // bean定义时指定了实例
+                        Supplier<?> instanceSupplier = mbd.getInstanceSupplier();
+                        if (instanceSupplier != null) {
+                            return obtainFromSupplier(instanceSupplier, beanName);
+                        }
+
+                        // FactoryBean的factory-method
+                        if (mbd.getFactoryMethodName() != null) {
+                            return instantiateUsingFactoryMethod(beanName, mbd, args);
+                        }
+
+                        // 构造器注入：AutowiredAnnotationBeanPostProcessor处理构造器上的@Autowire注解
+                        Constructor<?>[] ctors = determineConstructorsFromBeanPostProcessors(beanClass, beanName);
+                        {
+                            for (SmartInstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().smartInstantiationAware) {
+                                Constructor<?>[] ctors = bp.determineCandidateConstructors(beanClass, beanName);
+                                if (ctors != null) {
+                                    return ctors;
+                                }
+                            }
+                        }
+
+                        // 构造器注入
+                        if (ctors != null || mbd.getResolvedAutowireMode() == AUTOWIRE_CONSTRUCTOR ||
+                                mbd.hasConstructorArgumentValues() || !ObjectUtils.isEmpty(args)) {
+                            return autowireConstructor(beanName, mbd, ctors, args);
+                        }
+
+                        // 使用无参构造实例化
+                        beanInstance = getInstantiationStrategy().instantiate(mbd, beanName, this);
+                        BeanWrapper bw = new BeanWrapperImpl(beanInstance);
+                        return bw;
+                    }
+
+                    Object bean = instanceWrapper.getWrappedInstance();
+                    Class<?> beanType = instanceWrapper.getWrappedClass();
+                    applyMergedBeanDefinitionPostProcessors(mbd, beanType, beanName);
+                    {
+                        for (MergedBeanDefinitionPostProcessor processor : getBeanPostProcessorCache().mergedDefinition) {
+                            processor.postProcessMergedBeanDefinition(mbd, beanType, beanName);
+                        }
+                    }
+
+                    // 解决循环引用问题
+                    boolean earlySingletonExposure = (mbd.isSingleton() && this.allowCircularReferences &&
+                            isSingletonCurrentlyInCreation(beanName));
+                    if (earlySingletonExposure) {
+                        addSingletonFactory(beanName, () -> getEarlyBeanReference(beanName, mbd, bean));
+                    }
+
+                    // 设置属性值@Autowire/@Resource
+                    populateBean(beanName, mbd, instanceWrapper);
+                    {
+                        // 属性设置之前的扩展点
+                        for (InstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().instantiationAware) {
+                            if (!bp.postProcessAfterInstantiation(bw.getWrappedInstance(), beanName)) {
+                                return;
+                            }
+                        }
+
+                        // 设置xml中定义的autowire字段值
+                        int resolvedAutowireMode = mbd.getResolvedAutowireMode();
+                        if (resolvedAutowireMode == AUTOWIRE_BY_NAME || resolvedAutowireMode == AUTOWIRE_BY_TYPE) {
+                            MutablePropertyValues newPvs = new MutablePropertyValues(pvs);
+                            // Add property values based on autowire by name if applicable.
+                            if (resolvedAutowireMode == AUTOWIRE_BY_NAME) {
+                                autowireByName(beanName, mbd, bw, newPvs);
+                            }
+                            // Add property values based on autowire by type if applicable.
+                            if (resolvedAutowireMode == AUTOWIRE_BY_TYPE) {
+                                autowireByType(beanName, mbd, bw, newPvs);
+                            }
+                        }
+
+                        for (InstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().instantiationAware) {
+                            // 处理@Autowire：AutowiredAnnotationBeanPostProcessor
+                            // 处理@Resource：CommonAnnotationBeanPostProcessor
+                            bp.postProcessProperties(pvs, bw.getWrappedInstance(), beanName);
+                        }
+                    }
+
+                    initializeBean(beanName, exposedObject, mbd);
+                    {
+                        invokeAwareMethods(beanName, bean);
+                        {
+                            if (bean instanceof Aware) {
+                                if (bean instanceof BeanNameAware) {
+                                    ((BeanNameAware) bean).setBeanName(beanName);
+                                }
+                                if (bean instanceof BeanFactoryAware) {
+                                    ((BeanFactoryAware) bean).setBeanFactory(AbstractAutowireCapableBeanFactory.this);
+                                }
+                            }
+                        }
+
+                        Object wrappedBean = applyBeanPostProcessorsBeforeInitialization(wrappedBean, beanName);
+                        {
+                            // InitDestroyAnnotationBeanPostProcessor: 执行@PostConstruct注解的init方法
+                            for (BeanPostProcessor processor : getBeanPostProcessors()) {
+                                Object current = processor.postProcessBeforeInitialization(result, beanName);
+                                if (current == null) {
+                                    return result;
+                                }
+                                result = current;
+                            }
+                        }
+
+                        invokeInitMethods(beanName, wrappedBean, mbd);
+                        {
+                            if (bean instanceof InitializingBean) {
+                                ((InitializingBean) bean).afterPropertiesSet();
+                            }
+
+                            // xml中init-method指定的方法
+                            String initMethodName = mbd.getInitMethodName();
+                            if (StringUtils.hasLength(initMethodName)) {
+                                invokeCustomInitMethod(beanName, bean, mbd);
+                            }
+                        }
+                    }
+
+                    // 如果有跟initializeBean中对应的destory方法
+                    registerDisposableBeanIfNecessary(beanName, bean, mbd);
+                }
+            });
+
+            // 处理FactoryBean
+            beanInstance = getObjectForBeanInstance(sharedInstance, name, beanName, mbd);
+            {
+                // 名称以&开头表示FactoryBean自身
+                if (BeanFactoryUtils.isFactoryDereference(name)) {
+                    if (!(beanInstance instanceof FactoryBean)) {
+                        throw new BeanIsNotAFactoryException(beanName, beanInstance.getClass());
+                    }
+                    if (mbd != null) {
+                        mbd.isFactoryBean = true;
+                    }
+                    return beanInstance;
+                }
+
+                if (!(beanInstance instanceof FactoryBean)) {
+                    return beanInstance;
+                }
+
+                return getObjectFromFactoryBean(factory, beanName, !synthetic);
+                {
+                    Object object = factory.getObject();
+                    applyBeanPostProcessorsAfterInitialization(object, beanName);
+                }
+            }
+        } else if (mbd.isPrototype()) {
+            Object prototypeInstance = createBean(beanName, mbd, args);
+            // 处理FactoryBean
+            beanInstance = getObjectForBeanInstance(prototypeInstance, name, beanName, mbd);
+        } else {
+            // 自定义scope
+            String scopeName = mbd.getScope();
+            Scope scope = this.scopes.get(scopeName);
+            
+            Object scopedInstance = scope.get(beanName, () -> {
+                return createBean(beanName, mbd, args);
+            });
+            
+            beanInstance = getObjectForBeanInstance(scopedInstance, name, beanName, mbd);
+        }
+    }
+
+}
+
+```
+
+# ApplicationContext
+
+```java
+
+// ApplicationContext在BeanFactory基础上提供了基于profile的配置参数的能力(EnvironmentCapable)
+public interface ApplicationContext extends EnvironmentCapable, ListableBeanFactory, HierarchicalBeanFactory,
+		MessageSource, ApplicationEventPublisher, ResourcePatternResolver {
+    
+}
+
+```
+
+# spring-mvc
+
+## xml配置
+
+```xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app>
+
+    <context-param>
+        <param-name>contextConfigLocation</param-name>
+        <param-value>classpath*:spring/applicationcontext-*.xml</param-value>
+    </context-param>
+
+    <listener>
+        <listener-class>org.springframework.web.context.ContextLoaderListener</listener-class>
+    </listener>
+
+    <servlet>
+        <servlet-name>springmvc</servlet-name>
+        <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+        <init-param>
+            <param-name>contextConfigLocation</param-name>
+            <param-value>classpath*:spring/springmvc-context.xml</param-value>
+        </init-param>
+        <load-on-startup>1</load-on-startup>
+    </servlet>
+    
+    <servlet-mapping>
+        <servlet-name>springmvc</servlet-name>
+        <url-pattern>/</url-pattern>
+    </servlet-mapping>
+
+</web-app>
+
+```
+
+## ContextLoaderListener
+
+```java
+
+public class ContextLoaderListener extends ContextLoader implements ServletContextListener {
+
+    @Override
+	public void contextInitialized(ServletContextEvent event) {
+		initWebApplicationContext(event.getServletContext());
+        {
+            this.context = createWebApplicationContext(servletContext);
+            {
+                Class<?> contextClass = determineContextClass(sc);
+                {
+                    String contextClassName = servletContext.getInitParameter("contextClass");
+                    if (contextClassName != null) {
+                        return ClassUtils.forName(contextClassName, ClassUtils.getDefaultClassLoader());
+                    } else {
+                        ClassPathResource resource = new ClassPathResource("ContextLoader.properties", ContextLoader.class);
+					    defaultStrategies = PropertiesLoaderUtils.loadProperties(resource);
+
+                        // 默认是XmlWebApplicationContext
+                        contextClassName = defaultStrategies.getProperty(WebApplicationContext.class.getName());
+                        return ClassUtils.forName(contextClassName, ContextLoader.class.getClassLoader());
+                    }
+                }
+
+                return (ConfigurableWebApplicationContext) BeanUtils.instantiateClass(contextClass);
+            }
+
+            if (this.context instanceof ConfigurableWebApplicationContext) {
+				ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) this.context;
+				if (!cwac.isActive()) {
+					if (cwac.getParent() == null) {
+						ApplicationContext parent = loadParentContext(servletContext);
+						cwac.setParent(parent);
+					}
+
+					configureAndRefreshWebApplicationContext(cwac, servletContext);
+                    {
+                        wac.setServletContext(servletContext);
+
+                        String configLocationParam = sc.getInitParameter("contextConfigLocation");
+                        if (configLocationParam != null) {
+                            wac.setConfigLocation(configLocationParam);
+                        }
+
+                        customizeContext(sc, wac);
+                        {
+                            List<Class<ApplicationContextInitializer<ConfigurableApplicationContext>>> initializerClasses = determineContextInitializerClasses(sc);
+                            {
+                                String globalClassNames = servletContext.getInitParameter("globalInitializerClasses");
+                                if (globalClassNames != null) {
+                                    for (String className : StringUtils.tokenizeToStringArray(globalClassNames, ",; ")) {
+                                        initializerClasses.add(loadInitializerClass(className));
+                                    }
+                                }
+
+                                String localClassNames = servletContext.getInitParameter("contextInitializerClasses");
+                                if (localClassNames != null) {
+                                    for (String className : StringUtils.tokenizeToStringArray(localClassNames, ",; ")) {
+                                        initializerClasses.add(loadInitializerClass(className));
+                                    }
+                                }
+                            }
+
+                            for (Class<ApplicationContextInitializer<ConfigurableApplicationContext>> initializerClass : initializerClasses) {
+                                this.contextInitializers.add(BeanUtils.instantiateClass(initializerClass));
+                            }
+
+                            // 通过ApplicationContextInitializer定制wac
+                            AnnotationAwareOrderComparator.sort(this.contextInitializers);
+                            for (ApplicationContextInitializer<ConfigurableApplicationContext> initializer : this.contextInitializers) {
+                                initializer.initialize(wac);
+                            }
+                        }
+
+                        // 重新加载
+                        wac.refresh();
+                    }
+				}
+			}
+
+            // FrameworkServlet中会用到
+            servletContext.setAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE, this.context);
+        }
+	}
+
+}
+
+```
+
+## DispatcherServlet
+
+```java
+
+public class DispatcherServlet extends FrameworkServlet {
+
+    @Override
+	public final void init() {
+        initServletBean();
+        {
+            this.webApplicationContext = initWebApplicationContext();
+            {
+                WebApplicationContext rootContext = getServletContext().getAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE);
+
+                // 创建servlet相关的wac
+                wac = createWebApplicationContext(rootContext);
+                {
+                    wac = new XmlWebApplicationContext();
+                    wac.setEnvironment(getEnvironment());
+		            wac.setParent(rootContext);
+
+                    if (contextConfigLocation != null) {
+                        wac.setConfigLocation(contextConfigLocation);
+                    }
+
+                    wac.setServletContext(getServletContext());
+                    wac.setServletConfig(getServletConfig());
+
+                    // 通过ApplicationContextInitializer定制wac
+                    applyInitializers(wac);
+
+		            wac.refresh();            
+                }
+
+                getServletContext().setAttribute(SERVLET_CONTEXT_PREFIX + getServletName(), wac);
+            }
+        }
+    }
+
+    @Override
+	protected void onRefresh(ApplicationContext context) {
+		initStrategies(context);
+        {
+            initMultipartResolver(context);
+            initLocaleResolver(context);
+            initThemeResolver(context);
+
+            // handler mapping注册表
+            initHandlerMappings(context);
+            // adapter用于执行handler
+            initHandlerAdapters(context);
+            // 异常处理
+            initHandlerExceptionResolvers(context);
+
+            initRequestToViewNameTranslator(context);
+            initViewResolvers(context);
+            initFlashMapManager(context);
+        }
+	}
+
+    @Override
+	protected final void doGet(HttpServletRequest request, HttpServletResponse response) {
+		processRequest(request, response);
+	}
+
+	@Override
+	protected final void doPost(HttpServletRequest request, HttpServletResponse response) {
+		processRequest(request, response);
+	}
+
+    protected final void processRequest(HttpServletRequest request, HttpServletResponse response) {
+        doService(request, response);
+        {
+            // Make framework objects available to handlers and view objects.
+		    request.setAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE, getWebApplicationContext());
+
+            doDispatch(request, response);
+            {
+                try {
+                    // 根据request匹配handler和HandlerInterceptor
+                    mappedHandler = getHandler(processedRequest);
+                    {
+                        for (HandlerMapping mapping : this.handlerMappings) {
+                            HandlerExecutionChain handler = mapping.getHandler(request);
+                            if (handler != null) {
+                                return handler;
+                            }
+                        }
+                    }
+
+                    // 选择用于执行handler的HandlerAdapter
+                    HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+                    {
+                        for (HandlerAdapter adapter : this.handlerAdapters) {
+                            if (adapter.supports(handler)) {
+                                return adapter;
+                            }
+                        }
+                    }
+
+                    mappedHandler.applyPreHandle(processedRequest, response);
+                    {
+                        for (int i = 0; i < this.interceptorList.size(); i++) {
+                            HandlerInterceptor interceptor = this.interceptorList.get(i);
+                            if (!interceptor.preHandle(request, response, this.handler)) {
+                                triggerAfterCompletion(request, response, null);
+                                {
+                                    // 执行过preHandle就会执行postHandle
+                                    for (int i = this.interceptorList.size() - 1; i >= 0; i--) {
+                                        HandlerInterceptor interceptor = this.interceptorList.get(i);
+                                        interceptor.postHandle(request, response, this.handler, mv);
+                                    }
+                                }
+
+                                return false;
+                            }
+
+                            this.interceptorIndex = i;
+                        }
+
+                        return true;
+                    }
+
+                    // Actually invoke the handler.
+                    // RequestMappingHandlerAdapter处理@RequestMapping注解
+                    mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+                    {
+                        return invokeHandlerMethod(request, response, handlerMethod);
+                        {
+                            ServletInvocableHandlerMethod invocableMethod = new ServletInvocableHandlerMethod(handlerMethod);
+                            // 获取handler的参数
+                            invocableMethod.setHandlerMethodArgumentResolvers(this.argumentResolvers);
+                            // 处理handler的返回值
+                            invocableMethod.setHandlerMethodReturnValueHandlers(this.returnValueHandlers);
+                            invocableMethod.invokeAndHandle(webRequest, mavContainer);
+                            {
+                                Object returnValue = invokeForRequest(webRequest, mavContainer, providedArgs);
+                                {
+                                    // 获取handler的参数
+                                    Object[] args = getMethodArgumentValues(request, mavContainer, providedArgs);
+                                    {
+                                        MethodParameter[] parameters = getMethodParameters();
+                                        Object[] args = new Object[parameters.length];
+                                        for (int i = 0; i < parameters.length; i++) {
+                                            MethodParameter parameter = parameters[i];
+                                            
+                                            if (!this.resolvers.supportsParameter(parameter)) {
+                                                throw new IllegalStateException("No suitable resolver");
+                                            }
+
+                                            args[i] = this.resolvers.resolveArgument(parameter, mavContainer, request, ...);
+                                            {
+                                                // 可以通过自定义HandlerMethodArgumentResolver扩展handler的参数
+                                                for (HandlerMethodArgumentResolver resolver : this.argumentResolvers) {
+                                                    if (resolver.supportsParameter(parameter)) {
+                                                        return resolver.resolveArgument(parameter, mavContainer, webRequest, ...);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        return args;
+                                    }
+
+                                    Method method = getBridgedMethod();
+                                    return method.invoke(getBean(), args);
+                                }
+
+                                this.returnValueHandlers.handleReturnValue(
+					                    returnValue, getReturnValueType(returnValue), mavContainer, webRequest);
+                                {
+                                    // 可以通过自定义HandlerMethodReturnValueHandler灵活处理响应
+                                    for (HandlerMethodReturnValueHandler handler : this.returnValueHandlers) {
+                                        if (handler.supportsReturnType(returnType)) {
+                                            handler.handleReturnValue(returnValue, returnType, mavContainer, webRequest);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    mappedHandler.applyPostHandle(processedRequest, response, mv);
+                    {
+                        for (int i = this.interceptorList.size() - 1; i >= 0; i--) {
+                            HandlerInterceptor interceptor = this.interceptorList.get(i);
+                            interceptor.postHandle(request, response, this.handler, mv);
+                        }
+                    }
+                } catch (Exception ex) {
+                    dispatchException = ex;
+                }
+
+                // 结果处理
+                processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+                {
+                    if (dispatchException != null) {
+                        mv = processHandlerException(request, response, handler, exception);
+                        {
+                            // 可以通过自定义HandlerExceptionResolver灵活处理异常
+                            for (HandlerExceptionResolver resolver : this.handlerExceptionResolvers) {
+                                exMv = resolver.resolveException(request, response, handler, ex);
+                                if (exMv != null) {
+                                    return exMv;
+                                }
+                            }
+                        }
+                    }
+
+                    // 渲染视图
+                    if (mv != null && !mv.wasCleared()) {
+                        render(mv, request, response);
+                    }
+                }
+            }
+        }
+    }
+
+}
+
+```
+
+
+# spring-boot
+
+## ConfigurationClassPostProcessor
+
+```java
+
+// 此类对spring-boot至关重要: 处理@Configuration注解
+public class ConfigurationClassPostProcessor {
+
+    @Override
+	public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
+        processConfigBeanDefinitions(registry);
+        {
+            List<BeanDefinitionHolder> configCandidates = new ArrayList<>();
+            String[] candidateNames = registry.getBeanDefinitionNames();
+
+            // 查找所有已加载类中被@Configuration注解的类
+            for (String beanName : candidateNames) {
+                BeanDefinition beanDef = registry.getBeanDefinition(beanName);
+                if (beanDef.getAttribute("configurationClass") != null) {
+                    // 已经处理过
+                } // 必须有@Configuration注解
+                else if (ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)) {
+                    configCandidates.add(new BeanDefinitionHolder(beanDef, beanName));
+                }
+            }
+
+            // Sort by previously determined @Order value, if applicable
+            configCandidates.sort((bd1, bd2) -> {
+                int i1 = ConfigurationClassUtils.getOrder(bd1.getBeanDefinition());
+                int i2 = ConfigurationClassUtils.getOrder(bd2.getBeanDefinition());
+                return Integer.compare(i1, i2);
+            });
+
+            ConfigurationClassParser parser = new ConfigurationClassParser(
+				this.metadataReaderFactory, this.problemReporter, this.environment,
+				this.resourceLoader, this.componentScanBeanNameGenerator, registry);
+            {
+                // 处理@ComponentScan注解
+                this.componentScanParser = new ComponentScanAnnotationParser(environment, resourceLoader, ...);
+                // 处理@Conditional注解
+                this.conditionEvaluator = new ConditionEvaluator(registry, environment, resourceLoader);
+            }
+
+            // 当前已经加载的被@Configuration注解的类, 递归解析所有被@Configuration注解的类
+            Set<BeanDefinitionHolder> candidates = new LinkedHashSet<>(configCandidates);
+            Set<ConfigurationClass> alreadyParsed = new HashSet<>(configCandidates.size());
+
+            do {
+                parser.parse(candidates);
+                {
+                    for (BeanDefinitionHolder holder : candidates) {
+                        BeanDefinition bd = holder.getBeanDefinition();
+
+                        if (bd instanceof AnnotatedBeanDefinition) {
+                            parse(((AnnotatedBeanDefinition) bd).getMetadata(), holder.getBeanName());
+                        } else if (bd instanceof AbstractBeanDefinition && ((AbstractBeanDefinition) bd).hasBeanClass()) {
+                            parse(((AbstractBeanDefinition) bd).getBeanClass(), holder.getBeanName());
+                        } else {
+                            parse(bd.getBeanClassName(), holder.getBeanName());
+                            {
+                                processConfigurationClass(new ConfigurationClass(reader, beanName), ...);
+                                {
+                                    // 判断@Conditional注解
+                                    if (this.conditionEvaluator.shouldSkip(configClass.getMetadata(), ...)) {
+                                        return;
+                                    }
+
+                                    // 沿着继承链处理
+                                    SourceClass sourceClass = asSourceClass(configClass, filter);
+                                    do {
+                                        sourceClass = doProcessConfigurationClass(configClass, sourceClass, filter);
+                                        {
+                                            // 如果有@Component注解，则先处理嵌套的内部类
+                                            if (configClass.getMetadata().isAnnotated(Component.class.getName())) {
+                                                // Recursively process any member (nested) classes first
+                                                processMemberClasses(configClass, sourceClass, filter);
+                                            }
+
+                                            // Process any @PropertySource annotations
+                                            for (AnnotationAttributes propertySource : AnnotationConfigUtils.attributesForRepeatable(...)) {
+                                                processPropertySource(propertySource);
+                                            }
+
+                                            // Process any @ComponentScan annotations
+                                            Set<AnnotationAttributes> componentScans = AnnotationConfigUtils.attributesForRepeatable(...);
+                                            if (!this.conditionEvaluator.shouldSkip(sourceClass.getMetadata(), ...)) {
+                                                for (AnnotationAttributes componentScan : componentScans) {
+                                                    // scan指定路径
+                                                    Set<BeanDefinitionHolder> scannedBeanDefinitions = this.componentScanParser.parse(componentScan, ...);
+                                                    for (BeanDefinitionHolder holder : scannedBeanDefinitions) {
+                                                        BeanDefinition bdCand = holder.getBeanDefinition().getOriginatingBeanDefinition();
+                                                        // scan发现了更多@Configuration注解的类
+                                                        if (ConfigurationClassUtils.checkConfigurationClassCandidate(bdCand, this.metadataReaderFactory)) {
+                                                            parse(bdCand.getBeanClassName(), holder.getBeanName());
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Process any @Import annotations
+                                            processImports(configClass, sourceClass, getImports(sourceClass), filter, true);
+
+                                            // Process any @ImportResource annotations
+                                            AnnotationAttributes importResource =
+                                                    AnnotationConfigUtils.attributesFor(sourceClass.getMetadata(), ImportResource.class);
+                                            if (importResource != null) {
+                                                String[] resources = importResource.getStringArray("locations");
+                                                Class<? extends BeanDefinitionReader> readerClass = importResource.getClass("reader");
+                                                for (String resource : resources) {
+                                                    String resolvedResource = this.environment.resolveRequiredPlaceholders(resource);
+                                                    configClass.addImportedResource(resolvedResource, readerClass);
+                                                }
+                                            }
+
+                                            // Process individual @Bean methods
+                                            Set<MethodMetadata> beanMethods = retrieveBeanMethodMetadata(sourceClass);
+                                            for (MethodMetadata methodMetadata : beanMethods) {
+                                                configClass.addBeanMethod(new BeanMethod(methodMetadata, configClass));
+                                            }
+
+                                            // Process default methods on interfaces
+                                            processInterfaces(configClass, sourceClass);
+
+                                            // Process superclass, if any
+                                            if (sourceClass.getMetadata().hasSuperClass()) {
+                                                String superclass = sourceClass.getMetadata().getSuperClassName();
+                                                if (superclass != null && !superclass.startsWith("java") &&
+                                                        !this.knownSuperclasses.containsKey(superclass)) {
+                                                    this.knownSuperclasses.put(superclass, configClass);
+                                                    // Superclass found, return its annotation metadata and recurse
+                                                    return sourceClass.getSuperClass();
+                                                }
+                                            }
+
+                                            // No superclass -> processing is complete
+                                            return null;
+                                        }
+                                    } while (sourceClass != null);
+
+		                            this.configurationClasses.put(configClass, configClass);
+                                }
+                            }
+                        }
+		            }
+                }
+
+                Set<ConfigurationClass> configClasses = new LinkedHashSet<>(parser.getConfigurationClasses());
+                configClasses.removeAll(alreadyParsed);
+
+                // Read the model and create bean definitions based on its content
+                if (this.reader == null) {
+                    this.reader = new ConfigurationClassBeanDefinitionReader(registry, ..., parser.getImportRegistry());
+                }
+
+                // 处理@Import/@ImportResource/@Bean
+                this.reader.loadBeanDefinitions(configClasses);
+                {
+                    for (ConfigurationClass configClass : configClasses) {
+                        loadBeanDefinitionsForConfigurationClass(configClass, ...);
+                        {
+                            for (BeanMethod beanMethod : configClass.getBeanMethods()) {
+                                loadBeanDefinitionsForBeanMethod(beanMethod);
+                            }
+
+                            // 基于xml解析bean定义
+                            loadBeanDefinitionsFromImportedResources(configClass.getImportedResources());
+                            loadBeanDefinitionsFromRegistrars(configClass.getImportBeanDefinitionRegistrars());
+                        }
+                    }
+                }
+
+                alreadyParsed.addAll(configClasses);
+
+                // 处理@Configuration过程中发现了更多被@Configuration注解的类
+                candidates.clear();
+                if (registry.getBeanDefinitionCount() > candidateNames.length) {
+                    String[] newCandidateNames = registry.getBeanDefinitionNames();
+                    Set<String> oldCandidateNames = new HashSet<>(Arrays.asList(candidateNames));
+                    for (String candidateName : newCandidateNames) {
+                        if (!oldCandidateNames.contains(candidateName)) {
+                            BeanDefinition bd = registry.getBeanDefinition(candidateName);
+                            if (ConfigurationClassUtils.checkConfigurationClassCandidate(bd, this.metadataReaderFactory) &&
+                                    !alreadyParsedClasses.contains(bd.getBeanClassName())) {
+                                candidates.add(new BeanDefinitionHolder(bd, candidateName));
+                            }
+                        }
+                    }
+                    candidateNames = newCandidateNames;
+                }
+            } while (!candidates.isEmpty());
+        }
+    }
+
+}
+
+```
+
+## 初始化
+
+```java
+
+public class SpringApplication {
+
+    public SpringApplication(ResourceLoader resourceLoader, Class<?>... primarySources) {
+        // getSpringFactoriesInstances: 类似于ServiceLoader, 加载接口的实现类
+        // spring-boot的接口太多了，如果使用ServiceLoader每个接口都需要一个文件
+        this.bootstrapRegistryInitializers = new ArrayList<>(
+                getSpringFactoriesInstances(BootstrapRegistryInitializer.class));
+        setInitializers((Collection) getSpringFactoriesInstances(ApplicationContextInitializer.class));
+        setListeners((Collection) getSpringFactoriesInstances(ApplicationListener.class));
+
+        // 遍历栈帧找到main方法所在类
+        this.mainApplicationClass = deduceMainApplicationClass();
+    }
+
+    public static ConfigurableApplicationContext run(Class<?> primarySource, String... args) {
+		return run(new Class<?>[] { primarySource }, args);
+        {
+            return new SpringApplication(primarySources).run(args);
+            {
+                // ApplicationContext初始化之前用于注册bean
+		        DefaultBootstrapContext bootstrapContext = createBootstrapContext();
+                {
+                    bootstrapContext = new DefaultBootstrapContext();
+                    this.bootstrapRegistryInitializers.forEach((initializer) -> initializer.initialize(bootstrapContext));
+                }
+
+                // 创建ConfigurableEnvironment
+                ConfigurableEnvironment environment = prepareEnvironment(listeners, bootstrapContext, applicationArguments);
+                // 创建wac
+			    context = new AnnotationConfigServletWebServerApplicationContext();
+
+                prepareContext(bootstrapContext, context, environment, listeners, ...);
+                {
+                    context.setEnvironment(environment);
+                    applyInitializers(context);
+                    {
+                        // 可以通过ApplicationContextInitializer自定义wac
+                        for (ApplicationContextInitializer initializer : getInitializers()) {
+                            Class<?> requiredType = GenericTypeResolver.resolveTypeArgument(initializer.getClass(),
+                                    ApplicationContextInitializer.class);
+                            initializer.initialize(context);
+                        }
+                    }
+
+                    bootstrapContext.close(context);
+
+                    for (Object source : this.sources) {
+                        load(source);
+                        {
+                            if (source instanceof Class<?>) {
+                                load((Class<?>) source);
+                                {
+                                    // 处理@Configure注解，参考上文ConfigurationClassPostProcessor
+                                    this.annotatedReader.register(source);
+                                }
+                                return;
+                            }
+                            if (source instanceof Resource) {
+                                load((Resource) source);
+                                return;
+                            }
+                            if (source instanceof Package) {
+                                load((Package) source);
+                                return;
+                            }
+                            if (source instanceof CharSequence) {
+                                load((CharSequence) source);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+			    refreshContext(context);
+
+			    callRunners(context, applicationArguments);
+            }
+        }
+	}
+
+}
+
+```
+
+spring-boot最大的两个创新：
+1. 支持嵌入tomcat等servlet容器。
+2. 实现starter模式。
+
+## 嵌入tomcat
+
+## starter
