@@ -1258,6 +1258,5 @@ spring-boot最大的两个创新：
 1. 支持嵌入tomcat等servlet容器。
 2. 实现starter模式。
 
-## 嵌入tomcat
+## tomcat-starter
 
-## starter

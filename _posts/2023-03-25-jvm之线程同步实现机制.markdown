@@ -545,5 +545,220 @@ void InterpreterRuntime::monitorexit(JavaThread* thread, BasicObjectLock* elem)
 
 # AQS
 
+```java
+
+/* 
+ * 继承者通过tryXxx()反应其意图，此意图由AQS基于等待队列来实现落地。
+ * 
+ * Provides a framework for implementing blocking locks and related
+ * synchronizers (semaphores, events, etc) that rely on
+ * first-in-first-out (FIFO) wait queues.  This class is designed to
+ * be a useful basis for most kinds of synchronizers that rely on a
+ * single atomic int value to represent state. Subclasses
+ * must define the protected methods that change this state, and which
+ * define what that state means in terms of this object being acquired or released.
+ */
+public abstract class AbstractQueuedSynchronizer {
+
+    static final class Node {
+        volatile int waitStatus;
+        volatile Node prev;
+        volatile Node next;
+        volatile Thread thread;
+        // nextWaiter==SHARED表示共享锁
+        // nextWaiter!=SHARED表示互斥锁关联的条件变量的等待队列
+        Node nextWaiter;
+    }
+
+    // 加锁失败后的双链表等待队列
+    private transient volatile Node head;
+    private transient volatile Node tail;
+
+    // 继承者自定义的状态: 用于辅助实现tryXxx()
+    private volatile int state;
+
+    protected final boolean compareAndSetState(int expect, int update) {
+        return unsafe.compareAndSwapInt(this, stateOffset, expect, update);
+    }
+
+    // tryXxx()由继承者自定义，返回值说明了继承者的意图。
+    // 此意图由AQS负责落地实现。
+
+    // 返回true表示继承者的意图是加锁成功
+    protected boolean tryAcquire(int arg);
+    // 返回true表示继承者的意图是唤醒后续等待线程
+    protected boolean tryRelease(int arg);
+    // 返回负数表示继承者的意图是加锁失败
+    // 返回0表示继承者的意图是加锁成功但是不唤醒后续等待线程
+    // 返回正数表示继承者的意图是加锁成功且唤醒后续加共享锁的等待线程
+    protected int tryAcquireShared(int arg);
+    // 返回true表示继承者的意图是唤醒等待线程
+    protected boolean tryReleaseShared(int arg);
+
+    // 获取互斥锁，不允许中断
+    public final void acquire(int arg) {
+        if (!tryAcquire(arg) &&
+            // 获取互斥锁失败则进入等待队列
+            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+            // 等待过程中被中断过，但是没处理，interrupt标识被清除
+            // 此处重新设置interrupt标识
+            selfInterrupt();
+    }
+
+    // 获取互斥锁，允许被中断
+    public final void acquireInterruptibly(int arg)
+            throws InterruptedException {
+        if (Thread.interrupted())
+            throw new InterruptedException();
+        if (!tryAcquire(arg))
+            doAcquireInterruptibly(arg);
+    }
+
+    // 获取互斥锁，指定超时时长
+    public final boolean tryAcquireNanos(int arg, long nanosTimeout)
+            throws InterruptedException {
+        if (Thread.interrupted())
+            throw new InterruptedException();
+        return tryAcquire(arg) ||
+            doAcquireNanos(arg, nanosTimeout);
+    }
+
+    // 释放互斥锁
+    public final boolean release(int arg) {
+        if (tryRelease(arg)) {
+            Node h = head;
+            if (h != null && h.waitStatus != 0)
+                // 唤醒后续等待线程
+                unparkSuccessor(h);
+            return true;
+        }
+        return false;
+    }
+
+    // 获取共享锁，不允许中断
+    public final void acquireShared(int arg) {
+        // 负数表示获取共享锁失败，则进入等待队列
+        if (tryAcquireShared(arg) < 0)
+            doAcquireShared(arg);
+            {
+                final Node node = addWaiter(Node.SHARED);
+                boolean failed = true;
+                try {
+                    boolean interrupted = false;
+                    for (;;) {
+                        final Node p = node.predecessor();
+                        // 老二被老大唤醒
+                        if (p == head) {
+                            int r = tryAcquireShared(arg);
+                            if (r >= 0) {
+                                // r>0则通知后面的等待共享锁的线程
+                                setHeadAndPropagate(node, r);
+                                p.next = null; // help GC
+                                if (interrupted)
+                                    selfInterrupt();
+                                failed = false;
+                                return;
+                            }
+                        }
+                        if (shouldParkAfterFailedAcquire(p, node) &&
+                            parkAndCheckInterrupt())
+                            interrupted = true;
+                    }
+                } finally {
+                    if (failed)
+                        cancelAcquire(node);
+                }
+            }
+    }
+
+    // 获取共享锁，允许中断
+    public final void acquireSharedInterruptibly(int arg)
+            throws InterruptedException {
+        if (Thread.interrupted())
+            throw new InterruptedException();
+        if (tryAcquireShared(arg) < 0)
+            doAcquireSharedInterruptibly(arg);
+    }
+
+    // 获取共享锁，指定超时时长
+    public final boolean tryAcquireSharedNanos(int arg, long nanosTimeout)
+            throws InterruptedException {
+        if (Thread.interrupted())
+            throw new InterruptedException();
+        return tryAcquireShared(arg) >= 0 ||
+            doAcquireSharedNanos(arg, nanosTimeout);
+    }
+
+    // 释放共享锁
+    public final boolean releaseShared(int arg) {
+        if (tryReleaseShared(arg)) {
+            doReleaseShared();
+            return true;
+        }
+        return false;
+    }
+
+}
+
+```
+
+AQS的简单案例: CountDownLatch
+
+```java
+
+public class CountDownLatch {
+
+    private static final class Sync extends AbstractQueuedSynchronizer {
+
+        // count在此处的含义是加了n个共享锁
+        Sync(int count) {
+            setState(count);
+        }
+
+        int getCount() {
+            return getState();
+        }
+
+        // 返回正数表示成功且唤醒后续等待共享锁的线程，负数表示失败
+        protected int tryAcquireShared(int acquires) {
+            return (getState() == 0) ? 1 : -1;
+        }
+
+        // 释放一次共享锁：返回true表示通知后续等待的线程
+        protected boolean tryReleaseShared(int releases) {
+            for (;;) {
+                int c = getState();
+                if (c == 0)
+                    return false;
+                int nextc = c-1;
+                if (compareAndSetState(c, nextc))
+                    return nextc == 0;
+            }
+        }
+    }
+
+    private final Sync sync;
+
+    public CountDownLatch(int count) {
+        // 加了n个共享锁
+        this.sync = new Sync(count);
+    }
+
+    public void await() throws InterruptedException {
+        // 获取共享锁: 初始的n个共享锁都释放后才会唤醒等待线程
+        sync.acquireSharedInterruptibly(1);
+    }
+
+    // 释放一个共享锁
+    public void countDown() {
+        sync.releaseShared(1);
+    }
+
+}
+
+
+```
+
+
 
 
