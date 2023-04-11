@@ -1,0 +1,1003 @@
+---
+layout: post
+title:  "jvm之g1 gc算法"
+date:   2023-04-08 19:22:07 +0000
+categories: jekyll
+tags: jvm g1 gc
+---
+
+# g1 gc
+
+
+## 初始化
+
+gc相关参数和gc接口参考[jvm之并行gc算法](/jekyll/2023/03/27/jvm之并行gc算法.html)
+
+```c++
+
+jint Universe::initialize_heap() {
+
+    G1CollectorPolicyExt* g1p = new G1CollectorPolicyExt();
+    {
+        // 计算region的大小: 在[1M, 32M]范围内最接近2048个
+        HeapRegion::setup_heap_region_size(InitialHeapSize, MaxHeapSize);
+        {
+            uintx region_size = G1HeapRegionSize;
+            if (FLAG_IS_DEFAULT(G1HeapRegionSize)) {
+                size_t average_heap_size = (initial_heap_size + max_heap_size) / 2;
+                // region最小1M，region目标是2048个
+                region_size = MAX2(average_heap_size / HeapRegionBounds::target_number(),
+                                   (uintx) HeapRegionBounds::min_size());
+            }
+
+            // 2的指数向下取整: 1M/2M/4M/8M/...
+            int region_size_log = log2_long((jlong) region_size);
+            region_size = ((uintx)1 << region_size_log);
+
+            // region最大32M
+            if (region_size < HeapRegionBounds::min_size()) {
+                region_size = HeapRegionBounds::min_size();
+            } else if (region_size > HeapRegionBounds::max_size()) {
+                region_size = HeapRegionBounds::max_size();
+            }
+
+            GrainBytes = (size_t)region_size;
+        }
+    }
+
+    g1p->initialize_all();
+    {
+        initialize_alignments();
+        {
+            _space_alignment = HeapRegion::GrainBytes;
+            // 每个card标记512字节，card按页分配
+            size_t card_table_alignment = (1 << 9) * os::vm_page_size();
+            _heap_alignment = MAX3(card_table_alignment, _space_alignment, page_size);
+        }
+
+        initialize_flags();
+        {
+            CollectorPolicy::initialize_flags();
+
+            // 计算young代的region个数
+            _young_gen_sizer = new G1YoungGenSizer();
+        }
+
+        initialize_size_info();
+    }
+
+    G1CollectedHeap* g1h = new G1CollectedHeap(g1p);
+    {
+        // 内存分配buf
+        _allocator = new G1DefaultAllocator(_g1h);
+    }
+
+    Universe::_collectedHeap = g1h;
+
+    Universe::heap()->initialize();
+    {
+        size_t init_byte_size = collector_policy()->initial_heap_byte_size();
+        size_t max_byte_size = collector_policy()->max_heap_byte_size();
+        size_t heap_alignment = collector_policy()->heap_alignment();
+
+        // mmap分配maxHeap的虚拟内存
+        ReservedSpace heap_rs = Universe::reserve_heap(max_byte_size, heap_alignment);
+
+        // 创建barries，每个card占1字节，对应512字节
+        _rem_set = collector_policy()->create_rem_set(_reserved, 2);
+        set_barrier_set(rem_set()->bs());
+
+        // #g1#1.3.4 G1RemSet: 追踪外部引用
+        _g1_rem_set = new G1RemSet(this, g1_barrier_set());
+
+        // Carve out the G1 part of the heap.
+        ReservedSpace g1_rs = heap_rs.first_part(max_byte_size);
+
+        // 以region为单位commit/uncommit
+        G1RegionToSpaceMapper* heap_storage = G1RegionToSpaceMapper::create_mapper(g1_rs, ...);
+
+        // 每个block大小是512字节，记录每个block中第一个对象在block内的offset
+        G1RegionToSpaceMapper* bot_storage = create_aux_memory_mapper("Block offset table", ...);
+
+        // 每个card占1字节，对应512字节
+        G1RegionToSpaceMapper* cardtable_storage = create_aux_memory_mapper("Card table", ...);
+
+        // 每个card占1字节，对应512字节
+        G1RegionToSpaceMapper* card_counts_storage = create_aux_memory_mapper("Card counts table", ...);
+
+        // 一个bit标记8个字节
+        size_t bitmap_size = CMBitMap::compute_size(g1_rs.size());
+        G1RegionToSpaceMapper* prev_bitmap_storage = create_aux_memory_mapper("Prev Bitmap", ...);
+        G1RegionToSpaceMapper* next_bitmap_storage = create_aux_memory_mapper("Next Bitmap", ...);
+
+        // 初始化_regions数组
+        _hrm.initialize(heap_storage, prev_bitmap_storage, ...);
+        {
+            // 初始化_regions = new HeapRegion*[n];
+            MemRegion reserved = heap_storage->reserved();
+            _regions.initialize(reserved.start(), reserved.end(), HeapRegion::GrainBytes);
+
+            // bitmap标记可分配的region
+            _available_map.resize(_regions.length(), false);
+            _available_map.clear();
+        }
+
+        // Create the ConcurrentMark data structure and thread.
+        _cm = new ConcurrentMark(this, prev_bitmap_storage, next_bitmap_storage);
+
+        // 按initHeap申请物理内存
+        expand(init_byte_size);
+        {
+            uint regions_to_expand = (uint)(init_byte_size / HeapRegion::GrainBytes);
+            _hrm.expand_by(regions_to_expand);
+            {
+                while (expanded < num_regions &&
+                        (num_last_found = find_unavailable_from_idx(cur, &idx_last_found)) > 0) {
+                    uint to_expand = MIN2(num_regions - expanded, num_last_found);
+                    make_regions_available(idx_last_found, to_expand);
+                    {
+                        commit_regions(start, num_regions);
+                        {
+                             _heap_mapper->commit_regions(index, num_regions);
+
+                            // Also commit auxiliary data
+                            _prev_bitmap_mapper->commit_regions(index, num_regions);
+                            _next_bitmap_mapper->commit_regions(index, num_regions);
+                            _bot_mapper->commit_regions(index, num_regions);
+                            _cardtable_mapper->commit_regions(index, num_regions);
+                            _card_counts_mapper->commit_regions(index, num_regions);
+                        }
+
+                        for (uint i = start; i < start + num_regions; i++) {
+                            if (_regions.get_by_index(i) == NULL) {
+                                HeapRegion* new_hr = new_heap_region(i);
+                                _regions.set_by_index(i, new_hr);
+                            }
+                        }
+
+                        _available_map.par_set_range(start, start + num_regions, ...);
+
+                        for (uint i = start; i < start + num_regions; i++) {
+                            HeapRegion* hr = at(i);
+                            HeapWord* bottom = G1CollectedHeap::heap()->bottom_addr_for_region(i);
+                            MemRegion mr(bottom, bottom + HeapRegion::GrainWords);
+                            // 设置每个region的内存范围
+                            hr->initialize(mr);
+                            // 插入free_list
+                            insert_into_free_list(at(i));
+                        }
+                    }
+
+                    expanded += to_expand;
+                    cur = idx_last_found + num_last_found + 1;
+                }
+            }
+        }
+
+        // dummy_region为第一个region
+        HeapRegion* dummy_region = _hrm.get_dummy_region();
+        dummy_region->set_eden();
+        // 直接标记为full
+        dummy_region->set_top(dummy_region->end());
+        G1AllocRegion::setup(this, dummy_region);
+
+        _allocator->init_mutator_alloc_region();
+        {
+            _mutator_alloc_region.init();
+            {
+                _alloc_region = _dummy_region;
+                _count = 0;
+            }
+        }
+    }
+}
+
+```
+
+## 内存分配
+
+```c++
+
+class G1CollectedHeap {
+
+    virtual HeapWord* allocate_new_tlab(size_t word_size) {
+        return attempt_allocation(word_size, ...);
+        {
+            HeapWord* result = _allocator->mutator->attempt_allocation(word_size, false /* bot_updates */);
+            {
+                return par_allocate(alloc_region, word_size, bot_updates);
+                {                
+                    return alloc_region->par_allocate_no_bot_updates(word_size);
+                    {
+                        // 基于cas从当前region分配
+                        do {
+                            HeapWord* obj = top();
+                            if (pointer_delta(end_value, obj) >= size) {
+                                HeapWord* new_top = obj + size;
+                                HeapWord* result = (HeapWord*)Atomic::cmpxchg_ptr(new_top, top_addr(), obj);
+                                if (result == obj) {
+                                    return obj;
+                                }
+                            } else {
+                                return NULL;
+                            }
+                        } while (true);
+                    }
+                }
+            }
+
+            if (result == NULL) {
+                result = attempt_allocation_slow(word_size, ...);
+                {
+                    HeapWord* result = NULL;
+                    for (int try_count = 1; /* we'll return */; try_count += 1) {
+                        bool should_try_gc;
+                        uint gc_count_before;
+
+                        {
+                            MutexLockerEx x(Heap_lock);
+                            // 不扩展heap从young代分配新的region
+                            result = _allocator->mutator->attempt_allocation_locked(word_size, false /* bot_updates */);
+                            {
+                                HeapWord* result = attempt_allocation(word_size, bot_updates);
+                                if (result != NULL) {
+                                    return result;
+                                }
+
+                                // 当前region剩余空间填充空对象
+                                retire(true /* fill_up */);
+                                {
+                                    fill_up_remaining_space(alloc_region, _bot_updates);
+                                    retire_region(alloc_region, allocated_bytes);
+                                    {
+                                        // 加入cset
+                                        g1_policy()->add_region_to_incremental_cset_lhs(alloc_region);
+                                    }
+                                }
+
+                                // force==false先尝试不扩展heap
+                                return new_alloc_region_and_allocate(word_size, false /* force */);
+                                {
+                                    HeapRegion* new_alloc_region = allocate_new_region(word_size, force);
+                                    {
+                                        // young代是否到达了MaxNewSize
+                                        bool young_list_full = g1_policy()->is_young_list_full();
+                                        if (force || !young_list_full) {
+                                            return new_region(word_size, false /* is_old */, false /* do_expand */);
+                                            {
+                                                // 从free_list分配空闲region
+                                                HeapRegion* res = _hrm.allocate_free_region(is_old);
+                                                if (res == NULL) {
+                                                    res = new_region_try_secondary_free_list(is_old);
+                                                }
+
+                                                if (res == NULL && do_expand) {
+                                                    // 扩展更多region
+                                                    expand(word_size * HeapWordSize);
+                                                    res = _hrm.allocate_free_region(is_old);
+                                                }
+
+                                                return res;
+                                            }
+                                        }
+
+                                        return NULL;
+                                    }
+
+                                    _alloc_region = new_alloc_region;
+                                    return allocate(new_alloc_region, word_size, _bot_updates);
+                                }
+                            }
+
+                            if (result != NULL) {
+                                return result;
+                            }
+
+                            // 别的线程正在触发gc
+                            if (GC_locker::is_active_and_needs_gc()) {
+                                // 未到达MaxNewSize则扩展heap之后再试
+                                if (g1_policy()->can_expand_young_list()) {
+                                    result = _allocator->mutator->attempt_allocation_force(word_size, false /* bot_updates */);
+                                    if (result != NULL) {
+                                        return result;
+                                    }
+                                }
+                                should_try_gc = false;
+                            } else {
+                                if (GC_locker::needs_gc()) {
+                                    should_try_gc = false;
+                                } else {
+                                    gc_count_before = total_collections();
+                                    should_try_gc = true;
+                                }
+                            }
+                        }
+
+                        if (should_try_gc) {
+                            bool succeeded;
+                            // 触发增量收集
+                            result = do_collection_pause(word_size, gc_count_before, &succeeded, 
+                                                         GCCause::_g1_inc_collection_pause);
+                            {
+                                VM_G1IncCollectionPause op(gc_count_before, word_size, ...);
+                                op.set_allocation_context(AllocationContext::current());
+                                VMThread::execute(&op);
+                                *succeeded = op.prologue_succeeded() && op.pause_succeeded();
+                                return op.result();
+                            }
+
+                            if (result != NULL) {
+                                return result;
+                            }
+
+                            // gc完内存分配依然失败
+                            if (succeeded) {
+                                MutexLockerEx x(Heap_lock);
+                                *gc_count_before_ret = total_collections();
+                                return NULL;
+                            }
+                        } else {
+                            // 经历了3次gc都失败
+                            if (*gclocker_retry_count_ret > GCLockerRetryAllocationCount) {
+                                MutexLockerEx x(Heap_lock);
+                                *gc_count_before_ret = total_collections();
+                                return NULL;
+                            }
+                            // 等待gc完成
+                            GC_locker::stall_until_clear();
+                            (*gclocker_retry_count_ret) += 1;
+                        }
+
+                        // gc完再次尝试
+                        result = _allocator->mutator->attempt_allocation(word_size, false /* bot_updates */);
+                        if (result != NULL) {
+                            return result;
+                        }
+                    }
+                }
+            }
+
+            if (result != NULL) {
+                // 在barrier的card中标记为young
+                dirty_young_block(result, word_size);
+            }
+            return result;
+        }
+    }
+
+    virtual HeapWord* mem_allocate(size_t word_size, bool* gc_overhead_limit_was_exceeded);
+    {
+        // Loop until the allocation is satisfied, or unsatisfied after GC.
+        for (uint try_count = 1, gclocker_retry_count = 0; /* we'll return */; try_count += 1) {
+            uint gc_count_before;
+
+            HeapWord* result = NULL;
+            // 超过region的一半就算大对象
+            if (!isHumongous(word_size)) {
+                // 正常分配内存: 同tlab
+                result = attempt_allocation(word_size, &gc_count_before, &gclocker_retry_count);
+            } else {
+                // 为大对象分配内存
+                result = attempt_allocation_humongous(word_size, &gc_count_before, &gclocker_retry_count);
+                {
+                    HeapWord* result = NULL;
+                    for (int try_count = 1; /* we'll return */; try_count += 1) {
+                        bool should_try_gc;
+                        uint gc_count_before;
+
+                        {
+                            MutexLockerEx x(Heap_lock);
+
+                            // 分配一个或多个连续的region
+                            result = humongous_obj_allocate(word_size, AllocationContext::current());
+                            if (result != NULL) {
+                                return result;
+                            }
+
+                            if (GC_locker::is_active_and_needs_gc()) {
+                                should_try_gc = false;
+                            } else {
+                                if (GC_locker::needs_gc()) {
+                                    should_try_gc = false;
+                                } else {
+                                    gc_count_before = total_collections();
+                                    should_try_gc = true;
+                                }
+                            }
+                        }
+
+                        if (should_try_gc) {
+                            // 同上
+                            return do_collection_pause(word_size, gc_count_before, &succeeded,
+                                                         GCCause::_g1_humongous_allocation);
+                        }
+                    }
+                }
+            }
+
+            if (result != NULL) {
+                return result;
+            }
+
+            // 触发full-gc
+            VM_G1CollectForAllocation op(gc_count_before, word_size);
+            op.set_allocation_context(AllocationContext::current());
+
+            // ...and get the VM thread to execute it.
+            VMThread::execute(&op);
+
+            if (op.prologue_succeeded() && op.pause_succeeded()) {
+                HeapWord* result = op.result();
+                if (result != NULL && !isHumongous(word_size)) {
+                    dirty_young_block(result, word_size);
+                }
+                return result;
+            } else {
+                // 经历3次gc依然失败
+                if (gclocker_retry_count > GCLockerRetryAllocationCount) {
+                    return NULL;
+                }
+            }
+        }
+    }
+}
+
+```
+
+## 增量young-gc
+
+```c++
+
+// 并发标记开始前的young gc
+void VM_G1IncCollectionPause::doit() {
+    // An allocation has been requested. So, try to do that first.
+    _result = g1h->attempt_allocation_at_safepoint(_word_size, ...);
+    if (_result != NULL) {
+        _pause_succeeded = true;
+        return;
+    }
+
+    _pause_succeeded = g1h->do_collection_pause_at_safepoint(_target_pause_time_ms);
+    {
+        // 选择collect_set
+        g1_policy()->finalize_cset(target_pause_time_ms, evacuation_info);
+        {
+            // eden在左，survivor在右
+            YoungList* young_list = _g1->young_list();
+
+            // cset已经包含young代所有region: 参考retire(...)
+            uint survivor_region_length = young_list->survivor_length();
+            uint eden_region_length = young_list->length() - survivor_region_length;
+            init_cset_region_lengths(eden_region_length, survivor_region_length);
+
+            // survivor都改为eden
+            HeapRegion* hr = young_list->first_survivor_region();
+            while (hr != NULL) {
+                hr->set_eden_pre_gc();
+                hr = hr->get_next_young_region();
+            }
+
+            _collection_set = _inc_cset_head;
+        }
+
+        // 准备从survivor和old分配内存
+        _allocator->init_gc_alloc_regions(evacuation_info);
+
+        // 递归复制oop
+        evacuate_collection_set(evacuation_info);
+        {
+            G1RootProcessor root_processor(this);
+            G1ParTask g1_par_task(this, _task_queues, &root_processor);
+
+            if (G1CollectedHeap::use_parallel_gc_threads()) {
+                workers()->run_task(&g1_par_task);
+            } else {
+                g1_par_task.set_for_termination(n_workers);
+                g1_par_task.work(0);
+                {
+                    G1ParCopyClosure<G1BarrierNone, G1MarkNone> scan_only_root_cl(_g1h, &pss, rp);
+                    {
+                        oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
+                        // 判断此oop是否在cset中
+                        const InCSetState state = _g1->in_cset_state(obj);
+                        if (state.is_in_cset()) {
+                            oop forwardee;
+                            markOop m = obj->mark();
+                            if (m->is_marked()) {
+                                forwardee = (oop) m->decode_pointer();
+                            } else {
+                                // 复制到survivor
+                                forwardee = _par_scan_state->copy_to_survivor_space(state, obj, m);
+                                {
+                                    // 根据age判断是否晋升到old
+                                    InCSetState dest_state = next_state(state, old_mark, age);
+                                    // 从survivor或old分配内存
+                                    HeapWord* obj_ptr = _g1_par_allocator->plab_allocate(dest_state, word_sz, ...);
+
+                                    // 没有内存存放存活的对象了
+                                    if (obj_ptr == NULL) {
+                                        return _g1h->handle_evacuation_failure_par(this, old);
+                                    }
+
+                                     // 复制数据
+                                    Copy::aligned_disjoint_words((HeapWord*) old, obj_ptr, word_sz);
+
+                                    if (dest_state.is_young()) {
+                                        if (age < markOopDesc::max_age) {
+                                            age++;
+                                        }
+                                    }
+
+                                    G1ParScanClosure  _scanner;
+                                    {
+                                        oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
+                                        const InCSetState state = _g1->in_cset_state(obj);
+                                        if (state.is_in_cset()) {
+                                            // 如果oop在cset中则加入队列
+                                            _par_scan_state->push_on_queue(p);
+                                        }
+                                    }
+
+                                    HeapRegion* const to_region = _g1h->heap_region_containing_raw(obj_ptr);
+                                    _scanner.set_region(to_region);
+                                    // 递归处理oop的字段
+                                    obj->oop_iterate_backwards(&_scanner);
+                                }
+                            }
+                        }
+                    }
+
+                    G1CLDClosure<G1MarkNone> scan_only_cld_cl(&scan_only_root_cl, only_young, false);
+
+                    strong_root_cl = &scan_only_root_cl;
+                    weak_root_cl   = &scan_only_root_cl;
+                    strong_cld_cl  = &scan_only_cld_cl;
+                    weak_cld_cl    = &scan_only_cld_cl;
+
+                    // 收集被root直接引用的oop
+                    _root_processor->evacuate_roots(strong_root_cl,
+                                                    weak_root_cl,
+                                                    strong_cld_cl,
+                                                    weak_cld_cl,
+                                                    trace_metadata,
+                                                    worker_id);
+                    {
+                        process_java_roots(strong_roots, ...);
+                        process_vm_roots(strong_roots, ...);
+                        process_string_table_roots(weak_roots, ...);
+                    }
+
+                    // 收集被其他region直接引用的oop
+                    G1ParPushHeapRSClosure push_heap_rs_cl(_g1h, &pss);
+                    {
+                        oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
+                        if (_g1->is_in_cset_or_humongous(obj)) {
+                            // 如果oop在cset中则加入队列
+                            _par_scan_state->push_on_queue(p);
+                        }
+                    }
+
+                    _root_processor->scan_remembered_sets(&push_heap_rs_cl, weak_root_cl, worker_id);
+                    {
+                        // 扫描rem_set中所有引用了此region的region，rem_set通过barrier更新
+                        _g1h->g1_rem_set()->oops_into_collection_set_do(push_heap_rs_cl, ...);
+                        {
+                            scanRS(push_heap_rs_cl, code_root_cl, worker_i);
+                        }
+                    }
+
+                    // 迭代处理_par_scan_state中的oop
+                    G1ParEvacuateFollowersClosure evac(_g1h, &pss, _queues, &_terminator);
+                    {
+                        G1ParScanThreadState* const pss = par_scan_state();
+                        pss->trim_queue();
+                        do {
+                            pss->steal_and_trim_queue(queues());
+                            {
+                                StarTask stolen_task;
+                                while (task_queues->steal(queue_num(), hash_seed(), stolen_task)) {
+                                    dispatch_reference(stolen_task);
+                                    {
+                                        HeapRegion* r = _g1h->heap_region_containing_raw(stolen_task);
+                                        do_oop_evac(stolen_task, r);
+                                        {
+                                            oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
+                                            // 判断此oop是否在cset中
+                                            const InCSetState state = _g1->in_cset_state(obj);
+                                            if (state.is_in_cset()) {
+                                                oop forwardee;
+                                                markOop m = obj->mark();
+                                                if (m->is_marked()) {
+                                                    forwardee = (oop) m->decode_pointer();
+                                                } else {
+                                                    // 复制到survivor，迭代oop的字段加入queue
+                                                    forwardee = _par_scan_state->copy_to_survivor_space(state, obj, m);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } while (!offer_termination());
+                    }
+
+                    evac.do_void();
+                }
+            }
+        }
+
+        // #g1#4.1.3 free_collection_set: 重新加入freelist
+        free_collection_set(g1_policy()->collection_set(), evacuation_info);
+        {
+            // cset
+            HeapRegion* cur = cs_head;
+            while (cur != NULL) {
+                if (!cur->evacuation_failed()) {
+                    MemRegion used_mr = cur->used_region();
+                    // 处理成功的加入freelist
+                    free_region(cur, &local_free_list, false /* par */, true /* locked */);
+                } else {
+                    cur->set_evacuation_failed(false);
+                    // 处理失败的转成old region
+                    cur->set_old();
+                    _old_set.add(cur);
+                }
+                cur = next;
+            }
+        }
+
+        // 回收humongous对象
+        eagerly_reclaim_humongous_regions();
+
+        _young_list->reset_auxilary_lists();
+        {
+            for (HeapRegion* curr = _survivor_head;
+                curr != NULL;
+                curr = curr->get_next_young_region()) {
+                _g1h->g1_policy()->set_region_survivor(curr, young_index_in_cset);
+
+                // 把survivor加入cset
+                _g1h->g1_policy()->add_region_to_incremental_cset_rhs(curr);
+                young_index_in_cset += 1;
+            }
+        }
+
+        // 重新获取region用于分配内存
+        _allocator->init_mutator_alloc_region();
+
+        g1_policy()->record_collection_pause_end(pause_time_ms, evacuation_info);
+        {
+            if (need_to_start_conc_mark("end of GC")) {
+                // heap使用超过45%设置初始标记flag
+                set_initiate_conc_mark_if_possible();
+            }
+
+            // 判断gc模式是young或mixed: 上次并发标记的老年代可回收内存超过5%则mixed
+            if (_last_young_gc) {
+                if (next_gc_should_be_mixed("start mixed GCs", "do not start mixed GCs")) {
+                    set_gcs_are_young(false);
+                }
+                _last_young_gc = false;
+            } else {
+                if (!next_gc_should_be_mixed("continue mixed GCs", "do not continue mixed GCs")) {
+                    set_gcs_are_young(true);
+                }
+            }
+        }
+    }
+
+    if (_pause_succeeded && _word_size > 0) {
+        _result = g1h->attempt_allocation_at_safepoint(_word_size, ...);
+    } else {
+        if (!_pause_succeeded) {
+            _should_retry_gc = true;
+        }
+    }
+}
+
+```
+
+## 增量并发标记
+
+```c++
+
+bool G1CollectedHeap::do_collection_pause_at_safepoint(double target_pause_time_ms) {
+    g1_policy()->decide_on_conc_mark_initiation();
+    {
+        // young-gc在使用内存超过45%时设置
+        if (initiate_conc_mark_if_possible()) {
+            // 设置flag，下次gc暂停时开始初始标记
+            set_during_initial_mark_pause();
+
+            // We do not allow mixed GCs during marking.
+            if (!gcs_are_young()) {
+                set_gcs_are_young(true);
+            }
+        }
+    }
+
+    bool should_start_conc_mark = g1_policy()->during_initial_mark_pause();
+
+    if (g1_policy()->during_initial_mark_pause()) {
+        // 记录top建立snapshot
+        concurrent_mark()->checkpointRootsInitialPre();
+        {
+            reset();
+
+            // 记录每个region当前的top
+            NoteStartOfMarkHRClosure startcl;
+            g1h->heap_region_iterate(&startcl);
+        }
+    }
+
+    // 正常的young-gc
+
+    // 选择collect_set
+    g1_policy()->finalize_cset(target_pause_time_ms, evacuation_info);
+    {
+        // cset包含young代的所有region
+
+        // 混合gc添加部分old region到cset
+        // 在设置的暂停时间内能收集多少就收集多少
+        if (!gcs_are_young()) {
+            // 并发标记的cleanup阶段会确定chooser的region集合
+            CollectionSetChooser* cset_chooser = _collectionSetChooser;
+            
+            // chooser的region的1/8
+            const uint min_old_cset_length = calc_min_old_cset_length();
+            // 当前所有region的1/10
+            const uint max_old_cset_length = calc_max_old_cset_length();
+
+            HeapRegion* hr = cset_chooser->peek();
+            while (hr != NULL) {
+                if (old_cset_region_length() >= max_old_cset_length) {
+                    break;
+                }
+
+                size_t reclaimable_bytes = cset_chooser->remaining_reclaimable_bytes();
+                double reclaimable_perc = reclaimable_bytes_perc(reclaimable_bytes);
+                double threshold = (double) G1HeapWastePercent;
+                // 可回收内存低于5%则停止，允许包含5%的垃圾不回收
+                if (reclaimable_perc <= threshold) {
+                     break;
+                }
+
+                // 预测回收此region的耗时
+                double predicted_time_ms = predict_region_elapsed_time_ms(hr, gcs_are_young());
+
+                 // 剩余时间不足
+                if (! check_time_remaining) {
+                    if (old_cset_region_length() >= min_old_cset_length) {
+                        break;
+                    }
+                }
+
+                time_remaining_ms = MAX2(time_remaining_ms - predicted_time_ms, 0.0);
+
+                // 加入cset
+                add_old_region_to_cset(hr);
+
+                hr = cset_chooser->peek();
+            }
+        }
+    }
+
+    // 标记root，移动对象，此处跟young-gc的区别是会从root开始递归标记
+    evacuate_collection_set(evacuation_info);
+    {
+        G1RootProcessor root_processor(this);
+        G1ParTask g1_par_task(this, _task_queues, &root_processor);
+        g1_par_task.set_for_termination(n_workers);
+        g1_par_task.work(0);
+        {
+            G1ParCopyClosure<G1BarrierNone, G1MarkFromRoot> scan_mark_root_cl(_g1h, &pss, rp);
+            {
+                oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
+                const InCSetState state = _g1->in_cset_state(obj);
+                if (state.is_in_cset()) {
+                    oop forwardee;
+                    markOop m = obj->mark();
+                    if (m->is_marked()) {
+                        forwardee = (oop) m->decode_pointer();
+                    } else {
+                        // 复制到survivor
+                        forwardee = _par_scan_state->copy_to_survivor_space(state, obj, m);
+                    }
+
+                    // 此处不同于young-gc
+                    if (do_mark_object != G1MarkNone && forwardee != obj) {
+                        // 标记为gray，等待并发标记
+                        mark_forwarded_object(obj, forwardee);
+                        {
+                            _cm->grayRoot(to_obj, (size_t) from_obj->size(), _worker_id);
+                        }
+                    }
+                }
+            }
+
+            G1CLDClosure<G1MarkFromRoot> scan_mark_cld_cl(&scan_mark_root_cl, ...);
+
+            strong_root_cl = &scan_mark_root_cl;
+            strong_cld_cl  = &scan_mark_cld_cl;
+
+            _root_processor->evacuate_roots(strong_root_cl, ...);
+        }
+    }
+
+    // 重新加入freelist
+    free_collection_set(g1_policy()->collection_set(), evacuation_info);
+
+    eagerly_reclaim_humongous_regions();
+
+    if (g1_policy()->during_initial_mark_pause()) {
+        concurrent_mark()->checkpointRootsInitialPost();
+        {
+            _root_regions.prepare_for_scan();
+            {
+                // Currently, only survivors can be root regions.
+                // 增量gc每次只回收一部分，而且允许5%不回收
+                // survivor中可能存在被未回收的dead对象引用的对象
+                _next_survivor = _young_list->first_survivor_region();
+                _scan_in_progress = (_next_survivor != NULL);
+            }
+        }
+
+        set_marking_started();
+    }
+
+    if (should_start_conc_mark) {
+        // 通知并发标记线程开始并发标记
+        doConcurrentMark();
+        {
+            MutexLockerEx x(CGC_lock, Mutex::_no_safepoint_check_flag);
+            if (!_cmThread->in_progress()) {
+                _cmThread->set_started();
+                CGC_lock->notify();
+            }
+        }
+    }
+}
+
+// 并发标记线程
+void ConcurrentMarkThread::run() {
+
+    while (!_should_terminate) {
+        // 等待doConcurrentMark()中设置开始标识
+        // wait until started is set.
+        sleepBeforeNextCycle();
+        if (_should_terminate) {
+            break;
+        }
+
+        // 递归scan所有survivor中的对象，标记为gray
+        _cm->scanRootRegions();
+
+        // 从所有gray对象开始并发标记
+        // 定期处理所有应用线程中通过barrier收集的oop
+        _cm->markFromRoots();
+
+        // 最终标记需要在safepoint中执行: 清空应用线程内通过barrier收集的oop
+        CMCheckpointRootsFinalClosure final_cl(_cm);
+        VM_CGC_Operation op(&final_cl, "GC remark", true /* needs_pll */);
+        VMThread::execute(&op);
+
+        // 统计存活对象需要在safepoint中执行: 避免继续分配内存导致的统计数据不准确
+        CMCleanUp cl_cl(_cm);
+        {
+            // 统计存活对象
+            G1ParFinalCountTask g1_par_count_task(g1h, &_region_bm, &_card_bm);
+            g1_par_count_task.work(0);
+
+            // Install newly created mark bitMap as "prev".
+            swapMarkBitMaps();
+
+            // 收集全都是垃圾的region到_cleanup_list
+            G1ParNoteEndTask g1_par_note_end_task(g1h, &_cleanup_list);
+            g1_par_note_end_task.work(0);  
+
+            g1h->g1_policy()->record_concurrent_mark_cleanup_end((int)n_workers);
+            {
+                // 收集cset的region，计算回收效率
+                // 存活对象不超过85%则加入chooser
+                KnownGarbageClosure knownGarbagecl(_collectionSetChooser);
+                _g1->heap_region_iterate(&knownGarbagecl);
+
+                // 按回收效率排序
+                _collectionSetChooser->sort_regions();
+            }          
+        }
+
+        VM_CGC_Operation op(&cl_cl, "GC cleanup", false /* needs_pll */);
+        VMThread::execute(&op);
+
+        // 直接回收全是垃圾的region加入_secondary_free_list
+        if (g1h->free_regions_coming()) {
+            _cm->completeCleanup();
+            g1h->reset_free_regions_coming();
+        }
+    }
+}
+
+```
+
+## 全量gc
+
+```c++
+
+void VM_G1CollectForAllocation::doit() {
+    G1CollectedHeap* g1h = G1CollectedHeap::heap();
+    _result = g1h->satisfy_failed_allocation(_word_size, ..., &_pause_succeeded);
+    {
+        *succeeded = true;
+
+        // 再次尝试：不扩展heap
+        HeapWord* result = attempt_allocation_at_safepoint(word_size, ...);
+        if (result != NULL) {
+            return result;
+        }
+
+        // 扩展之后再试
+        result = expand_and_allocate(word_size, context);
+        if (result != NULL) {
+            return result;
+        }
+
+        // Expansion didn't work, we'll try to do a Full GC.
+        bool gc_succeeded = do_collection(false, /* explicit_gc */
+                                          false, /* clear_all_soft_refs */
+                                          word_size);
+        if (!gc_succeeded) {
+            *succeeded = false;
+            return NULL;
+        }
+
+        // Retry the allocation
+        result = attempt_allocation_at_safepoint(word_size, ...);
+        if (result != NULL) {
+            return result;
+        }
+
+        // Then, try a Full GC that will collect all soft references.
+        bool gc_succeeded = do_collection(false, /* explicit_gc */
+                                          true, /* clear_all_soft_refs */
+                                          word_size);
+        if (!gc_succeeded) {
+            *succeeded = false;
+            return NULL;
+        }
+
+        // Retry the allocation
+        result = attempt_allocation_at_safepoint(word_size, ...);
+        if (result != NULL) {
+            return result;
+        }
+
+        return NULL;
+    }
+}
+
+// 单线程标记清理
+bool G1CollectedHeap::do_collection(bool explicit_gc,
+                                    bool clear_all_soft_refs,
+                                    size_t word_size) {
+    gc_prologue(true);
+    // 取消inc_cset
+    abandon_collection_set(g1_policy()->inc_cset_head());
+
+    G1MarkSweep::invoke_at_safepoint(ref_processor_stw(), do_clear_all_soft_refs);
+    {
+        // 从root开始递归标记
+        mark_sweep_phase1(marked_for_unloading, clear_all_softrefs);
+
+        // 每个region内部compact: 计算每个存活对象的目标地址存入mark
+        mark_sweep_phase2();
+
+        // 更新指针: 递归更新引用
+        mark_sweep_phase3();
+
+        // 移动对象: 复制oop
+        mark_sweep_phase4();
+    }
+}
+
+```

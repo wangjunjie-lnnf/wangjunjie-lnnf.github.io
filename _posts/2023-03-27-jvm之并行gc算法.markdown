@@ -440,18 +440,6 @@ class ParallelScavengeHeap : public CollectedHeap {
             _guard_region = MemRegion((HeapWord*)guard_page, _page_size);
             // 为cardTable的最后一个page申请物理内存
             os::commit_memory_or_exit((char*)guard_page, _page_size, _page_size, ...);
-
-            // 记录每个region的边界
-            _lowest_non_clean = NEW_C_HEAP_ARRAY(CardArr, _max_covered_regions, mtGC);
-            _lowest_non_clean_chunk_size = NEW_C_HEAP_ARRAY(size_t, _max_covered_regions, mtGC);
-            _lowest_non_clean_base_chunk_index = NEW_C_HEAP_ARRAY(uintptr_t, _max_covered_regions, mtGC);
-            _last_LNC_resizing_collection = NEW_C_HEAP_ARRAY(int, _max_covered_regions, mtGC);
-
-            for (int i = 0; i < _max_covered_regions; i++) {
-                _lowest_non_clean[i] = NULL;
-                _lowest_non_clean_chunk_size[i] = 0;
-                _last_LNC_resizing_collection[i] = -1;
-            }
         }
 
         _barrier_set = barrier_set;
@@ -460,7 +448,7 @@ class ParallelScavengeHeap : public CollectedHeap {
         // 把heap分成old和young两部分
         _gens = new AdjoiningGenerations(heap_rs, _collector_policy, generation_alignment());
         {
-            _virtual_spaces(old_young_rs, policy->min_gen1_size(), policy->min_gen0_size(), alignment) {
+            _virtual_spaces(old_young_rs, policy->min_gen1_size(), policy->min_gen0_size(), alignment);
             size_t init_low_byte_size = policy->initial_gen1_size();
             size_t min_low_byte_size = policy->min_gen1_size();
             size_t max_low_byte_size = policy->max_gen1_size();
@@ -923,7 +911,7 @@ bool PSScavenge::invoke() {
                                                     o = o->forwardee();
                                                     oopDesc::encode_store_heap_oop_not_null(p, o)
                                                 } else {
-                                                    // 加入pm的队列
+                                                    // 加入pm的stack
                                                     push_depth(p);
                                                 }
                                             }
@@ -1144,7 +1132,7 @@ bool PSParallelCompact::invoke_no_policy(bool maximum_heap_compaction) {
         SymbolTable::unlink();
     }
 
-    // TODO 汇总数据
+    // 汇总数据
     summary_phase(...);
     {
         // 分别计算old/eden/from/to内的对象存活情况
@@ -1280,8 +1268,7 @@ bool PSParallelCompact::invoke_no_policy(bool maximum_heap_compaction) {
         }
 
         JNIHandles::oops_do(adjust_pointer_closure());
-        CLDToOopClosure adjust_from_cld(adjust_pointer_closure());
-        Threads::oops_do(adjust_pointer_closure(), &adjust_from_cld, NULL);
+        Threads::oops_do(adjust_pointer_closure(), ...);
         ObjectSynchronizer::oops_do(adjust_pointer_closure());
         FlatProfiler::oops_do(adjust_pointer_closure());
         Management::oops_do(adjust_pointer_closure());
