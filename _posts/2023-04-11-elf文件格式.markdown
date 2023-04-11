@@ -7,3 +7,434 @@ tags: elf
 ---
 
 # elf
+
+An ELF object file consists of the following parts:
+* File header, which must appear at the beginning of the file. 
+* Section table, required for relocatable files, and optional for loadable files. 
+* Program header table, required for loadable files, and optional for relocatable files. This table describes the loadable segments and other data structures required for loading a program or dynamically-linked library in preparation for execution. 
+* Contents of the sections or segments, including loadable data, relocations, 
+and string and symbol tables
+
+![elf](/assets/images/2023-04-11/elf.png)
+
+## ELF-64 Data Types
+
+| Name | Size | Alignment | Purpose |
+| - | - | -| -|
+|Elf64_Addr | 8 | 8 | Unsigned program address |
+|Elf64_Off | 8 | 8 | Unsigned file offset |
+|Elf64_Half | 2 | 2 | Unsigned medium integer |
+|Elf64_Word | 4 | 4 | Unsigned integer |
+|Elf64_Sword | 4 | 4 | Signed integer |
+|Elf64_Xword | 8 | 8 | Unsigned long integer |
+|Elf64_Sxword | 8 | 8 | Signed long integer |
+|unsigned char | 1 | 1 | Unsigned small integer |
+
+## File header
+
+The file header is located at the beginning of the file, and is used to locate the other parts of the file.
+
+```c
+
+typedef struct
+{
+    unsigned char e_ident[16];  /* ELF identification */
+    Elf64_Half e_type;          /* Object file type */
+    Elf64_Half e_machine;       /* Machine type */
+    Elf64_Word e_version;       /* Object file version */
+    Elf64_Addr e_entry;         /* Entry point address */
+    Elf64_Off e_phoff;          /* Program header offset */
+    Elf64_Off e_shoff;          /* Section header offset */
+    Elf64_Word e_flags;         /* Processor-specific flags */
+    Elf64_Half e_ehsize;        /* ELF header size */
+    Elf64_Half e_phentsize;     /* Size of program header entry */
+    Elf64_Half e_phnum;         /* Number of program header entries */
+    Elf64_Half e_shentsize;     /* Size of section header entry */
+    Elf64_Half e_shnum;         /* Number of section header entries */
+    Elf64_Half e_shstrndx;      /* Section name string table index */
+} Elf64_Ehdr;
+
+```
+
+* `e_ident[4]`表示文件类型: `1`表示`32-bit`; `2`表示`64-bit`.
+* `e_ident[5]`表示数据大小端: `1`表示`小端`; `2`表示`大端`.
+* `e_ident[7]`表示`OS ABI`: `0`表示`System V ABI`.
+* `e_type`表示文件类型:
+
+| Name | Value | Meaning |
+| - | - | - |
+| ET_NONE | 0 | No file type |
+| ET_REL | 1 | Relocatable object file |
+| ET_EXEC | 2 | Executable file |
+| ET_DYN | 3 | Shared object file |
+| ET_CORE | 4 | Core file |
+
+## Sections
+
+Sections contain all the information in an ELF file, except for the ELF header, program header table, and section header table. Sections are identified by an index into the section header table. 
+
+The first entry in the section header table (with an index of 0) is reserved, and must contain all zeroes.
+
+### Section header entries
+
+```c
+
+typedef struct
+{
+    Elf64_Word sh_name;     /* Section name */
+    Elf64_Word sh_type;     /* Section type */
+    Elf64_Xword sh_flags;   /* Section attributes */
+    Elf64_Addr sh_addr;     /* Virtual address in memory */
+    Elf64_Off sh_offset;    /* Offset in file */
+    Elf64_Xword sh_size;    /* Size of section */
+    Elf64_Word sh_link;     /* Link to other section */
+    Elf64_Word sh_info;     /* Miscellaneous information */
+    Elf64_Xword sh_addralign; /* Address alignment boundary */
+    Elf64_Xword sh_entsize; /* Size of entries, if section has table */
+} Elf64_Shdr;
+
+```
+
+* sh_type: Section Types
+
+| Name | Value | Meaning |
+| - | - | - |
+| SHT_NULL | 0 | Marks an unused section header |
+| SHT_PROGBITS | 1 | Contains information defined by the program |
+| SHT_SYMTAB | 2 | Contains a linker symbol table |
+| SHT_STRTAB | 3 | Contains a string table |
+| SHT_RELA | 4 | Contains “Rela” type relocation entries |
+| SHT_HASH | 5 | Contains a symbol hash table |
+| SHT_DYNAMIC | 6 | Contains dynamic linking tables |
+| SHT_NOTE | 7 | Contains note information |
+| SHT_NOBITS | 8 | Contains uninitialized space; does not occupy any space in the file |
+| SHT_REL | 9 | Contains “Rel” type relocation entries |
+| SHT_SHLIB | 10 | Reserved |
+| SHT_DYNSYM | 11 | Contains a dynamic loader symbol table |
+
+* sh_flags: Section Attributes
+
+| Name | Value | Meaning |
+| - | - | - |
+| SHF_WRITE | 0x1 | Section contains writable data |
+| SHF_ALLOC | 0x2 | Section is allocated in memory image of program |
+| SHF_EXECINSTR | 0x4 | Section contains executable instructions |
+
+* sh_link:
+
+| Section Type | Associated Section |
+| - | - |
+| SHT_DYNAMIC | String table used by entries in this section |
+| SHT_HASH | Symbol table to which the hash table applies |
+| SHT_REL | Symbol table referenced by relocations |
+| SHT_RELA | Symbol table referenced by relocations |
+| SHT_SYMTAB | String table used by entries in this section |
+| SHT_DYNSYM | String table used by entries in this section |
+| Other | SHN_UNDEF
+
+* sh_info:
+
+| Section Type | sh_info |
+| - | - |
+| SHT_REL | Section index of section to which the relocations apply |
+| SHT_RELA | Section index of section to which the relocations apply |
+| SHT_SYMTAB | Index of first non-local symbol (i.e., number of local symbols) |
+| SHT_DYNSYM | Index of first non-local symbol (i.e., number of local symbols) |
+| Other | 0 |
+
+### Standard sections
+
+In the flags column, “A” stands for SHF_ALLOC, “W” for SHF_WRITE, and “X” for SHF_EXECINSTR.
+
+| Section Name | Section Type | Flags | Use |
+| - | -| -| - |
+| .bss | SHT_NOBITS | A, W | Uninitialized data |
+| .data | SHT_PROGBITS | A, W | Initialized data |
+| .interp | SHT_PROGBITS | [A] | Program interpreter path name |
+| .rodata | SHT_PROGBITS | A | Read-only data (constants and literals) |
+| .text | SHT_PROGBITS | A, X | Executable code |
+| .comment | SHT_PROGBITS | none | Version control information |
+| .dynamic | SHT_DYNAMIC | A[, W] | Dynamic linking tables |
+| .dynstr | SHT_STRTAB | A | String table for .dynamic section |
+| .dynsym | SHT_DYNSYM | A | Symbol table for dynamic linking |
+| .got | SHT_PROGBITS | mach. dep. | Global offset table |
+| .hash | SHT_HASH | A | Symbol hash table |
+| .note | SHT_NOTE | none | Note section |
+| .plt | SHT_PROGBITS | mach. dep. | Procedure linkage table |
+| .relname | SHT_REL | [A] | Relocations for section name |
+| .relaname | SHT_RELA | [A] | Relocations for section name |
+| .shstrtab | SHT_STRTAB | none | Section name string table |
+| .strtab | SHT_STRTAB | none | String table |
+| .symtab | SHT_SYMTAB | [A] | Linker symbol table |
+
+## String tables
+
+String table sections contain strings used for section names and symbol names. A string table is just an array of bytes containing null-terminated strings. Section header table entries, and symbol table entries refer to strings in a string table with an index relative to the beginning of the string table. The first byte in a string table is defined to be null, so that the index 0 always refers to a null or non-existent name.
+
+## Symbol table
+
+The first symbol table entry is reserved and must be all zeroes. The symbolic constant STN_UNDEF is used to refer to this entry.
+
+```c
+
+typedef struct
+{
+    Elf64_Word st_name;     /* Symbol name */
+    unsigned char st_info;  /* Type and Binding attributes */
+    unsigned char st_other; /* Reserved */
+    Elf64_Half st_shndx;    /* Section table index */
+    Elf64_Addr st_value;    /* Symbol value */
+    Elf64_Xword st_size;    /* Size of object (e.g., common) */
+} Elf64_Sym;
+
+```
+
+* st_info: contains the symbol type and its binding attributes (that is, its scope). The binding attributes are contained in the high-order four bits of the eight-bit byte, and the symbol type is contained in the low-order four bits. 
+
+Symbol Bindings:
+
+| Name | Value | Meaning |
+| - | - | - |
+| STB_LOCAL | 0 | Not visible outside the object file |
+| STB_GLOBAL | 1 | Global symbol, visible to all object files |
+| STB_WEAK | 2 | Global scope, but with lower precedence than global symbols |
+
+Symbol Types:
+
+| Name | Value | Meaning |
+| 
+| STT_NOTYPE | 0 | No type specified (e.g., an absolute symbol) |
+| STT_OBJECT | 1 | Data object |
+| STT_FUNC | 2 | Function entry point |
+| STT_SECTION | 3 | Symbol is associated with a section |
+| STT_FILE | 4 | Source file associated with the object file |
+
+An STT_FILE symbol must have STB_LOCAL binding, its section index must be SHN_ABS, and it must precede all other local symbols for the file. 
+
+* st_shndx: contains the section index of the section in which the symbol is “defined.” For undefined symbols, this field contains SHN_UNDEF; for absolute symbols, it contains SHN_ABS; and for common symbols, it contains SHN_COMMON. 
+
+* st_value: contains the value of the symbol. This may be an absolute value or a relocatable address. 
+In relocatable files, this field contains the alignment constraint for common symbols, and a section-relative offset for defined relocatable symbols. 
+In executable and shared object files, this field contains a virtual address for defined relocatable symbols. 
+
+## Relocations
+
+The ELF format defines two standard relocation formats, “Rel” and “Rela.” The first form is shorter, and obtains the addend part of the relocation from the original value of the word being relocated. The second form provides an explicit field for a full-width addend.
+
+```c
+
+typedef struct
+{
+    Elf64_Addr r_offset;    /* Address of reference */
+    Elf64_Xword r_info;     /* Symbol index and type of relocation */
+} Elf64_Rel;
+
+typedef struct
+{
+    Elf64_Addr r_offset;    /* Address of reference */
+    Elf64_Xword r_info;     /* Symbol index and type of relocation */
+    Elf64_Sxword r_addend;  /* Constant part of expression */
+} Elf64_Rela;
+
+```
+
+*  r_offset: indicates the location at which the relocation should be applied. 
+For a relocatable file, this is the offset, in bytes, from the beginning of the section to the beginning of the storage unit being relocated. 
+For an executable or shared object, this is the virtual address of the storage unit being relocated
+
+* r_info: contains both a symbol table index and a relocation type. The symbol table index identifies the symbol whose value should be used in the relocation. Relocation types are processor specific. The symbol table 
+index is obtained by applying the `ELF64_R_SYM` macro to this field, and the relocation type is obtained by applying the `ELF64_R_TYPE` macro to this field. The `ELF64_R_INFO` macro combines a symbol table index and a relocation type to produce a value for this field. These macros are defined as follows:  
+`#define ELF64_R_SYM(i)((i) >> 32)`  
+`#define ELF64_R_TYPE(i)((i) & 0xffffffffL)`  
+`#define ELF64_R_INFO(s, t)(((s) << 32) + ((t) & 0xffffffffL))`  
+
+* r_addend: specifies a constant addend used to compute the value to be stored in the relocated field.
+
+## Program header table
+
+In executable and shared object files, sections are grouped into segments for loading. The program header table contains a list of entries describing each segment.
+
+```c
+
+typedef struct
+{
+    Elf64_Word p_type;  /* Type of segment */
+    Elf64_Word p_flags; /* Segment attributes */
+    Elf64_Off p_offset; /* Offset in file */
+    Elf64_Addr p_vaddr; /* Virtual address in memory */
+    Elf64_Addr p_paddr; /* Reserved */
+    Elf64_Xword p_filesz; /* Size of segment in file */
+    Elf64_Xword p_memsz; /* Size of segment in memory */
+    Elf64_Xword p_align; /* Alignment of segment */
+} Elf64_Phdr;
+
+```
+
+* p_type: identifies the type of segment.
+
+| Name | Value | Meaning |
+| - | - | - |
+| PT_NULL | 0 | Unused entry |
+| PT_LOAD | 1 | Loadable segment |
+| PT_DYNAMIC | 2 | Dynamic linking tables |
+| PT_INTERP | 3 | Program interpreter path name |
+| PT_NOTE | 4 | Note sections |
+| PT_SHLIB | 5 | Reserved |
+| PT_PHDR | 6 | Program header table |
+
+* p_flags: contains the segment attributes.
+
+| Name | Value | Meaning |
+| - | - | - |
+| PF_X | 0x1 | Execute permission |
+| PF_W | 0x2 | Write permission |
+| PF_R | 0x4 | Read permission |
+
+* p_align specifies the alignment constraint for the segment. Must be a power of two. The values of p_offset and p_vaddr must be congruent modulo the alignment.
+
+##  Note sections
+
+Sections of type SHT_NOTE and segments of type PT_NOTE are used by compilers and other tools to mark an object file with special information that has special meaning to a particular tool set. These sections and segments contain any number of note entries, each of which is an array of 8-byte words in the byte order defined in the ELF file header.
+
+![note](/assets/images/2023-04-11/note.png)
+
+* namesz and name: The first word in the entry, namesz, identifies the length, in bytes, of a name identifying the entry’s owner or originator. The name field contains a null-terminated string, with padding as necessary to ensure 8-byte alignment for the descriptor field. The length does not include the terminating null or the padding. By convention, each vendor should use its own name in this field.
+
+* descsz and desc: The second word in the entry, descsz, identifies the length of the note descriptor. The desc field contains the contents of the note, followed by padding as necessary to ensure 8-byte alignment for the next note entry. `The format and interpretation of the note contents are determined solely by the name and type fields, and are unspecified by the ELF standard.`
+
+* type: The third word contains a number that determines, along with the originator’s name, the interpretation of the note contents. Each originator controls its own types.
+
+## Dynamic table
+
+Dynamically-bound object files will have a PT_DYNAMIC program header entry. This program header entry refers to a segment containing the .dynamic section, whose contents are an array of `Elf64_Dyn` structures.
+
+```c
+
+typedef struct
+{
+    Elf64_Sxword d_tag;
+    union {
+        Elf64_Xword d_val;
+        Elf64_Addr d_ptr;
+    } d_un;
+} Elf64_Dyn;
+
+```
+
+* d_tag: Identifies the type of dynamic table entry. The type determines the interpretation of the d_un union. 
+
+* d_ptr: This union member is used to represent program virtual addresses. These addresses are link-time virtual addresses, and must be relocated to match the object file’s actual load address. This relocation must be done implicitly; there are no dynamic relocations for these entries.
+
+## Hash table
+
+The dynamic symbol table can be accessed efficiently through the use of a hash table. The hash table is part of a loaded program segment, typically in the .hash section, and is pointed to by the DT_HASH entry in the dynamic table. The hash table is an array of `Elf64_Word` objects.
+
+![hash](/assets/images/2023-04-11/hash.png)
+
+The `bucket array` forms the hash table itself. The number of entries in the hash table is given by the first word, `nbucket`, and may be chosen arbitrarily.  
+
+The entries in the chain array parallel the symbol table—there is one entry in the chain table for each symbol in the symbol table, so `nchain` should equal the 
+number of symbol table entries.  
+
+Symbols in the symbol table are organized into hash chains, one chain per bucket. A hash function computes a hash value `x` for a given symbol name. The value of `bucket[x % nbucket]` is the symbol table index for the first symbol on the hash chain. The index next symbol on the hash chain is given by the entry in the chain array with the same index. The hash chain can be followed until a chain array entry equal to `STN_UNDEF` is found, marking the end of the chain.
+
+```c
+
+unsigned long elf64_hash(const unsigned char *name)
+{
+    unsigned long h = 0, g;
+
+    while (*name) {
+        h = (h << 4) + *name++;
+        if (g = h & 0xf0000000)
+            h ^= g >> 24;
+        h &= 0x0fffffff;
+    }
+
+    return h;
+}
+
+```
+
+## readelf
+
+```c
+
+int main(int argc, char **argv)
+{
+    expandargv(&argc, &argv);
+    parse_args(&cmdline, argc, argv);
+
+    process_file(argv[optind++] /*file_name*/);
+    {
+        Filedata *filedata = calloc(1, sizeof *filedata);
+        filedata->file_name = file_name;
+	    filedata->handle = fopen(file_name, "rb");
+        
+        // 读取前8字节判断文件格式
+        fread(armag, 8, 1, filedata->handle);
+
+        process_object(filedata);
+        {
+            get_file_header(filedata);
+            {
+                /* Read in the identity array. */
+                fread(filedata->file_header.e_ident, EI_NIDENT, 1, filedata->handle);
+
+                is_32bit_elf = (filedata->file_header.e_ident[EI_CLASS] != ELFCLASS64);
+                if (! is_32bit_elf) {
+                    // 读取header
+                    Elf64_External_Ehdr ehdr64;
+                    fread(ehdr64.e_type, sizeof(ehdr64) - EI_NIDENT, 1, filedata->handle);
+                }
+            }
+
+            // 打印文件头
+            process_file_header(filedata);
+
+            // 解析sections
+            process_section_headers(filedata);
+            {
+                get_section_headers(filedata, false);
+                {
+                    get_64bit_section_headers(filedata, probe);
+                    {
+                        unsigned int size = filedata->file_header.e_shentsize;
+                        unsigned int num = filedata->file_header.e_shnum;
+                        shdrs = (Elf64_External_Shdr *)get_data(..., filedata, filedata->file_header.e_shoff, size, num, ...);
+                    }
+                }
+            }
+
+            // 解析SHT_GROUP类型的section
+            process_section_groups(filedata);
+
+            process_program_headers(filedata);
+
+            process_dynamic_section(filedata);
+
+            process_relocs(filedata);
+
+            process_unwind(filedata);
+
+            process_symbol_table(filedata);
+
+            process_lto_symbol_tables(filedata);
+
+            process_syminfo(filedata);
+
+            process_version_sections(filedata);
+
+            process_section_contents(filedata);
+
+            process_notes(filedata);
+
+            process_gnu_liblist(filedata);
+
+            process_arch_specific(filedata);
+        }
+    }
+}
+
+```
+
