@@ -6,5 +6,531 @@ categories: jekyll
 tags: kernel elf
 ---
 
-# elf
+# kernel加载elf
 
+```c
+
+static struct linux_binfmt elf_format = {
+	.load_binary	= load_elf_binary,
+	.load_shlib	    = load_elf_library,
+	.core_dump	    = elf_core_dump,
+	.min_coredump	= ELF_EXEC_PAGESIZE,
+};
+
+// 系统调用execve加载指定的elf文件
+static int do_execve(struct filename *filename,
+	const char __user *const __user *__argv,
+	const char __user *const __user *__envp)
+{
+	struct user_arg_ptr argv = { .ptr.native = __argv };
+	struct user_arg_ptr envp = { .ptr.native = __envp };
+	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+    {
+        struct linux_binprm *bprm;
+        bprm = alloc_bprm(fd, filename);
+        {
+            bprm = kzalloc(sizeof(*bprm), GFP_KERNEL);
+
+            if (fd == AT_FDCWD || filename->name[0] == '/') {
+                bprm->filename = filename->name;
+            } else {
+                // filename相对于指定fd
+                bprm->fdpath = kasprintf(GFP_KERNEL, "/dev/fd/%d/%s", fd, filename->name);
+                bprm->filename = bprm->fdpath;
+            }
+            bprm->interp = bprm->filename;
+
+            bprm_mm_init(bprm);
+            {
+                bprm->mm = mm_alloc();
+                {
+                    mm = allocate_mm();
+                    mm_init(mm, current, current_user_ns());
+                    {
+                        // 创建页表
+                        mm->pgd = pgd_alloc(mm);
+                        // 继承namespace
+                        mm->user_ns = get_user_ns(user_ns);
+                    }
+                }
+
+                bprm->rlim_stack = current->signal->rlim[RLIMIT_STACK];
+
+                __bprm_mm_init(bprm);
+                {
+                    bprm->vma = vm_area_alloc(mm);
+                    vma->vm_end = STACK_TOP_MAX;
+	                vma->vm_start = vma->vm_end - PAGE_SIZE;
+                    insert_vm_struct(mm, vma);
+
+                    // stack从`2^48 - 8`处开始
+                    bprm->p = vma->vm_end - sizeof(void *);
+                }
+            }
+        }
+
+        /* 在stack上为argv和envp预留位置 */
+	    bprm_stack_limits(bprm);
+        {
+            limit = _STK_LIM / 4 * 3;
+            limit = min(limit, bprm->rlim_stack.rlim_cur / 4);
+            limit = max_t(unsigned long, limit, ARG_MAX);
+            
+            ptr_size = (bprm->argc + bprm->envc) * sizeof(void *);
+            limit -= ptr_size;
+            bprm->argmin = bprm->p - limit;
+        }
+
+        // 复制文件名到stack
+        copy_string_kernel(bprm->filename, bprm);
+        // 复制环境变量到stack
+        copy_strings(bprm->envc, envp, bprm);
+        // 复制命令行参数到stack
+        copy_strings(bprm->argc, argv, bprm);
+
+        bprm_execve(bprm, fd, filename, flags);
+        {
+            current->in_execve = 1;
+
+            bprm->file = do_open_execat(fd, filename, flags);
+            {
+                file = do_filp_open(fd, name, &open_exec_flags);
+            }
+
+            exec_binprm(bprm);
+            {
+                search_binary_handler(bprm);
+                {
+                    prepare_binprm(bprm);
+                    {
+                        // 读取elf文件的前256字节
+                        kernel_read(bprm->file, bprm->buf, 256, ...);
+                    }
+
+                    // formats是kernel支持的二进制文件格式的注册表
+                    list_for_each_entry(fmt, &formats, lh) {
+                        
+                        // 对应elf_format
+                        retval = fmt->load_binary(bprm);
+                        {
+                            struct elfhdr *elf_ex = (struct elfhdr *)bprm->buf;
+
+                            /* read program header */
+                            struct elf_phdr *elf_phdata = load_elf_phdrs(elf_ex, bprm->file);
+
+                            /* find and read interpreter */
+                            elf_ppnt = elf_phdata;
+                            for (i = 0; i < elf_ex->e_phnum; i++, elf_ppnt++) {
+                                // 查找PT_GNU_PROPERTY
+                                if (elf_ppnt->p_type == PT_GNU_PROPERTY) {
+                                    elf_property_phdata = elf_ppnt;
+                                    continue;
+                                }
+
+                                if (elf_ppnt->p_type != PT_INTERP)
+			                        continue;
+
+                                elf_interpreter = kmalloc(elf_ppnt->p_filesz, GFP_KERNEL);
+                                elf_read(bprm->file, elf_interpreter, elf_ppnt->p_filesz, elf_ppnt->p_offset);
+
+                                /* PT_INTERP表示解释器的路径 */
+		                        interpreter = open_exec(elf_interpreter);
+
+                                // 读取解释器的文件头
+                                struct elfhdr *interp_elf_ex = kmalloc(sizeof(*interp_elf_ex), GFP_KERNEL);
+                                elf_read(interpreter, interp_elf_ex, sizeof(*interp_elf_ex), 0);
+
+                                break;
+                            }
+
+                            if (interpreter) {
+                                /* Load the interpreter program headers */
+		                        interp_elf_phdata = load_elf_phdrs(interp_elf_ex, interpreter);
+                                // 查找PT_GNU_PROPERTY
+                                elf_ppnt = interp_elf_phdata;
+                                for (i = 0; i < interp_elf_ex->e_phnum; i++, elf_ppnt++)
+                                    switch (elf_ppnt->p_type) {
+                                    case PT_GNU_PROPERTY:
+                                        elf_property_phdata = elf_ppnt;
+                                        break;
+                                    }
+                            }
+
+                            // 解析PT_GNU_PROPERTY，调整arch_state->flags
+                            parse_elf_properties(interpreter ?: bprm->file, elf_property_phdata, &arch_state);
+
+                            begin_new_exec(bprm);
+                            {
+                                de_thread(current /*tsk*/);
+                                {
+                                    // Kill all other threads in the thread group.
+                                    sig->group_exit_task = tsk;
+                                    sig->notify_count = zap_other_threads(tsk /*p*/);
+                                    {
+                                        struct task_struct *t = p;
+
+                                        // 同一个进程内除了t之外的所有线程
+                                        while_each_thread(p, t) {
+                                            /* Don't bother with already dead threads */
+                                            if (t->exit_state)
+                                                continue;
+                                            
+                                            // signal中添加kill
+                                            sigaddset(&t->pending.signal, SIGKILL);
+                                            signal_wake_up(t, 1);
+                                        }
+                                    }
+
+                                    /* group_leader单独处理 */
+                                    if (!thread_group_leader(tsk))
+                                        sig->notify_count--;
+
+                                    /* 等待别的线程退出 */
+                                    while (sig->notify_count) {
+                                        __set_current_state(TASK_KILLABLE);
+                                        schedule();
+                                        // 等待过程中自己被kill
+                                        if (__fatal_signal_pending(tsk))
+                                            goto killed;
+                                    }
+
+                                    // 现在只剩当前线程和leader线程了
+                                    // leader线程肯定最后退出
+                                    if (!thread_group_leader(tsk)) {
+                                        struct task_struct *leader = tsk->group_leader;
+                                        for (;;) {
+                                            sig->notify_count = -1;
+                                            // 等待leader退出
+                                            if (likely(leader->exit_state))
+                                                break;
+
+                                            __set_current_state(TASK_KILLABLE);
+
+                                            schedule();
+
+                                            // 等待过程中自己被kill
+                                            if (__fatal_signal_pending(tsk))
+                                                goto killed;
+                                        }
+
+                                        // tsk和leader交换身份
+                                        exchange_tids(tsk, leader);
+                                        transfer_pid(leader, tsk, PIDTYPE_TGID);
+                                        transfer_pid(leader, tsk, PIDTYPE_PGID);
+                                        transfer_pid(leader, tsk, PIDTYPE_SID);
+
+                                        list_replace_rcu(&leader->tasks, &tsk->tasks);
+		                                list_replace_init(&leader->sibling, &tsk->sibling);
+
+                                        // tsk成为leader
+                                        tsk->group_leader = tsk;
+		                                leader->group_leader = tsk;
+
+                                        // 老leader退出
+                                        tsk->exit_signal = SIGCHLD;
+		                                leader->exit_signal = -1;
+                                        leader->exit_state = EXIT_DEAD;
+                                        release_task(leader);
+                                    }
+
+                                    sig->group_exit_task = NULL;
+	                                sig->notify_count = 0;
+                                }
+
+                                /* 复制current->files */
+                                unshare_files();
+
+                                bprm->mm->exe_file = bprm->file;
+
+                                // 切换页表，之后tsk的用户空间页表只包含环境变量和命令行参数占据的内存页
+                                exec_mmap(bprm->mm);
+                                {
+                                    tsk = current;
+	                                old_mm = current->mm;
+
+                                    active_mm = tsk->active_mm;
+                                    tsk->active_mm = mm;
+                                    tsk->mm = mm;
+
+                                    activate_mm(active_mm, mm);
+                                }
+
+                                // 替换tsk名称
+                                __set_task_comm(me, kbasename(bprm->filename), true);
+                            }
+
+                            setup_new_exec(bprm);
+                            {
+                                arch_setup_new_exec();
+                            }
+
+                            setup_arg_pages(bprm, randomize_stack_top(STACK_TOP), executable_stack);
+                            {
+                                mm->arg_start = bprm->p;
+
+                                /* randomly 32*4k (or 2*64k) pages */
+                                stack_expand = 131072UL;
+                                stack_size = vma->vm_end - vma->vm_start;
+
+                                // 不能超过rlim_stack
+                                if (stack_size + stack_expand > rlim_stack)
+                                    stack_base = vma->vm_end - rlim_stack;
+                                else
+                                    stack_base = vma->vm_start - stack_expand;
+
+                                current->mm->start_stack = bprm->p;
+
+                                // 为stack分配线性内存
+                                expand_stack(vma, stack_base);
+                            }
+
+                            // 加载PT_LOAD段
+                            elf_bss = 0;
+                            elf_brk = 0;
+
+                            start_code = ~0UL;
+                            end_code = 0;
+                            start_data = 0;
+                            end_data = 0;
+
+                            for(i = 0, elf_ppnt = elf_phdata; i < elf_ex->e_phnum; i++, elf_ppnt++) {
+                                if (elf_ppnt->p_type != PT_LOAD)
+			                        continue;
+
+                                // 根据p_flags设置内存属性
+                                elf_prot = make_prot(elf_ppnt->p_flags, &arch_state, !!interpreter, false);
+                                
+                                elf_flags = MAP_PRIVATE;
+
+                                vaddr = elf_ppnt->p_vaddr;
+
+                                if (elf_ex->e_type == ET_EXEC || load_addr_set) {
+                                    // 可执行文件在链接时已确定线性地址
+                                    elf_flags |= MAP_FIXED;
+                                } else if (elf_ex->e_type == ET_DYN) {
+                                    if (interpreter) {
+                                        /* 动态链接库从2^48的2/3处开始 */
+                                        load_bias = ELF_ET_DYN_BASE;
+                                    } else {
+                                        load_bias = 0;
+                                    }
+
+                                    total_size = total_mapping_size(elf_phdata, elf_ex->e_phnum);
+                                }
+
+                                // 加载到内存
+                                elf_map(bprm->file, load_bias + vaddr, elf_ppnt, elf_prot, elf_flags, total_size);
+
+                                if (!load_addr_set) {
+			                        load_addr_set = 1;
+                                }
+
+                                // code -> data -> bss -> brk
+
+                                /**
+                                * start_code = min(p_vaddr) & X
+                                * start_data = max(p_vaddr)
+                                */
+                                k = elf_ppnt->p_vaddr;
+                                if ((elf_ppnt->p_flags & PF_X) && k < start_code)
+                                    start_code = k;
+                                if (start_data < k)
+                                    start_data = k;
+
+                                /**
+                                *  elf_bss = max(p_vaddr + p_filesz)
+                                * end_code = max(p_vaddr + p_filesz) & X
+                                * end_data = max(p_vaddr + p_filesz)
+                                */
+                                k = elf_ppnt->p_vaddr + elf_ppnt->p_filesz;
+                                if (k > elf_bss)
+                                    elf_bss = k;
+                                if ((elf_ppnt->p_flags & PF_X) && end_code < k)
+                                    end_code = k;
+                                if (end_data < k)
+                                    end_data = k;
+                                
+                                /**
+                                * elf_brk = max(p_vaddr + p_memsz)
+                                */
+                                k = elf_ppnt->p_vaddr + elf_ppnt->p_memsz;
+                                if (k > elf_brk) {
+                                    bss_prot = elf_prot;
+                                    elf_brk = k;
+                                }
+                            }
+
+                            // 利用set_brk为bss分配内存
+                            set_brk(elf_bss /*start*/, elf_brk /*end*/, bss_prot /*prot*/);
+                            {
+                                vm_brk_flags(start, end - start, ...);
+                                current->mm->start_brk = current->mm->brk = end;
+                            }
+
+                            if (interpreter) {
+                                // 加载interpreter
+                                elf_entry = load_elf_interp(interp_elf_ex, interpreter, load_bias, interp_elf_phdata, &arch_state);
+                                // 入口指向interpreter
+                                elf_entry += interp_elf_ex->e_entry;
+                            } else {
+                                // 纯静态链接elf的入口地址
+                                elf_entry = e_entry;
+                            }
+
+                            create_elf_tables(bprm, elf_ex, load_addr, interp_load_addr, e_entry);
+                            {
+                                // 传递一组kv
+                                /* Create the ELF interpreter info */
+                                elf_info = (elf_addr_t *)mm->saved_auxv;
+
+                                NEW_AUX_ENT(AT_PHDR, load_addr + exec->e_phoff);
+                                NEW_AUX_ENT(AT_PHENT, sizeof(struct elf_phdr));
+                                NEW_AUX_ENT(AT_PHNUM, exec->e_phnum);
+                                NEW_AUX_ENT(AT_BASE, interp_load_addr);
+                                NEW_AUX_ENT(AT_ENTRY, e_entry);
+
+                                /* Populate list of argv pointers back to argv strings. */
+                                p = mm->arg_end = mm->arg_start;
+                                while (argc-- > 0) {
+                                    size_t len;
+                                    put_user((elf_addr_t)p, sp++);
+                                    len = strnlen_user((void __user *)p, MAX_ARG_STRLEN);
+                                    p += len;
+                                }
+                                put_user(0, sp++);
+                                mm->arg_end = p;
+
+                                /* Populate list of envp pointers back to envp strings. */
+                                mm->env_end = mm->env_start = p;
+                                while (envc-- > 0) {
+                                    size_t len;
+                                    put_user((elf_addr_t)p, sp++);
+                                    len = strnlen_user((void __user *)p, MAX_ARG_STRLEN);
+                                    p += len;
+                                }
+                                put_user(0, sp++);
+                                mm->env_end = p;
+                            }
+
+                            mm = current->mm;
+                            mm->end_code = end_code;
+                            mm->start_code = start_code;
+                            mm->start_data = start_data;
+                            mm->end_data = end_data;
+                            mm->start_stack = bprm->p;
+
+                            // 设置sp和pc，等待下次被调度时开始执行
+                            regs = current_pt_regs();
+                            START_THREAD(elf_ex, regs, elf_entry, bprm->p);
+                            {
+                                memset(regs, 0, sizeof(*regs));
+                                regs->pc = elf_entry;
+                                regs->sp = bprm->p;
+                            }
+                        }
+
+                        if (retval != -ENOEXEC) {
+                            return retval;
+                        }
+                    }
+                }
+
+                // 先加载解释器
+                bprm->file = bprm->interpreter;
+                bprm->interpreter = NULL;
+            }
+
+            current->fs->in_exec = 0;
+	        current->in_execve = 0;
+        }
+    }
+}
+
+```
+
+# ld-linux-xxx.so
+
+除非刻意设置静态链接`glibc`，所有应用都会有一个解释器段，值为`/lib64/ld-linux-x86-64.so.2`.  
+
+```shell
+
+> readelf -l /path/to/java
+
+Elf file type is DYN (Position-Independent Executable file)
+Entry point 0x1060
+There are 13 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset             VirtAddr           PhysAddr
+                 FileSiz            MemSiz              Flags  Align
+  PHDR           0x0000000000000040 0x0000000000000040 0x0000000000000040
+                 0x00000000000002d8 0x00000000000002d8  R      0x8
+  INTERP         0x0000000000000318 0x0000000000000318 0x0000000000000318
+                 0x000000000000001c 0x000000000000001c  R      0x1
+      [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]
+  LOAD           0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x00000000000007d0 0x00000000000007d0  R      0x1000
+
+> ls -l /lib64/ld-linux-x86-64.so.2
+/lib64/ld-linux-x86-64.so.2 -> /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+
+> ls -lh /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+-rwxr-xr-x 1 root root 236K Jul  7  2022 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+```
+
+`ld-linux-x86-64.so.2`的源码在`glibc`中
+
+```c
+// sysdeps/{arch}/dl-machine.h
+/* Initial entry point code for the dynamic linker.
+   The C function `_dl_start' is the real entry point;
+   its return value is the user program's entry point.  */
+#define RTLD_START asm ("\n\
+.text\n\
+	.align 16\n\
+.globl _start\n\
+.globl _dl_start_user\n\
+_start:\n\
+	movq %rsp, %rdi\n\
+	call _dl_start\n\
+_dl_start_user:\n\
+	# Save the user entry point address in %r12.\n\
+	movq %rax, %r12\n\
+	# Read the original argument count.\n\
+	movq (%rsp), %rdx\n\
+	# Call _dl_init (struct link_map *main_map, int argc, char **argv, char **env)\n\
+	# argc -> rsi\n\
+	movq %rdx, %rsi\n\
+	# Save %rsp value in %r13.\n\
+	movq %rsp, %r13\n\
+	# And align stack for the _dl_init call. \n\
+	andq $-16, %rsp\n\
+	# _dl_loaded -> rdi\n\
+	movq _rtld_local(%rip), %rdi\n\
+	# env -> rcx\n\
+	leaq 16(%r13,%rdx,8), %rcx\n\
+	# argv -> rdx\n\
+	leaq 8(%r13), %rdx\n\
+	# Clear %rbp to mark outermost frame obviously even for constructors.\n\
+	xorl %ebp, %ebp\n\
+	# Call the function to run the initializers.\n\
+	call _dl_init\n\
+	# Pass our finalizer function to the user in %rdx, as per ELF ABI.\n\
+	leaq _dl_fini(%rip), %rdx\n\
+	# And make sure %rsp points to argc stored on the stack.\n\
+	movq %r13, %rsp\n\
+	# Jump to the user's entry point.\n\
+	jmp *%r12\n\
+.previous\n\
+");
+
+// elf/rtld.c
+RTLD_START
+
+static ElfW(Addr) _dl_start(void *arg)
+{
+
+}
+
+
+```
