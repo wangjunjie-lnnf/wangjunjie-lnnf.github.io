@@ -1,0 +1,10 @@
+---
+layout: post
+title:  "加载elf文件"
+date:   2023-04-12 15:22:07 +0000
+categories: jekyll
+tags: kernel elf
+---
+
+# elf
+

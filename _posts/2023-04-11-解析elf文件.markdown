@@ -1,9 +1,9 @@
 ---
 layout: post
-title:  "elf文件格式"
+title:  "解析elf文件"
 date:   2023-04-11 22:22:07 +0000
 categories: jekyll
-tags: elf
+tags: elf readelf
 ---
 
 # elf
