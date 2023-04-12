@@ -294,3 +294,318 @@ public enum LauncherHelper {
 }
 
 ```
+
+## class加载细节
+
+```java
+
+public abstract class ClassLoader {
+
+    // 查找已加载的类
+    private native final Class<?> findLoadedClass0(String name);
+
+    // return null if not found
+    private native Class<?> findBootstrapClass(String name);
+
+    // class is linked as described in the "Execution" chapter of
+    // `The Java Language Specification`.
+    private native void resolveClass0(Class<?> c);
+
+    private native Class<?> defineClass0(String name, byte[] b, int off, int len, ProtectionDomain pd);
+
+    public Class<?> loadClass(String name) throws ClassNotFoundException {
+        return loadClass(name, false);
+        {
+            // 查找已加载的类
+            Class<?> c = findLoadedClass(name);
+            if (c == null) {
+                try {
+                    if (parent != null) {
+                        // 委托给parent加载，之类重写loadClass方法即可改变委托逻辑
+                        c = parent.loadClass(name, false);
+                    } else {
+                        // 委托给bootstrap加载
+                        c = findBootstrapClassOrNull(name);
+                    }
+                } catch (ClassNotFoundException e) {
+                    // ClassNotFoundException thrown if class not found
+                    // from the non-null parent class loader
+                }
+
+                if (c == null) {
+                    // If still not found, then invoke findClass in order to find the class.
+                    c = findClass(name);
+                }
+            }
+            if (resolve) {
+                resolveClass(c);
+            }
+            return c;
+        }
+    }
+
+    // 正常的classloader只需要重写此方法实现自己的class查找逻辑，比如URLClassLoader
+    // 获取class文件的字节码之后再调用defineClass(...)完成类加载
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        throw new ClassNotFoundException(name);
+    }
+
+}
+
+```
+
+native方法实现
+
+```c++
+
+JNIEXPORT jclass JNICALL
+Java_java_lang_ClassLoader_findLoadedClass0(JNIEnv *env, jobject loader, jstring name)
+{
+    return JVM_FindLoadedClass(env, loader, name);
+    {
+        SystemDictionary::find_instance_or_array_klass(klass_name, h_loader, ...);
+        {
+            // classloader第一次加载类时创建ClassLoaderData
+            // 通过class_loader的oop获取ClassLoaderData
+            ClassLoaderData* loader_data = ClassLoaderData::class_loader_data_or_null(class_loader());
+
+            // 查找hash表
+            unsigned int d_hash = dictionary()->compute_hash(class_name, loader_data);
+            int d_index = dictionary()->hash_to_index(d_hash);
+            dictionary()->find(d_index, d_hash, class_name, loader_data, ...);
+        }
+    }
+}
+
+JNIEXPORT jclass JNICALL
+Java_java_lang_ClassLoader_findBootstrapClass(JNIEnv *env, jobject loader, jstring classname)
+{
+    return JVM_FindClassFromBootLoader(env, clname);
+    {
+        SystemDictionary::resolve_or_null(h_name, ...);
+        {
+            resolve_instance_class_or_null(class_name, class_loader, ...);
+            {
+                // 第一次加载类时创建ClassLoaderData
+                ClassLoaderData *loader_data = register_loader(class_loader, ...);
+
+                // 查找hash表
+                unsigned int d_hash = dictionary()->compute_hash(name, loader_data);
+                int d_index = dictionary()->hash_to_index(d_hash);
+                Klass* probe = dictionary()->find(d_index, d_hash, name, loader_data, ...);
+                if (probe != NULL) return probe;
+
+                // 未加载则加载
+                load_instance_class(name, class_loader, ...);
+                {
+                    // 从classpath查找并解析class文件
+                    ClassLoader::load_classfile(class_name, ...);
+                }
+            }
+        }
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_java_lang_ClassLoader_resolveClass0(JNIEnv *env, jobject this, jclass cls)
+{
+    JVM_ResolveClass(env, cls);
+    {
+        warning("JVM_ResolveClass not implemented");
+    }
+}
+
+JNIEXPORT jclass JNICALL
+Java_java_lang_ClassLoader_defineClass0(JNIEnv *env,
+                                        jobject loader,
+                                        jstring name,
+                                        jbyteArray data,
+                                        jint offset,
+                                        jint length,
+                                        jobject pd)
+{
+    return JVM_DefineClassWithSource(env, utfName, loader, body, length, ...);
+    {
+        jvm_define_class_common(env, name, loader, buf, len, ...);
+        {
+            ClassFileStream st((u1*) buf, len, (char *)source);
+            SystemDictionary::resolve_from_stream(class_name, class_loader,st, ...);
+            {
+                ClassFileParser parser(st);
+                parser.parseClassFile(class_name, loader_data, ...);
+                {
+                    ClassFileStream* cfs = stream();
+
+                    // 允许javaagent修改字节码: 字节码都能随便改了还有啥功能实现不了
+                    if (JvmtiExport::should_post_class_file_load_hook()) {
+                        JvmtiExport::post_class_file_load_hook(name, class_loader(), ...);
+
+                        // 重新读取修改后的字节码
+                        if (ptr != cfs->buffer()) {
+                            cfs = new ClassFileStream(ptr, end_ptr - ptr, cfs->source());
+                            set_stream(cfs);
+                        }
+                    }
+
+                    // 解析Magic value
+                    u4 magic = cfs->get_u4_fast();
+
+                    // Version numbers
+                    u2 minor_version = cfs->get_u2_fast();
+                    u2 major_version = cfs->get_u2_fast();
+
+                    // Check version numbers: 这异常眼熟吧
+                    if (!is_supported_version(major_version, minor_version)) {
+                        Exceptions::fthrow(..., vmSymbols::java_lang_UnsupportedClassVersionError(), ...);
+                    }
+
+                    // Constant pool
+                    constantPoolHandle cp = parse_constant_pool(...);
+
+                    // 判断class文件里是否有指定的类: 这异常更眼熟吧
+                    _this_class_index = cfs->get_u2_fast();
+                    Symbol* class_name = cp->unresolved_klass_at(_this_class_index);
+                    if (class_name != name) {
+                        Exceptions::fthrow(..., vmSymbols::java_lang_NoClassDefFoundError(), ...);
+                    }
+
+                    // 加载父类
+                    u2 super_class_index = cfs->get_u2_fast();
+                    instanceKlassHandle super_klass = parse_super_class(super_class_index, ...);
+
+                    // 加载接口
+                    u2 itfs_len = cfs->get_u2_fast();
+                    Array<Klass*>* local_interfaces = parse_interfaces(itfs_len, ...);
+
+                    // 解析字段
+                    Array<u2>* fields = parse_fields(class_name, ...);
+
+                    // 解析方法
+                    Array<Method*>* methods = parse_methods(access_flags.is_interface(), ...);
+
+                    // 解析注解、内部类、外部方法
+                    ClassAnnotationCollector parsed_annotations;
+                    parse_classfile_attributes(&parsed_annotations, ...);
+
+                    // Finalize the Annotations metadata object,
+                    create_combined_annotations(...);
+
+                    // 省略
+
+                    // We can now create the basic Klass* for this klass
+                    _klass = InstanceKlass::allocate_instance_klass(loader_data, vtable_size, itable_size, ...);
+
+                    instanceKlassHandle this_klass (THREAD, _klass);
+                    this_klass->set_class_loader_data(loader_data);
+
+                    this_klass->set_constants(_cp);
+                    this_klass->set_fields(_fields, java_fields_count);
+                    this_klass->set_methods(_methods);
+                    this_klass->set_inner_classes(_inner_classes);
+                    this_klass->set_local_interfaces(_local_interfaces);
+                    this_klass->set_transitive_interfaces(_transitive_interfaces);
+                    this_klass->set_annotations(_combined_annotations);
+
+                    this_klass->set_name(cp->klass_name_at(_this_class_index));
+
+                    // Fill in information needed to compute superclasses.
+                    this_klass->initialize_supers(super_klass(), ...);
+
+                    // Initialize itable offset tables
+                    klassItable::setup_itable_offset_table(this_klass);
+
+                    // Compute transitive closure of interfaces this class implements
+                    fill_oop_maps(this_klass, ...);
+
+                    // mirror是jvm开放给java的元数据接口
+                    // Allocate mirror and initialize static fields
+                    java_lang_Class::create_mirror(this_klass /*k*/, class_loader, ...);
+                    {
+                        // Allocate mirror (java.lang.Class instance)
+                        Handle mirror = InstanceMirrorKlass::cast(SystemDictionary::Class_klass())->allocate_instance(k, ...);
+                        java_lang_Class::set_klass(mirror(), k());
+                        set_class_loader(mirror(), class_loader());
+                        k->set_java_mirror(mirror());
+                    }
+
+                }
+
+                // 非bootclassloader不允许定义`java.`开头的类
+            }
+        }
+    }
+}
+
+```
+
+## 类卸载
+
+* `full gc`过程中会触发类卸载  
+* `class`不能被单独`unload`, 只能等`classloader`被回收时一起`unload`  
+
+```c++
+
+bool SystemDictionary::do_unloading(BoolObjectClosure* is_alive, bool clean_alive) {
+    // First, mark for unload all ClassLoaderData referencing a dead class loader.
+    bool unloading_occurred = ClassLoaderDataGraph::do_unloading(is_alive, clean_alive);
+    {
+        // 所有的ClassLoaderData构成一个单链表
+        ClassLoaderData* data = _head;
+
+        while (data != NULL) {
+            // 判断对应的classloader对象是否被标记
+            // java.lang.ClassLoader只是一个普通的java类而已
+            if (data->is_alive(is_alive_closure)) {
+                prev = data;
+                data = data->next();
+                continue;
+            }
+
+            seen_dead_loader = true;
+            ClassLoaderData* dead = data;
+            dead->unload();
+            {
+                // 设置标识
+                _unloading = true;
+            }
+
+            data = data->next();
+
+            // Remove from loader list.
+            if (prev != NULL) {
+                prev->set_next(data);
+            } else {
+                _head = data;
+            }
+        }
+    }
+
+    if (unloading_occurred) {
+        dictionary()->do_unloading();
+        {
+            DictionaryEntry* probe = NULL;
+            for (int index = 0; index < table_size(); index++) {
+                for (DictionaryEntry** p = bucket_addr(index); *p != NULL; ) {
+                    probe = *p;
+                    Klass* e = probe->klass();
+                    ClassLoaderData* loader_data = probe->loader_data();
+
+                    InstanceKlass* ik = InstanceKlass::cast(e);
+
+                    // bootstrap加载的类不能unload
+                    if (!is_strongly_reachable(loader_data, e)) {
+                        if (loader_data->is_unloading()) {
+                            *p = probe->next();
+                            // 删除加载的类
+                            free_entry(probe);
+                            continue;
+                        }
+                    }
+                    p = probe->next_addr();
+                }
+            }
+        }
+    }
+}
+
+```
