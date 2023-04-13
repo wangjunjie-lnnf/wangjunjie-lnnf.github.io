@@ -369,7 +369,7 @@ int main(int argc, char **argv)
     {
         Filedata *filedata = calloc(1, sizeof *filedata);
         filedata->file_name = file_name;
-	    filedata->handle = fopen(file_name, "rb");
+        filedata->handle = fopen(file_name, "rb");
         
         // 读取前8字节判断文件格式
         fread(armag, 8, 1, filedata->handle);
@@ -416,7 +416,7 @@ int main(int argc, char **argv)
                     get_64bit_program_headers(filedata, phdrs);
                     {
                         unsigned int size = filedata->file_header.e_phentsize;
-	                    unsigned int num = filedata->file_header.e_phnum;
+                        unsigned int num = filedata->file_header.e_phnum;
 
                         phdrs = (Elf64_External_Phdr *)get_data(..., filedata, filedata->file_header.e_phoff, size, num, ...);
                     }

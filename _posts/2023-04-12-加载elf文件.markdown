@@ -11,20 +11,20 @@ tags: kernel elf
 ```c
 
 static struct linux_binfmt elf_format = {
-	.load_binary	= load_elf_binary,
-	.load_shlib	    = load_elf_library,
-	.core_dump	    = elf_core_dump,
-	.min_coredump	= ELF_EXEC_PAGESIZE,
+    .load_binary    = load_elf_binary,
+    .load_shlib        = load_elf_library,
+    .core_dump        = elf_core_dump,
+    .min_coredump    = ELF_EXEC_PAGESIZE,
 };
 
 // 系统调用execve加载指定的elf文件
 static int do_execve(struct filename *filename,
-	const char __user *const __user *__argv,
-	const char __user *const __user *__envp)
+    const char __user *const __user *__argv,
+    const char __user *const __user *__envp)
 {
-	struct user_arg_ptr argv = { .ptr.native = __argv };
-	struct user_arg_ptr envp = { .ptr.native = __envp };
-	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+    struct user_arg_ptr argv = { .ptr.native = __argv };
+    struct user_arg_ptr envp = { .ptr.native = __envp };
+    return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
     {
         struct linux_binprm *bprm;
         bprm = alloc_bprm(fd, filename);
@@ -60,7 +60,7 @@ static int do_execve(struct filename *filename,
                 {
                     bprm->vma = vm_area_alloc(mm);
                     vma->vm_end = STACK_TOP_MAX;
-	                vma->vm_start = vma->vm_end - PAGE_SIZE;
+                    vma->vm_start = vma->vm_end - PAGE_SIZE;
                     insert_vm_struct(mm, vma);
 
                     // stack从`2^48 - 8`处开始
@@ -70,7 +70,7 @@ static int do_execve(struct filename *filename,
         }
 
         /* 在stack上为argv和envp预留位置 */
-	    bprm_stack_limits(bprm);
+        bprm_stack_limits(bprm);
         {
             limit = _STK_LIM / 4 * 3;
             limit = min(limit, bprm->rlim_stack.rlim_cur / 4);
@@ -128,13 +128,13 @@ static int do_execve(struct filename *filename,
                                 }
 
                                 if (elf_ppnt->p_type != PT_INTERP)
-			                        continue;
+                                    continue;
 
                                 elf_interpreter = kmalloc(elf_ppnt->p_filesz, GFP_KERNEL);
                                 elf_read(bprm->file, elf_interpreter, elf_ppnt->p_filesz, elf_ppnt->p_offset);
 
                                 /* PT_INTERP表示解释器的路径 */
-		                        interpreter = open_exec(elf_interpreter);
+                                interpreter = open_exec(elf_interpreter);
 
                                 // 读取解释器的文件头
                                 struct elfhdr *interp_elf_ex = kmalloc(sizeof(*interp_elf_ex), GFP_KERNEL);
@@ -145,7 +145,7 @@ static int do_execve(struct filename *filename,
 
                             if (interpreter) {
                                 /* Load the interpreter program headers */
-		                        interp_elf_phdata = load_elf_phdrs(interp_elf_ex, interpreter);
+                                interp_elf_phdata = load_elf_phdrs(interp_elf_ex, interpreter);
                                 // 查找PT_GNU_PROPERTY
                                 elf_ppnt = interp_elf_phdata;
                                 for (i = 0; i < interp_elf_ex->e_phnum; i++, elf_ppnt++)
@@ -220,21 +220,21 @@ static int do_execve(struct filename *filename,
                                         transfer_pid(leader, tsk, PIDTYPE_SID);
 
                                         list_replace_rcu(&leader->tasks, &tsk->tasks);
-		                                list_replace_init(&leader->sibling, &tsk->sibling);
+                                        list_replace_init(&leader->sibling, &tsk->sibling);
 
                                         // tsk成为leader
                                         tsk->group_leader = tsk;
-		                                leader->group_leader = tsk;
+                                        leader->group_leader = tsk;
 
                                         // 老leader退出
                                         tsk->exit_signal = SIGCHLD;
-		                                leader->exit_signal = -1;
+                                        leader->exit_signal = -1;
                                         leader->exit_state = EXIT_DEAD;
                                         release_task(leader);
                                     }
 
                                     sig->group_exit_task = NULL;
-	                                sig->notify_count = 0;
+                                    sig->notify_count = 0;
                                 }
 
                                 /* 复制current->files */
@@ -246,7 +246,7 @@ static int do_execve(struct filename *filename,
                                 exec_mmap(bprm->mm);
                                 {
                                     tsk = current;
-	                                old_mm = current->mm;
+                                    old_mm = current->mm;
 
                                     active_mm = tsk->active_mm;
                                     tsk->active_mm = mm;
@@ -295,7 +295,7 @@ static int do_execve(struct filename *filename,
 
                             for(i = 0, elf_ppnt = elf_phdata; i < elf_ex->e_phnum; i++, elf_ppnt++) {
                                 if (elf_ppnt->p_type != PT_LOAD)
-			                        continue;
+                                    continue;
 
                                 // 根据p_flags设置内存属性
                                 elf_prot = make_prot(elf_ppnt->p_flags, &arch_state, !!interpreter, false);
@@ -322,7 +322,7 @@ static int do_execve(struct filename *filename,
                                 elf_map(bprm->file, load_bias + vaddr, elf_ppnt, elf_prot, elf_flags, total_size);
 
                                 if (!load_addr_set) {
-			                        load_addr_set = 1;
+                                    load_addr_set = 1;
                                 }
 
                                 // code -> data -> bss -> brk
@@ -441,7 +441,7 @@ static int do_execve(struct filename *filename,
             }
 
             current->fs->in_exec = 0;
-	        current->in_execve = 0;
+            current->in_execve = 0;
         }
     }
 }
@@ -487,40 +487,40 @@ Program Headers:
    its return value is the user program's entry point.  */
 #define RTLD_START asm ("\n\
 .text\n\
-	.align 16\n\
+    .align 16\n\
 .globl _start\n\
 .globl _dl_start_user\n\
 _start:\n\
-	movq %rsp, %rdi\n\
-	call _dl_start\n\
+    movq %rsp, %rdi\n\
+    call _dl_start\n\
 _dl_start_user:\n\
-	# Save the user entry point address in %r12.\n\
-	movq %rax, %r12\n\
-	# Read the original argument count.\n\
-	movq (%rsp), %rdx\n\
-	# Call _dl_init (struct link_map *main_map, int argc, char **argv, char **env)\n\
-	# argc -> rsi\n\
-	movq %rdx, %rsi\n\
-	# Save %rsp value in %r13.\n\
-	movq %rsp, %r13\n\
-	# And align stack for the _dl_init call. \n\
-	andq $-16, %rsp\n\
-	# _dl_loaded -> rdi\n\
-	movq _rtld_local(%rip), %rdi\n\
-	# env -> rcx\n\
-	leaq 16(%r13,%rdx,8), %rcx\n\
-	# argv -> rdx\n\
-	leaq 8(%r13), %rdx\n\
-	# Clear %rbp to mark outermost frame obviously even for constructors.\n\
-	xorl %ebp, %ebp\n\
-	# Call the function to run the initializers.\n\
-	call _dl_init\n\
-	# Pass our finalizer function to the user in %rdx, as per ELF ABI.\n\
-	leaq _dl_fini(%rip), %rdx\n\
-	# And make sure %rsp points to argc stored on the stack.\n\
-	movq %r13, %rsp\n\
-	# Jump to the user's entry point.\n\
-	jmp *%r12\n\
+    # Save the user entry point address in %r12.\n\
+    movq %rax, %r12\n\
+    # Read the original argument count.\n\
+    movq (%rsp), %rdx\n\
+    # Call _dl_init (struct link_map *main_map, int argc, char **argv, char **env)\n\
+    # argc -> rsi\n\
+    movq %rdx, %rsi\n\
+    # Save %rsp value in %r13.\n\
+    movq %rsp, %r13\n\
+    # And align stack for the _dl_init call. \n\
+    andq $-16, %rsp\n\
+    # _dl_loaded -> rdi\n\
+    movq _rtld_local(%rip), %rdi\n\
+    # env -> rcx\n\
+    leaq 16(%r13,%rdx,8), %rcx\n\
+    # argv -> rdx\n\
+    leaq 8(%r13), %rdx\n\
+    # Clear %rbp to mark outermost frame obviously even for constructors.\n\
+    xorl %ebp, %ebp\n\
+    # Call the function to run the initializers.\n\
+    call _dl_init\n\
+    # Pass our finalizer function to the user in %rdx, as per ELF ABI.\n\
+    leaq _dl_fini(%rip), %rdx\n\
+    # And make sure %rsp points to argc stored on the stack.\n\
+    movq %r13, %rsp\n\
+    # Jump to the user's entry point.\n\
+    jmp *%r12\n\
 .previous\n\
 ");
 
