@@ -4,6 +4,7 @@ public class InsertSort {
     
     public static void main(String[] args) {
         int[] arr = new int[] { 4, 7, 1, 9, 3, 6 };
+        
         insertSort(arr);
 
         for (int i = 0; i < arr.length; i++) {
