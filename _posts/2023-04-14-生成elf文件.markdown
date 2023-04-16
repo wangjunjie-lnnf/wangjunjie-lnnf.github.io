@@ -89,106 +89,107 @@ COLLECT_GCC_OPTIONS='-o' 'main_printf' '-mtune=generic' '-march=x86-64' '-dumpdi
 ## 编译
 
 `gcc/cc1 -iprefix=xxx -isystem=xxx -imultiarch x86_64-linux-gnu -o main_printf.s main_printf.c`  
-编译之后产生如下汇编代码:
+
+编译之后产生如下汇编代码(删除调试信息相关的`.cfi_xxx`伪指令):
 
 ```asm
 
-	.file	"main_printf.c"
+    .file    "main_printf.c"
 
-	.text
-	.globl	convert
-	.type	convert, @function
+    .text
+    .globl   convert
+    .type    convert, @function
 
 convert:
 .LFB0:
-	pushq	%rbp
-	movq	%rsp, %rbp
-	movq	%rdi, -24(%rbp)
-	movl	$0, -4(%rbp)
-	movl	$0, -8(%rbp)
-	jmp	.L2
+    pushq   %rbp
+    movq    %rsp, %rbp
+    movq    %rdi, -24(%rbp)
+    movl    $0, -4(%rbp)
+    movl    $0, -8(%rbp)
+    jmp    .L2
 .L6:
-	cmpb	$47, -9(%rbp)
-	jle	.L3
-	cmpb	$57, -9(%rbp)
-	jle	.L4
+    cmpb    $47, -9(%rbp)
+    jle    .L3
+    cmpb    $57, -9(%rbp)
+    jle    .L4
 .L3:
-	movl	$-3, %eax
-	jmp	.L5
+    movl    $-3, %eax
+    jmp    .L5
 .L4:
-	movl	-4(%rbp), %edx
-	movl	%edx, %eax
-	sall	$2, %eax
-	addl	%edx, %eax
-	addl	%eax, %eax
-	movl	%eax, -4(%rbp)
-	movsbl	-9(%rbp), %eax
-	subl	$48, %eax
-	addl	%eax, -4(%rbp)
+    movl    -4(%rbp), %edx
+    movl    %edx, %eax
+    sall    $2, %eax
+    addl    %edx, %eax
+    addl    %eax, %eax
+    movl    %eax, -4(%rbp)
+    movsbl  -9(%rbp), %eax
+    subl    $48, %eax
+    addl    %eax, -4(%rbp)
 .L2:
-	movl	-8(%rbp), %eax
-	leal	1(%rax), %edx
-	movl	%edx, -8(%rbp)
-	movslq	%eax, %rdx
-	movq	-24(%rbp), %rax
-	addq	%rdx, %rax
-	movzbl	(%rax), %eax
-	movb	%al, -9(%rbp)
-	cmpb	$0, -9(%rbp)
-	jne	.L6
-	movl	-4(%rbp), %eax
+    movl    -8(%rbp), %eax
+    leal    1(%rax), %edx
+    movl    %edx, -8(%rbp)
+    movslq  %eax, %rdx
+    movq    -24(%rbp), %rax
+    addq    %rdx, %rax
+    movzbl  (%rax), %eax
+    movb    %al, -9(%rbp)
+    cmpb    $0, -9(%rbp)
+    jne    .L6
+    movl    -4(%rbp), %eax
 .L5:
-	popq	%rbp
-	ret
+    popq    %rbp
+    ret
 .LFE0:
-	.size	convert, .-convert
+    .size    convert, .-convert
 
-	.section	.rodata
+    .section    .rodata
 .LC0:
-	.string	"result is %d\n"
+    .string    "result is %d\n"
 
-	.text
-	.globl	main
-	.type	main, @function
+    .text
+    .globl    main
+    .type    main, @function
 
 main:
 .LFB1:
-	pushq	%rbp
-	movq	%rsp, %rbp
-	subq	$32, %rsp
-	movl	%edi, -20(%rbp)
-	movq	%rsi, -32(%rbp)
-	cmpl	$2, -20(%rbp)
-	je	.L8
-	movl	$-1, %eax
-	jmp	.L9
+    pushq    %rbp
+    movq    %rsp, %rbp
+    subq    $32, %rsp
+    movl    %edi, -20(%rbp)
+    movq    %rsi, -32(%rbp)
+    cmpl    $2, -20(%rbp)
+    je      .L8
+    movl    $-1, %eax
+    jmp     .L9
 .L8:
-	movq	-32(%rbp), %rax
-	movq	8(%rax), %rax
-	movq	%rax, -8(%rbp)
-	cmpq	$0, -8(%rbp)
-	jne	.L10
-	movl	$-2, %eax
-	jmp	.L9
+    movq    -32(%rbp), %rax
+    movq    8(%rax), %rax
+    movq    %rax, -8(%rbp)
+    cmpq    $0, -8(%rbp)
+    jne    .L10
+    movl    $-2, %eax
+    jmp    .L9
 .L10:
-	movq	-8(%rbp), %rax
-	movq	%rax, %rdi
-	call	convert
-	movl	%eax, -12(%rbp)
-	movl	-12(%rbp), %eax
-	movl	%eax, %esi
-	movl	$.LC0, %edi
-	movl	$0, %eax
-	call	printf
-	movl	$0, %eax
+    movq    -8(%rbp), %rax
+    movq    %rax, %rdi
+    call    convert
+    movl    %eax, -12(%rbp)
+    movl    -12(%rbp), %eax
+    movl    %eax, %esi
+    movl    $.LC0, %edi
+    movl    $0, %eax
+    call    printf
+    movl    $0, %eax
 .L9:
-	leave
-	ret
+    leave
+    ret
 .LFE1:
-	.size	main, .-main
-	
-	.ident	"GCC: (GNU) 11.3.0"
-	.section	.note.GNU-stack,"",@progbits
+    .size    main, .-main
+    
+    .ident    "GCC: (GNU) 11.3.0"
+    .section    .note.GNU-stack,"",@progbits
 
 ```
 
@@ -236,14 +237,21 @@ TODO
 
 ## 核心数据结构
 
+![gas](/assets/images/2023-04-14/gas.png)
 
+* `bfd`表示最终生成的obj文件
+* `bfd_section`表示`bfd`中的一个section，双链表结构
+* `segment_info_struct`表示section的context和重定位信息
+* `frchain`表示section的一部分，对应每个subseg
+* `fix`表示重定位符号: 包括跨section引用的符号和外部导入符号
+* `frag`表示一个线性的代码片段，`jump`系列指令会产生新的frag
 
 ## gas实现
 
 ```c
 
 frchainS *frchain_now;
-extern fragS *frag_now;
+fragS *frag_now;
 
 // 虚拟符号`.`表示当前位置
 symbolS dot_symbol;
@@ -265,7 +273,7 @@ int main(int argc, char **argv)
         frag_now = &dummy_frag;
     }
 
-    /* 收集伪指令列表 */
+    /* 收集gas支持的伪指令列表 */
     read_begin();
     {
         pobegin();
@@ -424,8 +432,8 @@ int main(int argc, char **argv)
                 { NULL, 0, 0, 0, ... };
             }
 
-            /* Initialize reg_hash hash table.  */
-	        reg_hash = str_htab_create();
+            // 所有的寄存器名称插入reg_hash
+            reg_hash = str_htab_create();
             i386_regtab[] = {
                 { "rax", ... },
                 { "rbx", ... },
@@ -462,8 +470,12 @@ int main(int argc, char **argv)
                         if (next_char == ':') {
                             // 创建label, 插入符号表
                             colon(s);
+                            {
+                                symbolP = symbol_new(sym_name, now_seg, frag_now, frag_now_fix());
+                                symbol_table_insert(symbolP);
+                            }
                         } else if (next_char == '=' && *rest == '=') {
-                            // 赋值语句，插入符号表
+                            // 宏定义，插入符号表
                             equals(s, -1);
                         } else {
                             /* Expect pseudo-op or machine instruction.  */
@@ -479,10 +491,49 @@ int main(int argc, char **argv)
                                 {
                                     md_assemble(line);
                                     {
-                                        // 忽略汇编指令解析过程
+                                        // 解析指令名查找指令模板
+                                        line = parse_insn(line, mnemonic);
+                                        // 解析参数
+                                        line = parse_operands(line, mnemonic);
 
-                                        // 汇编指令写入frag
-	                                    output_insn();
+                                        // 检查模板和参数是否匹配
+                                        if (!(t = match_template(mnem_suffix)))
+                                            return;
+
+                                        // 汇编指令写入frag->fr_literal
+                                        output_insn();
+                                        {
+                                            if (i.tm.opcode_modifier.jump == JUMP)
+                                                // 处理`jmp .L2`类指令
+                                                output_branch();
+                                            else if (i.tm.opcode_modifier.jump == JUMP_BYTE || i.tm.opcode_modifier.jump == JUMP_DWORD)
+                                                // 处理`call printf`类指令
+                                                output_jump();
+                                                {
+                                                    // 引用符号生成reloc
+                                                    fixP = fix_new_exp(frag_now, ...);
+                                                }
+                                            else {
+                                                // 输出opcode编码
+
+                                                // 输出操作数
+                                                if (i.disp_operands)
+                                                    // 处理`movl %edi, -20(%rbp)`内存寻址参数
+                                                    output_disp(insn_start_frag, insn_start_off);
+                                                    {
+                                                        // 引用数据符号生成reloc
+                                                        fixP = fix_new_exp(frag_now, ...);
+                                                    }
+
+                                                if (i.imm_operands)
+                                                    // 处理`movl $.LC0, %edi`类$开头的常量
+                                                    output_imm(insn_start_frag, insn_start_off);
+                                                    {
+                                                        // 引用数据符号生成reloc
+                                                        fixP = fix_new_exp(frag_now, ...);
+                                                    }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -513,54 +564,139 @@ int main(int argc, char **argv)
     {
         write_object_file();
         {
+            // close&align当前的frag
             subsegs_finish();
 
             // sec->index从0开始编码
             bfd_map_over_sections(stdoutput, renumber_sections, ...);
-            // 所有frchain下的frag链接到一起
+            // 链接各个subsec的frag和fix
             bfd_map_over_sections(stdoutput, chain_frchains_together, (char *)0);
 
             struct relax_seg_info rsi;
-
             while (1) {
                 rsi.changed = 0;
+                // 计算frag->fr_address，表示frag在其section内的offset
                 bfd_map_over_sections(stdoutput, relax_seg, &rsi);
                 if (!rsi.changed)
                     break;
             }
 
+            // 计算sec->size，表示section占据的内存
             bfd_map_over_sections(stdoutput, size_seg, (char *)0);
 
+            // 合成section .gnu.attribute
             create_obj_attrs_section();
 
+            // 计算表达式符号的值
             for (symp = symbol_rootP; symp; symp = symbol_next(symp))
-			    resolve_symbol_value(symp);
+                resolve_symbol_value(symp);
 
+            // 计算符号表中所有非导出符号的地址: frag内的offset+frag自己在segment内的offset
             resolve_local_symbol_values();
-	        resolve_reloc_expr_symbols();
 
+            // 合成section .gnu.build.attributes
             maybe_generate_build_notes();
 
             bfd_map_over_sections(stdoutput, adjust_reloc_syms, (char *)0);
 
+            // 替换reloc中的local_sym
             bfd_map_over_sections(stdoutput, fix_segment, (char *)0);
 
-            /* Set up symbol table, and write it out.  */
+            // 删除非导出/导入符号
             for (symp = symbol_rootP; symp; symp = symbol_next(symp)) {
                 resolve_symbol_value(symp);
                 symbol_get_bfdsym(symp)->value = S_GET_VALUE(symp);
             }
 
-            /* Now that all the sizes are known, and contents correct,
-               we can start writing to the file.  */
-	        set_symtab();
+            // 生成符号表及其对应的字符串表
+            set_symtab();
 
+            // 根据fix生成reloc表: 包含三类
+            // 1. 数据段内部的符号引用
+            // 2. obj内跨segment引用: 包含数据和代码
+            // 2. 引起其他obj的导出符号: 包含数据和代码
             bfd_map_over_sections(stdoutput, write_relocs, (char *)0);
 
+            // 依次写入每个frag->fr_literal
             bfd_map_over_sections(stdoutput, write_contents, (char *)0);
         }
     }
 }
+
+```
+
+```
+
+> readelf -a -W main_printf.o
+
+ELF Header:
+  Magic:   7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 
+  Class:                             ELF64
+  Data:                              2's complement, little endian
+  Version:                           1 (current)
+  OS/ABI:                            UNIX - System V
+  ABI Version:                       0
+  Type:                              REL (Relocatable file)
+  Machine:                           Advanced Micro Devices X86-64
+  Version:                           0x1
+  Entry point address:               0x0
+  Start of program headers:          0 (bytes into file)
+  Start of section headers:          712 (bytes into file)
+  Flags:                             0x0
+  Size of this header:               64 (bytes)
+  Size of program headers:           0 (bytes)
+  Number of program headers:         0
+  Size of section headers:           64 (bytes)
+  Number of section headers:         12
+  Section header string table index: 11
+
+Section Headers:
+  [Nr] Name              Type            Address          Off    Size   ES Flg Lk Inf Al
+  [ 0]                   NULL            0000000000000000 000000 000000 00      0   0  0
+  [ 1] .text             PROGBITS        0000000000000000 000040 0000c8 00  AX  0   0  1
+  [ 2] .rela.text        RELA            0000000000000000 000218 000048 18   I  9   1  8
+  [ 3] .data             PROGBITS        0000000000000000 000108 000000 00  WA  0   0  1
+  [ 4] .bss              NOBITS          0000000000000000 000108 000000 00  WA  0   0  1
+  [ 5] .rodata           PROGBITS        0000000000000000 000108 00000e 00   A  0   0  1
+  [ 6] .comment          PROGBITS        0000000000000000 000116 000013 01  MS  0   0  1
+  [ 7] .note.GNU-stack   PROGBITS        0000000000000000 000129 000000 00      0   0  1
+  [ 8] .note.gnu.property NOTE            0000000000000000 000130 000030 00  A  0   0  8
+  [ 9] .symtab           SYMTAB          0000000000000000 000160 000090 18     10   3  8
+  [10] .strtab           STRTAB          0000000000000000 0001f0 000023 00      0   0  1
+  [11] .shstrtab         STRTAB          0000000000000000 000260 000065 00      0   0  1
+Key to Flags:
+  W (write), A (alloc), X (execute), M (merge), S (strings), I (info),
+  L (link order), O (extra OS processing required), G (group), T (TLS),
+  C (compressed), x (unknown), o (OS specific), E (exclude),
+  D (mbind), l (large), p (processor specific)
+
+There are no section groups in this file.
+
+There are no program headers in this file.
+
+There is no dynamic section in this file.
+
+Relocation section '.rela.text' at offset 0x218 contains 3 entries:
+    Offset             Info             Type               Symbol's Value  Symbol's Name + Addend
+00000000000000a6  0000000300000004 R_X86_64_PLT32         0000000000000000 convert - 4
+00000000000000b3  000000020000000a R_X86_64_32            0000000000000000 .rodata + 0
+00000000000000bd  0000000500000004 R_X86_64_PLT32         0000000000000000 printf - 4
+No processor specific unwind information to decode
+
+Symbol table '.symtab' contains 6 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main_printf.c
+     2: 0000000000000000     0 SECTION LOCAL  DEFAULT    5 .rodata
+     3: 0000000000000000   104 FUNC    GLOBAL DEFAULT    1 convert
+     4: 0000000000000068    96 FUNC    GLOBAL DEFAULT    1 main
+     5: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND printf
+
+No version information found in this file.
+
+Displaying notes found in: .note.gnu.property
+  Owner                Data size        Description
+  GNU                  0x00000020       NT_GNU_PROPERTY_TYPE_0        Properties: x86 ISA used: , x86 feature used: x86
 
 ```
 

@@ -202,14 +202,14 @@ Symbol Bindings:
 Symbol Types:
 
 | Name | Value | Meaning |
-| 
+| - | - | - |
 | STT_NOTYPE | 0 | No type specified (e.g., an absolute symbol) |
 | STT_OBJECT | 1 | Data object |
 | STT_FUNC | 2 | Function entry point |
 | STT_SECTION | 3 | Symbol is associated with a section |
 | STT_FILE | 4 | Source file associated with the object file |
 
-An STT_FILE symbol must have STB_LOCAL binding, its section index must be SHN_ABS, and it must precede all other local symbols for the file. 
+An `STT_FILE` symbol must have `STB_LOCAL` binding, its section index must be SHN_ABS, and it must precede all other local symbols for the file. 
 
 * st_shndx: contains the section index of the section in which the symbol is “defined.” For undefined symbols, this field contains SHN_UNDEF; for absolute symbols, it contains SHN_ABS; and for common symbols, it contains SHN_COMMON. 
 
