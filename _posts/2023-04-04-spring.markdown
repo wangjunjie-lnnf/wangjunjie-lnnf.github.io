@@ -14,20 +14,20 @@ tags: spring mvc boot
 
 public class GenericXmlApplicationContext extends GenericApplicationContext {
 
-	private final XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(this);
+    private final XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(this);
 
     public void load(String... resourceLocations) {
-		this.reader.loadBeanDefinitions(resourceLocations);
+        this.reader.loadBeanDefinitions(resourceLocations);
         {
             // ResourceLoader用于定位xml配置文件
             ResourceLoader resourceLoader = getResourceLoader();
 
             Resource[] resources = ((ResourcePatternResolver) resourceLoader).getResources(location);
 
-			loadBeanDefinitions(resources);
+            loadBeanDefinitions(resources);
             {
                 Document doc = doLoadDocument(inputSource, resource);
-			    registerBeanDefinitions(doc, resource);
+                registerBeanDefinitions(doc, resource);
                 {
                     BeanDefinitionDocumentReader documentReader = new DefaultBeanDefinitionDocumentReader();
 
@@ -38,7 +38,7 @@ public class GenericXmlApplicationContext extends GenericApplicationContext {
                         Element root = doc.getDocumentElement();
 
                         BeanDefinitionParserDelegate parent = this.delegate;
-		                this.delegate = createDelegate(getReaderContext(), root, parent);
+                        this.delegate = createDelegate(getReaderContext(), root, parent);
 
                         // 判断profile是否生效
                         if (this.delegate.isDefaultNamespace(root)) {
@@ -98,14 +98,14 @@ public class GenericXmlApplicationContext extends GenericApplicationContext {
             }
 
         }
-	}
+    }
 
 }
 
 public class DefaultBeanDefinitionDocumentReader {
 
     protected void processBeanDefinition(Element ele, BeanDefinitionParserDelegate delegate) {
-		BeanDefinitionHolder bdHolder = delegate.parseBeanDefinitionElement(ele);
+        BeanDefinitionHolder bdHolder = delegate.parseBeanDefinitionElement(ele);
         {
             String id = ele.getAttribute(ID_ATTRIBUTE);
             String nameAttr = ele.getAttribute(NAME_ATTRIBUTE);
@@ -180,8 +180,8 @@ public class DefaultBeanDefinitionDocumentReader {
         }
 
         // 注册bean定义和别名
-        BeanDefinitionReaderUtils.registerBeanDefinition(bdHolder, getReaderContext().getRegistry());	
-	}
+        BeanDefinitionReaderUtils.registerBeanDefinition(bdHolder, getReaderContext().getRegistry());    
+    }
 
 }
 
@@ -195,11 +195,11 @@ public class AnnotationConfigApplicationContext {
 
     private final AnnotatedBeanDefinitionReader reader;
 
-	private final ClassPathBeanDefinitionScanner scanner;
+    private final ClassPathBeanDefinitionScanner scanner;
 
     public AnnotationConfigApplicationContext() {
-		// 注册ConfigurationClassPostProcessor等处理@Configuration和@Autowire
-		this.reader = new AnnotatedBeanDefinitionReader(this);
+        // 注册ConfigurationClassPostProcessor等处理@Configuration和@Autowire
+        this.reader = new AnnotatedBeanDefinitionReader(this);
         {
             AnnotationConfigUtils.registerAnnotationConfigProcessors(this.registry);
             {
@@ -217,13 +217,13 @@ public class AnnotationConfigApplicationContext {
             }
         }
 
-		this.scanner = new ClassPathBeanDefinitionScanner(this);
-	}
+        this.scanner = new ClassPathBeanDefinitionScanner(this);
+    }
 
     @Override
-	public void register(Class<?>... componentClasses) {
+    public void register(Class<?>... componentClasses) {
         // 此处正是spring-boot的其中一个启动过程
-		this.reader.register(componentClasses);
+        this.reader.register(componentClasses);
         {
             AnnotatedGenericBeanDefinition abd = new AnnotatedGenericBeanDefinition(beanClass);
             
@@ -244,7 +244,7 @@ public class AnnotationConfigApplicationContext {
                 }
 
                 // 实现接口Ordered或用@Order注解
-		        AnnotationAwareOrderComparator.sort(conditions);
+                AnnotationAwareOrderComparator.sort(conditions);
 
                 for (Condition condition : conditions) {
                     if (!condition.matches(this.context, metadata)) {
@@ -302,11 +302,11 @@ public class AnnotationConfigApplicationContext {
             definitionHolder = AnnotationConfigUtils.applyScopedProxyMode(scopeMetadata, definitionHolder, this.registry);
             BeanDefinitionReaderUtils.registerBeanDefinition(definitionHolder, this.registry);
         }
-	}
+    }
 
     @Override
-	public void scan(String... basePackages) {
-		this.scanner.scan(basePackages);
+    public void scan(String... basePackages) {
+        this.scanner.scan(basePackages);
         {
             for (String basePackage : basePackages) {
                 // 所有被@Component注解的类
@@ -331,14 +331,14 @@ public class AnnotationConfigApplicationContext {
                     }
 
                     // 不加载类，直接解析class文件获取所有注解！！！
-					MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
-					// 判断是否有@Component注解
-					if (isCandidateComponent(metadataReader)) {
-						ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);
-						if (isCandidateComponent(sbd)) {
-							candidates.add(sbd);
-						}
-					}
+                    MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
+                    // 判断是否有@Component注解
+                    if (isCandidateComponent(metadataReader)) {
+                        ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);
+                        if (isCandidateComponent(sbd)) {
+                            candidates.add(sbd);
+                        }
+                    }
                 }
 
                 for (BeanDefinition candidate : candidates) {
@@ -361,7 +361,7 @@ public class AnnotationConfigApplicationContext {
                 }
             }
         }
-	}
+    }
 
 }
 
@@ -610,7 +610,7 @@ public interface BeanFactory {
 
 // ApplicationContext在BeanFactory基础上提供了基于profile的配置参数的能力(EnvironmentCapable)
 public interface ApplicationContext extends EnvironmentCapable, ListableBeanFactory, HierarchicalBeanFactory,
-		MessageSource, ApplicationEventPublisher, ResourcePatternResolver {
+        MessageSource, ApplicationEventPublisher, ResourcePatternResolver {
     
 }
 
@@ -660,8 +660,8 @@ public interface ApplicationContext extends EnvironmentCapable, ListableBeanFact
 public class ContextLoaderListener extends ContextLoader implements ServletContextListener {
 
     @Override
-	public void contextInitialized(ServletContextEvent event) {
-		initWebApplicationContext(event.getServletContext());
+    public void contextInitialized(ServletContextEvent event) {
+        initWebApplicationContext(event.getServletContext());
         {
             this.context = createWebApplicationContext(servletContext);
             {
@@ -672,7 +672,7 @@ public class ContextLoaderListener extends ContextLoader implements ServletConte
                         return ClassUtils.forName(contextClassName, ClassUtils.getDefaultClassLoader());
                     } else {
                         ClassPathResource resource = new ClassPathResource("ContextLoader.properties", ContextLoader.class);
-					    defaultStrategies = PropertiesLoaderUtils.loadProperties(resource);
+                        defaultStrategies = PropertiesLoaderUtils.loadProperties(resource);
 
                         // 默认是XmlWebApplicationContext
                         contextClassName = defaultStrategies.getProperty(WebApplicationContext.class.getName());
@@ -684,14 +684,14 @@ public class ContextLoaderListener extends ContextLoader implements ServletConte
             }
 
             if (this.context instanceof ConfigurableWebApplicationContext) {
-				ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) this.context;
-				if (!cwac.isActive()) {
-					if (cwac.getParent() == null) {
-						ApplicationContext parent = loadParentContext(servletContext);
-						cwac.setParent(parent);
-					}
+                ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) this.context;
+                if (!cwac.isActive()) {
+                    if (cwac.getParent() == null) {
+                        ApplicationContext parent = loadParentContext(servletContext);
+                        cwac.setParent(parent);
+                    }
 
-					configureAndRefreshWebApplicationContext(cwac, servletContext);
+                    configureAndRefreshWebApplicationContext(cwac, servletContext);
                     {
                         wac.setServletContext(servletContext);
 
@@ -733,13 +733,13 @@ public class ContextLoaderListener extends ContextLoader implements ServletConte
                         // 重新加载
                         wac.refresh();
                     }
-				}
-			}
+                }
+            }
 
             // FrameworkServlet中会用到
             servletContext.setAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE, this.context);
         }
-	}
+    }
 
 }
 
@@ -752,7 +752,7 @@ public class ContextLoaderListener extends ContextLoader implements ServletConte
 public class DispatcherServlet extends FrameworkServlet {
 
     @Override
-	public final void init() {
+    public final void init() {
         initServletBean();
         {
             this.webApplicationContext = initWebApplicationContext();
@@ -764,7 +764,7 @@ public class DispatcherServlet extends FrameworkServlet {
                 {
                     wac = new XmlWebApplicationContext();
                     wac.setEnvironment(getEnvironment());
-		            wac.setParent(rootContext);
+                    wac.setParent(rootContext);
 
                     if (contextConfigLocation != null) {
                         wac.setConfigLocation(contextConfigLocation);
@@ -776,7 +776,7 @@ public class DispatcherServlet extends FrameworkServlet {
                     // 通过ApplicationContextInitializer定制wac
                     applyInitializers(wac);
 
-		            wac.refresh();            
+                    wac.refresh();            
                 }
 
                 getServletContext().setAttribute(SERVLET_CONTEXT_PREFIX + getServletName(), wac);
@@ -785,8 +785,8 @@ public class DispatcherServlet extends FrameworkServlet {
     }
 
     @Override
-	protected void onRefresh(ApplicationContext context) {
-		initStrategies(context);
+    protected void onRefresh(ApplicationContext context) {
+        initStrategies(context);
         {
             initMultipartResolver(context);
             initLocaleResolver(context);
@@ -803,23 +803,23 @@ public class DispatcherServlet extends FrameworkServlet {
             initViewResolvers(context);
             initFlashMapManager(context);
         }
-	}
+    }
 
     @Override
-	protected final void doGet(HttpServletRequest request, HttpServletResponse response) {
-		processRequest(request, response);
-	}
+    protected final void doGet(HttpServletRequest request, HttpServletResponse response) {
+        processRequest(request, response);
+    }
 
-	@Override
-	protected final void doPost(HttpServletRequest request, HttpServletResponse response) {
-		processRequest(request, response);
-	}
+    @Override
+    protected final void doPost(HttpServletRequest request, HttpServletResponse response) {
+        processRequest(request, response);
+    }
 
     protected final void processRequest(HttpServletRequest request, HttpServletResponse response) {
         doService(request, response);
         {
             // Make framework objects available to handlers and view objects.
-		    request.setAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE, getWebApplicationContext());
+            request.setAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE, getWebApplicationContext());
 
             doDispatch(request, response);
             {
@@ -913,7 +913,7 @@ public class DispatcherServlet extends FrameworkServlet {
                                 }
 
                                 this.returnValueHandlers.handleReturnValue(
-					                    returnValue, getReturnValueType(returnValue), mavContainer, webRequest);
+                                        returnValue, getReturnValueType(returnValue), mavContainer, webRequest);
                                 {
                                     // 可以通过自定义HandlerMethodReturnValueHandler灵活处理响应
                                     for (HandlerMethodReturnValueHandler handler : this.returnValueHandlers) {
@@ -978,7 +978,7 @@ public class DispatcherServlet extends FrameworkServlet {
 public class ConfigurationClassPostProcessor {
 
     @Override
-	public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
+    public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
         processConfigBeanDefinitions(registry);
         {
             List<BeanDefinitionHolder> configCandidates = new ArrayList<>();
@@ -1003,8 +1003,8 @@ public class ConfigurationClassPostProcessor {
             });
 
             ConfigurationClassParser parser = new ConfigurationClassParser(
-				this.metadataReaderFactory, this.problemReporter, this.environment,
-				this.resourceLoader, this.componentScanBeanNameGenerator, registry);
+                this.metadataReaderFactory, this.problemReporter, this.environment,
+                this.resourceLoader, this.componentScanBeanNameGenerator, registry);
             {
                 // 处理@ComponentScan注解
                 this.componentScanParser = new ComponentScanAnnotationParser(environment, resourceLoader, ...);
@@ -1108,11 +1108,11 @@ public class ConfigurationClassPostProcessor {
                                         }
                                     } while (sourceClass != null);
 
-		                            this.configurationClasses.put(configClass, configClass);
+                                    this.configurationClasses.put(configClass, configClass);
                                 }
                             }
                         }
-		            }
+                    }
                 }
 
                 Set<ConfigurationClass> configClasses = new LinkedHashSet<>(parser.getConfigurationClasses());
@@ -1185,12 +1185,12 @@ public class SpringApplication {
     }
 
     public static ConfigurableApplicationContext run(Class<?> primarySource, String... args) {
-		return run(new Class<?>[] { primarySource }, args);
+        return run(new Class<?>[] { primarySource }, args);
         {
             return new SpringApplication(primarySources).run(args);
             {
                 // ApplicationContext初始化之前用于注册bean
-		        DefaultBootstrapContext bootstrapContext = createBootstrapContext();
+                DefaultBootstrapContext bootstrapContext = createBootstrapContext();
                 {
                     bootstrapContext = new DefaultBootstrapContext();
                     this.bootstrapRegistryInitializers.forEach((initializer) -> initializer.initialize(bootstrapContext));
@@ -1199,7 +1199,7 @@ public class SpringApplication {
                 // 创建ConfigurableEnvironment
                 ConfigurableEnvironment environment = prepareEnvironment(listeners, bootstrapContext, applicationArguments);
                 // 创建wac
-			    context = new AnnotationConfigServletWebServerApplicationContext();
+                context = new AnnotationConfigServletWebServerApplicationContext();
 
                 prepareContext(bootstrapContext, context, environment, listeners, ...);
                 {
@@ -1243,12 +1243,12 @@ public class SpringApplication {
                     }
                 }
 
-			    refreshContext(context);
+                refreshContext(context);
 
-			    callRunners(context, applicationArguments);
+                callRunners(context, applicationArguments);
             }
         }
-	}
+    }
 
 }
 
