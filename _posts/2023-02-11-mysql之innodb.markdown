@@ -743,120 +743,120 @@ int main(int argc, char **argv) {
 
                 mysql_thread_create(key_thread_bootstrap, ..., handle_bootstrap, &args);
                 {
-                    bootstrap_functor handler = args->m_bootstrap_handler;
-                    if (handler) {
-                        args->m_bootstrap_error = (*handler)(thd);
+                    (*(args->m_bootstrap_handler))(thd);
+                    {
+                        bootstrap::DDSE_dict_init(...);
                         {
-                            bootstrap::DDSE_dict_init(...);
+                            innobase_init_files(dict_init_mode, tablespaces);
                             {
-                                innobase_init_files(dict_init_mode, tablespaces);
+                                srv_start(false);
                                 {
-                                    srv_start(false);
-                                    {
-                                        /* 创建并启动io线程 */
-                                        for (ulint t = 0; t < srv_n_file_io_threads; ++t) {
-                                            if (t < start) {
-                                                if (t == 0) {
-                                                    thread = os_thread_create(io_ibuf_thread_key, 0, io_handler_thread, t);
-                                                } else {
-                                                    thread = os_thread_create(io_log_thread_key, 0, io_handler_thread, t);
-                                                }
-                                            } else if (t >= start && t < (start + srv_n_read_io_threads)) {
-                                                /* Numbering for ib_io_rd-NN starts with N=1. */
-                                                pfs_seqnum = t + 1 - start;
-                                                thread = os_thread_create(io_read_thread_key, pfs_seqnum, io_handler_thread, t);
-                                            } else if (t >= (start + srv_n_read_io_threads) &&
-                                                       t < (start + srv_n_read_io_threads + srv_n_write_io_threads)) {
-                                                /* Numbering for ib_io_wr-NN starts with N=1. */
-                                                pfs_seqnum = t + 1 - start - srv_n_read_io_threads;
-                                                thread = os_thread_create(io_write_thread_key, pfs_seqnum, io_handler_thread, t);
-                                            } 
-                                            thread.start();
-                                        }
-
-                                        buf_flush_page_cleaner_init();
-                                        {
-                                            srv_threads.m_page_cleaner_coordinator = os_thread_create(page_flush_coordinator_thread_key, ..., buf_flush_page_coordinator_thread);
-                                            {
-                                                for (size_t i = 1; i < srv_threads.m_page_cleaner_workers_n; ++i) {
-                                                    srv_threads.m_page_cleaner_workers[i] = os_thread_create(page_flush_thread_key, i, buf_flush_page_cleaner_thread);
-                                                    srv_threads.m_page_cleaner_workers[i].start();
-                                                }
+                                    /* 创建并启动io线程 */
+                                    for (ulint t = 0; t < srv_n_file_io_threads; ++t) {
+                                        if (t < start) {
+                                            if (t == 0) {
+                                                thread = os_thread_create(io_ibuf_thread_key, 0, io_handler_thread, t);
+                                            } else {
+                                                thread = os_thread_create(io_log_thread_key, 0, io_handler_thread, t);
                                             }
-                                            srv_threads.m_page_cleaner_workers[0] = srv_threads.m_page_cleaner_coordinator;
-                                            srv_threads.m_page_cleaner_coordinator.start();
-                                        }
-
-                                        /* We need to start log threads now, 
-                                           because recovery could result in execution of ibuf merges. 
-                                           These merges could result in new redo records. */
-                                        log_start_background_threads(*log_sys);
-                                        {
-                                            srv_threads.m_log_checkpointer = os_thread_create(log_checkpointer_thread_key, 0, log_checkpointer, &log);
-                                            srv_threads.m_log_flush_notifier = os_thread_create(log_flush_notifier_thread_key, 0, log_flush_notifier, &log);
-                                            srv_threads.m_log_flusher = os_thread_create(log_flusher_thread_key, 0, log_flusher, &log);
-                                            srv_threads.m_log_write_notifier = os_thread_create(log_write_notifier_thread_key, 0, log_write_notifier, &log);
-                                            srv_threads.m_log_writer = os_thread_create(log_writer_thread_key, 0, log_writer, &log);
-                                            srv_threads.m_log_files_governor = os_thread_create(log_files_governor_thread_key, 0, log_files_governor, &log);
-
-                                            srv_threads.m_log_checkpointer.start();
-                                            srv_threads.m_log_flush_notifier.start();
-                                            srv_threads.m_log_flusher.start();
-                                            srv_threads.m_log_write_notifier.start();
-                                            srv_threads.m_log_writer.start();
-                                            srv_threads.m_log_files_governor.start();
-                                        }
-
-
-                                        srv_threads.m_lock_wait_timeout = os_thread_create(srv_lock_timeout_thread_key, 0, lock_wait_timeout_thread);
-                                        srv_threads.m_lock_wait_timeout.start();
-
-                                        /* Create the thread which warns of long semaphore waits */
-                                        srv_threads.m_error_monitor = os_thread_create(srv_error_monitor_thread_key, 0, srv_error_monitor_thread);
-                                        srv_threads.m_error_monitor.start();
-
-                                        /* Create the thread which prints InnoDB monitor info */
-                                        srv_threads.m_monitor = os_thread_create(srv_monitor_thread_key, 0, srv_monitor_thread);
-                                        srv_threads.m_monitor.start();
+                                        } else if (t >= start && t < (start + srv_n_read_io_threads)) {
+                                            /* Numbering for ib_io_rd-NN starts with N=1. */
+                                            pfs_seqnum = t + 1 - start;
+                                            thread = os_thread_create(io_read_thread_key, pfs_seqnum, io_handler_thread, t);
+                                        } else if (t >= (start + srv_n_read_io_threads) &&
+                                                    t < (start + srv_n_read_io_threads + srv_n_write_io_threads)) {
+                                            /* Numbering for ib_io_wr-NN starts with N=1. */
+                                            pfs_seqnum = t + 1 - start - srv_n_read_io_threads;
+                                            thread = os_thread_create(io_write_thread_key, pfs_seqnum, io_handler_thread, t);
+                                        } 
+                                        thread.start();
                                     }
+
+                                    buf_flush_page_cleaner_init();
+                                    {
+                                        srv_threads.m_page_cleaner_coordinator = 
+                                                os_thread_create(page_flush_coordinator_thread_key, ..., buf_flush_page_coordinator_thread);
+                                        {
+                                            for (size_t i = 1; i < srv_threads.m_page_cleaner_workers_n; ++i) {
+                                                srv_threads.m_page_cleaner_workers[i] = 
+                                                        os_thread_create(page_flush_thread_key, i, buf_flush_page_cleaner_thread);
+                                                srv_threads.m_page_cleaner_workers[i].start();
+                                            }
+                                        }
+                                        srv_threads.m_page_cleaner_workers[0] = srv_threads.m_page_cleaner_coordinator;
+                                        srv_threads.m_page_cleaner_coordinator.start();
+                                    }
+
+                                    /* We need to start log threads now, 
+                                       because recovery could result in execution of ibuf merges. 
+                                       These merges could result in new redo records. */
+                                    log_start_background_threads(*log_sys);
+                                    {
+                                        srv_threads.m_log_checkpointer = os_thread_create(log_checkpointer_thread_key, 0, log_checkpointer, &log);
+                                        srv_threads.m_log_flush_notifier = os_thread_create(log_flush_notifier_thread_key, 0, log_flush_notifier, &log);
+                                        srv_threads.m_log_flusher = os_thread_create(log_flusher_thread_key, 0, log_flusher, &log);
+                                        srv_threads.m_log_write_notifier = os_thread_create(log_write_notifier_thread_key, 0, log_write_notifier, &log);
+                                        srv_threads.m_log_writer = os_thread_create(log_writer_thread_key, 0, log_writer, &log);
+                                        srv_threads.m_log_files_governor = os_thread_create(log_files_governor_thread_key, 0, log_files_governor, &log);
+
+                                        srv_threads.m_log_checkpointer.start();
+                                        srv_threads.m_log_flush_notifier.start();
+                                        srv_threads.m_log_flusher.start();
+                                        srv_threads.m_log_write_notifier.start();
+                                        srv_threads.m_log_writer.start();
+                                        srv_threads.m_log_files_governor.start();
+                                    }
+
+                                    srv_threads.m_lock_wait_timeout = os_thread_create(srv_lock_timeout_thread_key, 0, lock_wait_timeout_thread);
+                                    srv_threads.m_lock_wait_timeout.start();
+
+                                    /* Create the thread which warns of long semaphore waits */
+                                    srv_threads.m_error_monitor = os_thread_create(srv_error_monitor_thread_key, 0, srv_error_monitor_thread);
+                                    srv_threads.m_error_monitor.start();
+
+                                    /* Create the thread which prints InnoDB monitor info */
+                                    srv_threads.m_monitor = os_thread_create(srv_monitor_thread_key, 0, srv_monitor_thread);
+                                    srv_threads.m_monitor.start();
                                 }
                             }
+                        }
 
-                            restart_dictionary(thd);
+                        restart_dictionary(thd);
+                        {
+                            bootstrap::restart(thd);
                             {
-                                bootstrap::restart(thd);
+                                DDSE_dict_recover(thd, DICT_RECOVERY_RESTART_SERVER, ...);
                                 {
-                                    DDSE_dict_recover(thd, DICT_RECOVERY_RESTART_SERVER, ...);
+                                    ddse->dict_recover(dict_recovery_mode, version);
                                     {
-                                        ddse->dict_recover(dict_recovery_mode, version);
+                                        srv_start_threads(false);
                                         {
-                                            srv_start_threads(false);
+                                            log_sys->periodical_checkpoints_enabled = true;
+
+                                            srv_threads.m_buf_resize = os_thread_create(buf_resize_thread_key, 0, buf_resize_thread);
+                                            srv_threads.m_buf_resize.start();
+
+                                            /* Rollback all recovered transactions that are not in committed nor in XA PREPARE state. */
+                                            srv_threads.m_trx_recovery_rollback 
+                                                    = os_thread_create(trx_recovery_rollback_thread_key, 0， trx_recovery_rollback_thread);
+                                            srv_threads.m_trx_recovery_rollback.start();
+
+                                            /* Create the master thread which does purge and other utility operations */
+                                            srv_threads.m_master = os_thread_create(srv_master_thread_key, 0, srv_master_thread);
+                                            srv_threads.m_master.start();
+
+                                            /* Create the dict stats gathering thread */
+                                            srv_threads.m_dict_stats = os_thread_create(dict_stats_thread_key, 0, dict_stats_thread);
+                                            srv_threads.m_dict_stats.start();
+
+                                            fts_optimize_init();
                                             {
-                                                log_sys->periodical_checkpoints_enabled = true;
-
-                                                srv_threads.m_buf_resize = os_thread_create(buf_resize_thread_key, 0, buf_resize_thread);
-                                                srv_threads.m_buf_resize.start();
-
-                                                /* Rollback all recovered transactions that are not in committed nor in XA PREPARE state. */
-                                                srv_threads.m_trx_recovery_rollback = os_thread_create(trx_recovery_rollback_thread_key, 0， trx_recovery_rollback_thread);
-                                                srv_threads.m_trx_recovery_rollback.start();
-
-                                                /* Create the master thread which does purge and other utility operations */
-                                                srv_threads.m_master = os_thread_create(srv_master_thread_key, 0, srv_master_thread);
-                                                srv_threads.m_master.start();
-
-                                                /* Create the dict stats gathering thread */
-                                                srv_threads.m_dict_stats = os_thread_create(dict_stats_thread_key, 0, dict_stats_thread);
-                                                srv_threads.m_dict_stats.start();
-
-                                                fts_optimize_init();
-                                                {
-                                                    srv_threads.m_fts_optimize = os_thread_create(fts_optimize_thread_key, 0, fts_optimize_thread, fts_optimize_wq);
-                                                    srv_threads.m_fts_optimize.start();
-                                                }
-
-                                                srv_start_state_set(SRV_START_STATE_STAT);
+                                                srv_threads.m_fts_optimize 
+                                                        = os_thread_create(fts_optimize_thread_key, 0, fts_optimize_thread, fts_optimize_wq);
+                                                srv_threads.m_fts_optimize.start();
                                             }
+
+                                            srv_start_state_set(SRV_START_STATE_STAT);
                                         }
                                     }
                                 }
@@ -904,6 +904,284 @@ int main(int argc, char **argv) {
             }
         }
     }
+}
+
+```
+
+### io_handler_thread
+
+默认有10个io线程：ib_io_ibuf、ib_io_log、ib_io_rd-[1-4]、ib_io_wr-[1-4]
+
+```c++
+
+// 参数segment对应0-9
+static void io_handler_thread(ulint segment) {
+    while (srv_shutdown_state.load() != SRV_SHUTDOWN_EXIT_THREADS ||
+           buf_flush_page_cleaner_is_active() || !os_aio_all_slots_free()) {
+        fil_aio_wait(segment);
+        {
+            void *m2;
+            fil_node_t *m1;
+            IORequest type;
+
+            // 处理io队列中的请求
+            os_aio_handler(segment, &m1, &m2, &type);
+            {
+                auto segment = AIO::get_array_and_local_segment(array, global_segment);
+                SimulatedAIOHandler handler(array, segment);
+
+                for (;;) {
+                    // 检查待处理的请求
+                    ulint n_slots = handler.check_pending(global_segment, event);
+                    if (n_slots == 0) {
+                        continue;
+                    }
+
+                    handler.init(n_slots);
+
+                    // 检查已完成的请求
+                    slot = handler.check_completed(&n_reserved);
+                    if (slot != nullptr) {
+                        break;
+                    } else if (handler.select()) {
+                        break;
+                    }
+
+                    os_event_wait(event);
+                }
+
+                if (slot == nullptr) {
+                    /* Merge adjacent requests */
+                    handler.merge();
+
+                    // 读写数据
+                    handler.io();
+
+                    // 标记完成
+                    handler.done();
+
+                    slot = handler.first_slot();
+                }
+
+                *m1 = slot->m1;
+                *m2 = slot->m2;
+                *type = slot->type;
+            }
+
+            // 读写的文件
+            auto file = reinterpret_cast<fil_node_t *>(m1);
+            auto shard = fil_system->shard_by_id(file->space->id);
+            shard->complete_io(file, type);
+
+            // 读写的buf_pool page
+            if (m2 != nullptr) {
+                auto bpage = static_cast<buf_page_t *>(m2);
+                buf_page_io_complete(bpage, false);
+            }
+        }
+    }
+}
+
+```
+
+### buf_flush_page_coordinator_thread
+
+协调多个线程刷新`dirty` `page`到磁盘
+
+```c++
+
+static void buf_flush_page_coordinator_thread() {
+    /* We start from 1 because the coordinator thread is part of the same set */
+    for (size_t i = 1; i < srv_threads.m_page_cleaner_workers_n; ++i) {
+        srv_threads.m_page_cleaner_workers[i] = 
+                os_thread_create(page_flush_thread_key, i, buf_flush_page_cleaner_thread);
+        srv_threads.m_page_cleaner_workers[i].start();
+    }
+
+    while (srv_shutdown_state.load() < SRV_SHUTDOWN_CLEANUP) {
+        os_event_wait(recv_sys->flush_start);
+
+         if (srv_shutdown_state.load() >= SRV_SHUTDOWN_CLEANUP ||
+             recv_sys->spaces == nullptr) {
+            break;
+        }
+
+        switch (recv_sys->flush_type) {
+        case BUF_FLUSH_LRU:
+            /* Flush pages from end of LRU if required */
+            pc_request(0, LSN_MAX);
+            while (pc_flush_slot() > 0) {
+            }
+            pc_wait_finished(&n_flushed_lru, &n_flushed_list);
+            break;
+
+        case BUF_FLUSH_LIST:
+            /* Flush all pages */
+            do {
+                pc_request(ULINT_MAX, LSN_MAX);
+                while (pc_flush_slot() > 0) {
+                }
+            } while (!pc_wait_finished(&n_flushed_lru, &n_flushed_list));
+            break;
+        }
+    }
+}
+
+```
+
+### redo-log相关线程
+
+```c++
+
+// apply&clean redo-log
+void log_checkpointer(log_t *log_ptr) {    
+    for (;;) {
+        const lsn_t requested_checkpoint_lsn = log.requested_checkpoint_lsn;
+
+        if (error != OS_SYNC_TIME_EXCEEDED || !system_is_busy ||
+            requested_checkpoint_lsn > log.last_checkpoint_lsn.load(std::memory_order_acquire) ||
+            log_checkpoint_time_elapsed(log) >= log_busy_checkpoint_interval * get_srv_log_checkpoint_every()) {
+            
+            /* Consider flushing some dirty pages. */
+            log_consider_sync_flush(log);
+            /* Consider writing checkpoint. */
+            log_consider_checkpoint(log);
+            {
+                log_checkpoint(log);
+            }
+        }
+
+        // 等待下次触发
+        if (requested_checkpoint_lsn > log.last_checkpoint_lsn.load(std::memory_order_relaxed)) {
+            error = 0;
+        } else {
+            error = os_event_wait_time_low(log.checkpointer_event, get_srv_log_checkpoint_every(), sig_count);
+        }
+    }
+}
+
+// fsync redo-log
+void log_flusher(log_t *log_ptr) {
+    for (uint64_t step = 0;; ++step) {
+        if (last_flush_lsn < log.write_lsn.load()) {
+            /* Flush and stop waiting. */
+            log_flush_low(log);
+        }
+    }
+}
+
+// write内存中的redo-log到磁盘
+void log_writer(log_t *log_ptr) {
+    for (uint64_t step = 0;; ++step) {
+        /* Do the actual work. */
+        if (log.write_lsn.load() < ready_lsn) {
+            log_writer_write_buffer(log, ready_lsn);
+        }
+    }
+}
+
+```
+
+### lock_wait_timeout_thread
+
+```c++
+
+void lock_wait_timeout_thread() {
+    do {
+        // 1秒检查2次
+        if (std::chrono::milliseconds(500) < current_time - last_checked_for_timeouts_at) {
+            last_checked_for_timeouts_at = current_time;
+            lock_wait_check_slots_for_timeouts();
+        }
+
+        // 死锁检测和处理
+        lock_wait_update_schedule_and_check_for_deadlocks();
+
+        // 每秒唤醒一次等待锁的线程让其判断是否继续等待
+        os_event_wait_time_low(event, std::chrono::seconds{1}, sig_count);
+    } while (srv_shutdown_state.load() < SRV_SHUTDOWN_CLEANUP);
+}
+
+```
+
+### srv_master_thread
+
+```c++
+
+// The master thread controlling the server
+void srv_master_thread() {
+    srv_master_main_loop(slot);
+    {
+        while (srv_shutdown_state.load() < SRV_SHUTDOWN_PRE_DD_AND_SYSTEM_TRANSACTIONS) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            log_free_check();
+
+            if (srv_check_activity(old_activity_count)) {
+                old_activity_count = srv_get_activity_count();
+                srv_master_do_active_tasks();
+                {
+                    /* Do an ibuf merge */
+                    ibuf_merge_in_background(true);
+
+                    /* Flush logs if needed */
+                    log_buffer_sync_in_background();
+
+                    if (trx_sys->rseg_history_len > 0) {
+                        srv_wake_purge_thread_if_not_active();
+                    }
+
+                    srv_master_evict_from_table_cache(50);
+                }
+            } else {
+                srv_master_do_idle_tasks();
+                {
+                    /* Do an ibuf merge */
+                    ibuf_merge_in_background(true);
+
+                    if (trx_sys->rseg_history_len > 0) {
+                        srv_wake_purge_thread_if_not_active();
+                    }
+
+                    srv_master_evict_from_table_cache(100);
+
+                    /* Flush logs if needed */
+                    log_buffer_sync_in_background();
+                }
+            }
+
+            /* Purge any deleted tablespace pages. */
+            fil_purge();
+        }
+    }
+
+    srv_master_pre_dd_shutdown_loop();
+
+    srv_master_shutdown_loop();
+}
+
+```
+
+### srv_purge_coordinator_thread
+
+```c++
+
+void srv_purge_coordinator_thread() {
+    do {
+        if (srv_shutdown_state.load() < SRV_SHUTDOWN_PURGE &&
+            (purge_sys->state == PURGE_STATE_STOP || n_total_purged == 0)) {
+            srv_purge_coordinator_suspend(slot, rseg_history_len);
+        }
+
+        if (srv_purge_should_exit(n_total_purged)) {
+            break;
+        }
+
+        // 清理undo-log
+        n_total_purged = 0;
+        rseg_history_len = srv_do_purge(&n_total_purged);
+
+    } while (!srv_purge_should_exit(n_total_purged));
 }
 
 ```
