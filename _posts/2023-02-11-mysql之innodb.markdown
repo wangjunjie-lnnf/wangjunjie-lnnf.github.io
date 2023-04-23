@@ -597,3 +597,313 @@ Given the factors described above, the following formulas can be used to estimat
 `(innodb_page_size / 16) * innodb_rollback_segments`
 
 ## 处理流程
+
+### innodb线程
+
+![mysql-thread](/assets/images/2023-02-11/mysql-thread.png)  
+
+`vscode` `debug`小技巧: 在`CALL STACK`视图暂停任意线程即可看到每个线程的栈帧，进而找到创建线程的代码。
+
+```c++
+
+/* all_innodb_threads array */
+static PSI_thread_info all_innodb_threads[] = {
+    PSI_THREAD_KEY(log_archiver_thread, "ib_log_arch", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(page_archiver_thread, "ib_page_arch", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(buf_dump_thread, "ib_buf_dump", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(clone_ddl_thread, "ib_clone_ddl", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(clone_gtid_thread, "ib_clone_gtid", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(ddl_thread, "ib_ddl", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(dict_stats_thread, "ib_dict_stats", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(io_handler_thread, "ib_io_handler", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(io_ibuf_thread, "ib_io_ibuf", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(io_log_thread, "ib_io_log", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(io_read_thread, "ib_io_rd", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(io_write_thread, "ib_io_wr", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(buf_resize_thread, "ib_buf_resize", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(log_files_governor_thread, "ib_log_files_g", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(log_writer_thread, "ib_log_writer", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(log_checkpointer_thread, "ib_log_checkpt", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(log_flusher_thread, "ib_log_flush", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(log_write_notifier_thread, "ib_log_wr_notif", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(log_flush_notifier_thread, "ib_log_fl_notif", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(recv_writer_thread, "ib_recv_write", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(srv_error_monitor_thread, "ib_srv_err_mon", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(srv_lock_timeout_thread, "ib_srv_lock_to", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(srv_master_thread, "ib_src_main", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(srv_monitor_thread, "ib_srv_mon", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(srv_purge_thread, "ib_srv_purge", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(srv_worker_thread, "ib_srv_wkr", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(trx_recovery_rollback_thread, "ib_tx_recov", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(page_flush_thread, "ib_pg_flush", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(page_flush_coordinator_thread, "ib_pg_flush_co", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(fts_optimize_thread, "ib_fts_opt", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(fts_parallel_merge_thread, "ib_fts_merge", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(fts_parallel_tokenization_thread, "ib_fts_token", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(srv_ts_alter_encrypt_thread, "ib_ts_encrypt", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(parallel_read_thread, "ib_par_rd", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(parallel_rseg_init_thread, "ib_par_rseg", 0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(meb::redo_log_archive_consumer_thread, "ib_meb_rl", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME)};
+
+struct Srv_threads {
+    /** Monitor thread (prints info). */
+    IB_thread m_monitor;
+
+    /** Error monitor thread. */
+    IB_thread m_error_monitor;
+
+    /** Redo files governor thread. */
+    IB_thread m_log_files_governor;
+
+    /** Redo checkpointer thread. */
+    IB_thread m_log_checkpointer;
+
+    /** Redo writer thread. */
+    IB_thread m_log_writer;
+
+    /** Redo flusher thread. */
+    IB_thread m_log_flusher;
+
+    /** Redo write notifier thread. */
+    IB_thread m_log_write_notifier;
+
+    /** Redo flush notifier thread. */
+    IB_thread m_log_flush_notifier;
+
+    /** Redo log archiver (used by backup). */
+    IB_thread m_backup_log_archiver;
+
+    /** Buffer pool dump thread. */
+    IB_thread m_buf_dump;
+
+    /** Buffer pool resize thread. */
+    IB_thread m_buf_resize;
+
+    /** Dict stats background thread. */
+    IB_thread m_dict_stats;
+
+    /** Thread detecting lock wait timeouts. */
+    IB_thread m_lock_wait_timeout;
+
+    /** The master thread. */
+    IB_thread m_master;
+
+    /** The ts_alter_encrypt thread. */
+    IB_thread m_ts_alter_encrypt;
+
+    /** Thread doing rollbacks during recovery. */
+    IB_thread m_trx_recovery_rollback;
+
+    /** Thread writing recovered pages during recovery. */
+    IB_thread m_recv_writer;
+
+    /** Purge coordinator (also being a worker) */
+    IB_thread m_purge_coordinator;
+
+    /** Number of purge workers and size of array below. */
+    size_t m_purge_workers_n;
+
+    /** Purge workers. Note that the m_purge_workers[0] is the same shared
+    state as m_purge_coordinator. */
+    IB_thread *m_purge_workers;
+
+    /** Page cleaner coordinator (also being a worker). */
+    IB_thread m_page_cleaner_coordinator;
+
+    /** Number of page cleaner workers and size of array below. */
+    size_t m_page_cleaner_workers_n;
+
+    /** Page cleaner workers. Note that m_page_cleaner_workers[0] is the
+    same shared state as m_page_cleaner_coordinator. */
+    IB_thread *m_page_cleaner_workers;
+
+    /** Archiver's log archiver (used by Clone). */
+    IB_thread m_log_archiver;
+
+    /** Archiver's page archiver (used by Clone). */
+    IB_thread m_page_archiver;
+
+    /** Thread doing optimization for FTS index. */
+    IB_thread m_fts_optimize;
+
+    /** Thread for GTID persistence */
+    IB_thread m_gtid_persister;
+}
+
+int main(int argc, char **argv) { 
+    init_server_components();
+    {
+        dd::init(dd::enum_dd_init_type::DD_RESTART_OR_UPGRADE);
+        {
+            ::bootstrap::run_bootstrap_thread(..., &upgrade_57::do_pre_checks_and_initialize_dd /*boot_handler*/, ...);
+            {
+                handle_bootstrap_args args;
+                args.m_thd = thd;
+                args.m_bootstrap_handler = boot_handler;
+
+                mysql_thread_create(key_thread_bootstrap, ..., handle_bootstrap, &args);
+                {
+                    bootstrap_functor handler = args->m_bootstrap_handler;
+                    if (handler) {
+                        args->m_bootstrap_error = (*handler)(thd);
+                        {
+                            bootstrap::DDSE_dict_init(...);
+                            {
+                                innobase_init_files(dict_init_mode, tablespaces);
+                                {
+                                    srv_start(false);
+                                    {
+                                        /* 创建并启动io线程 */
+                                        for (ulint t = 0; t < srv_n_file_io_threads; ++t) {
+                                            if (t < start) {
+                                                if (t == 0) {
+                                                    thread = os_thread_create(io_ibuf_thread_key, 0, io_handler_thread, t);
+                                                } else {
+                                                    thread = os_thread_create(io_log_thread_key, 0, io_handler_thread, t);
+                                                }
+                                            } else if (t >= start && t < (start + srv_n_read_io_threads)) {
+                                                /* Numbering for ib_io_rd-NN starts with N=1. */
+                                                pfs_seqnum = t + 1 - start;
+                                                thread = os_thread_create(io_read_thread_key, pfs_seqnum, io_handler_thread, t);
+                                            } else if (t >= (start + srv_n_read_io_threads) &&
+                                                       t < (start + srv_n_read_io_threads + srv_n_write_io_threads)) {
+                                                /* Numbering for ib_io_wr-NN starts with N=1. */
+                                                pfs_seqnum = t + 1 - start - srv_n_read_io_threads;
+                                                thread = os_thread_create(io_write_thread_key, pfs_seqnum, io_handler_thread, t);
+                                            } 
+                                            thread.start();
+                                        }
+
+                                        buf_flush_page_cleaner_init();
+                                        {
+                                            srv_threads.m_page_cleaner_coordinator = os_thread_create(page_flush_coordinator_thread_key, ..., buf_flush_page_coordinator_thread);
+                                            {
+                                                for (size_t i = 1; i < srv_threads.m_page_cleaner_workers_n; ++i) {
+                                                    srv_threads.m_page_cleaner_workers[i] = os_thread_create(page_flush_thread_key, i, buf_flush_page_cleaner_thread);
+                                                    srv_threads.m_page_cleaner_workers[i].start();
+                                                }
+                                            }
+                                            srv_threads.m_page_cleaner_workers[0] = srv_threads.m_page_cleaner_coordinator;
+                                            srv_threads.m_page_cleaner_coordinator.start();
+                                        }
+
+                                        /* We need to start log threads now, 
+                                           because recovery could result in execution of ibuf merges. 
+                                           These merges could result in new redo records. */
+                                        log_start_background_threads(*log_sys);
+                                        {
+                                            srv_threads.m_log_checkpointer = os_thread_create(log_checkpointer_thread_key, 0, log_checkpointer, &log);
+                                            srv_threads.m_log_flush_notifier = os_thread_create(log_flush_notifier_thread_key, 0, log_flush_notifier, &log);
+                                            srv_threads.m_log_flusher = os_thread_create(log_flusher_thread_key, 0, log_flusher, &log);
+                                            srv_threads.m_log_write_notifier = os_thread_create(log_write_notifier_thread_key, 0, log_write_notifier, &log);
+                                            srv_threads.m_log_writer = os_thread_create(log_writer_thread_key, 0, log_writer, &log);
+                                            srv_threads.m_log_files_governor = os_thread_create(log_files_governor_thread_key, 0, log_files_governor, &log);
+
+                                            srv_threads.m_log_checkpointer.start();
+                                            srv_threads.m_log_flush_notifier.start();
+                                            srv_threads.m_log_flusher.start();
+                                            srv_threads.m_log_write_notifier.start();
+                                            srv_threads.m_log_writer.start();
+                                            srv_threads.m_log_files_governor.start();
+                                        }
+
+
+                                        srv_threads.m_lock_wait_timeout = os_thread_create(srv_lock_timeout_thread_key, 0, lock_wait_timeout_thread);
+                                        srv_threads.m_lock_wait_timeout.start();
+
+                                        /* Create the thread which warns of long semaphore waits */
+                                        srv_threads.m_error_monitor = os_thread_create(srv_error_monitor_thread_key, 0, srv_error_monitor_thread);
+                                        srv_threads.m_error_monitor.start();
+
+                                        /* Create the thread which prints InnoDB monitor info */
+                                        srv_threads.m_monitor = os_thread_create(srv_monitor_thread_key, 0, srv_monitor_thread);
+                                        srv_threads.m_monitor.start();
+                                    }
+                                }
+                            }
+
+                            restart_dictionary(thd);
+                            {
+                                bootstrap::restart(thd);
+                                {
+                                    DDSE_dict_recover(thd, DICT_RECOVERY_RESTART_SERVER, ...);
+                                    {
+                                        ddse->dict_recover(dict_recovery_mode, version);
+                                        {
+                                            srv_start_threads(false);
+                                            {
+                                                log_sys->periodical_checkpoints_enabled = true;
+
+                                                srv_threads.m_buf_resize = os_thread_create(buf_resize_thread_key, 0, buf_resize_thread);
+                                                srv_threads.m_buf_resize.start();
+
+                                                /* Rollback all recovered transactions that are not in committed nor in XA PREPARE state. */
+                                                srv_threads.m_trx_recovery_rollback = os_thread_create(trx_recovery_rollback_thread_key, 0， trx_recovery_rollback_thread);
+                                                srv_threads.m_trx_recovery_rollback.start();
+
+                                                /* Create the master thread which does purge and other utility operations */
+                                                srv_threads.m_master = os_thread_create(srv_master_thread_key, 0, srv_master_thread);
+                                                srv_threads.m_master.start();
+
+                                                /* Create the dict stats gathering thread */
+                                                srv_threads.m_dict_stats = os_thread_create(dict_stats_thread_key, 0, dict_stats_thread);
+                                                srv_threads.m_dict_stats.start();
+
+                                                fts_optimize_init();
+                                                {
+                                                    srv_threads.m_fts_optimize = os_thread_create(fts_optimize_thread_key, 0, fts_optimize_thread, fts_optimize_wq);
+                                                    srv_threads.m_fts_optimize.start();
+                                                }
+
+                                                srv_start_state_set(SRV_START_STATE_STAT);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ha_post_recover();
+        {
+            post_recover_handlerton(...);
+            {
+                hton->post_recover();
+                {
+                    srv_start_threads_after_ddl_recovery();
+                    {
+                        srv_threads.m_buf_dump = os_thread_create(buf_dump_thread_key, 0, buf_dump_thread);
+                        srv_threads.m_buf_dump.start();
+
+                        gtid_persistor.start();
+                        {
+                            srv_threads.m_gtid_persister = os_thread_create(clone_gtid_thread_key, 0, clone_gtid_thread, this);
+                            srv_threads.m_gtid_persister.start();
+                        }
+
+                        /* Now the InnoDB Metadata and file system should be consistent. Start the Purge thread */
+                        srv_start_purge_threads();
+                        {
+                            srv_threads.m_purge_coordinator = os_thread_create(srv_purge_thread_key, 0, srv_purge_coordinator_thread);
+                            srv_threads.m_purge_workers[0] = srv_threads.m_purge_coordinator;
+
+                            /* We've already created the purge coordinator thread above. */
+                            for (size_t i = 1; i < srv_threads.m_purge_workers_n; ++i) {
+                                srv_threads.m_purge_workers[i] = os_thread_create(srv_worker_thread_key, i, srv_worker_thread);
+                            }
+
+                            for (size_t i = 0; i < srv_threads.m_purge_workers_n; ++i) {
+                                srv_threads.m_purge_workers[i].start();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+```
