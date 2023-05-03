@@ -1,0 +1,203 @@
+---
+layout: post
+title:  "k8s"
+date:   2023-05-04 00:22:07 +0000
+categories: jekyll
+tags: k8s
+---
+
+# debug
+
+## 测试环境设置
+
+### 安装docker
+
+### 安装cri-docker
+
+```shell
+
+wget https://github.com/Mirantis/cri-dockerd/releases/download/v0.3.1/cri-dockerd-0.3.1.amd64.tgz
+tar -xvf ./cri-dockerd-0.3.1.amd64.tgz
+sudo install -o root -g root -m 0755 cri-dockerd/cri-dockerd /usr/bin/cri-dockerd
+
+# 启动cri-dockerd
+sudo /usr/bin/cri-dockerd 2> /dev/null &
+
+```
+
+### 启动测试环境
+
+```shell
+# 启动测试环境
+hack/local-up-cluster.sh -O
+
+# 获取集群成员列表
+export KUBECONFIG=/var/run/kubernetes/admin.kubeconfig
+kubectl get nodes
+
+```
+
+## debug环境设置
+
+### 参考测试环境脚本
+
+```shell
+
+# 编译
+make -C "${KUBE_ROOT}" \
+    WHAT="cmd/kubectl \
+    cmd/kube-apiserver \
+    cmd/kube-controller-manager \
+    cmd/cloud-controller-manager \
+    cmd/kubelet \
+    cmd/kube-proxy \
+    cmd/kube-scheduler"
+
+start_etcd
+{
+      etcd --advertise-client-urls "${KUBE_INTEGRATION_ETCD_URL}" \
+      --data-dir "${ETCD_DIR}" \
+      --listen-client-urls "${KUBE_INTEGRATION_ETCD_URL}" \
+      --log-level="${ETCD_LOGLEVEL}" 2> "${ETCD_LOGFILE}"
+}
+
+set_service_accounts
+{
+    mkdir -p "$(dirname "${SERVICE_ACCOUNT_KEY}")"
+    openssl genrsa -out "${SERVICE_ACCOUNT_KEY}" 2048
+}
+
+start_apiserver
+{
+    ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-apiserver" "${authorizer_arg}" "${priv_arg}" ${runtime_config} \
+      ${cloud_config_arg} \
+      "${advertise_address}" \
+      "${node_port_range}" \
+      --v="${LOG_LEVEL}" \
+      --vmodule="${LOG_SPEC}" \
+      --audit-policy-file="${AUDIT_POLICY_FILE}" \
+      --audit-log-path="${LOG_DIR}/kube-apiserver-audit.log" \
+      --authorization-webhook-config-file="${AUTHORIZATION_WEBHOOK_CONFIG_FILE}" \
+      --authentication-token-webhook-config-file="${AUTHENTICATION_WEBHOOK_CONFIG_FILE}" \
+      --cert-dir="${CERT_DIR}" \
+      --egress-selector-config-file="${EGRESS_SELECTOR_CONFIG_FILE:-}" \
+      --client-ca-file="${CERT_DIR}/client-ca.crt" \
+      --kubelet-client-certificate="${CERT_DIR}/client-kube-apiserver.crt" \
+      --kubelet-client-key="${CERT_DIR}/client-kube-apiserver.key" \
+      --service-account-key-file="${SERVICE_ACCOUNT_KEY}" \
+      --service-account-lookup="${SERVICE_ACCOUNT_LOOKUP}" \
+      --service-account-issuer="https://kubernetes.default.svc" \
+      --service-account-jwks-uri="https://kubernetes.default.svc/openid/v1/jwks" \
+      --service-account-signing-key-file="${SERVICE_ACCOUNT_KEY}" \
+      --enable-admission-plugins="${ENABLE_ADMISSION_PLUGINS}" \
+      --disable-admission-plugins="${DISABLE_ADMISSION_PLUGINS}" \
+      --admission-control-config-file="${ADMISSION_CONTROL_CONFIG_FILE}" \
+      --bind-address="${API_BIND_ADDR}" \
+      --secure-port="${API_SECURE_PORT}" \
+      --tls-cert-file="${CERT_DIR}/serving-kube-apiserver.crt" \
+      --tls-private-key-file="${CERT_DIR}/serving-kube-apiserver.key" \
+      --storage-backend="${STORAGE_BACKEND}" \
+      --storage-media-type="${STORAGE_MEDIA_TYPE}" \
+      --etcd-servers="http://${ETCD_HOST}:${ETCD_PORT}" \
+      --service-cluster-ip-range="${SERVICE_CLUSTER_IP_RANGE}" \
+      --feature-gates="${FEATURE_GATES}" \
+      --external-hostname="${EXTERNAL_HOSTNAME}" \
+      --requestheader-username-headers=X-Remote-User \
+      --requestheader-group-headers=X-Remote-Group \
+      --requestheader-extra-headers-prefix=X-Remote-Extra- \
+      --requestheader-client-ca-file="${CERT_DIR}/request-header-ca.crt" \
+      --requestheader-allowed-names=system:auth-proxy \
+      --proxy-client-cert-file="${CERT_DIR}/client-auth-proxy.crt" \
+      --proxy-client-key-file="${CERT_DIR}/client-auth-proxy.key" \
+      --cors-allowed-origins="${API_CORS_ALLOWED_ORIGINS}" >"${APISERVER_LOG}"
+
+    kube::util::write_client_kubeconfig "${CONTROLPLANE_SUDO}" "${CERT_DIR}" "${ROOT_CA_FILE}" "${API_HOST}" "${API_SECURE_PORT}" admin
+    ${CONTROLPLANE_SUDO} chown "${USER}" "${CERT_DIR}/client-admin.key" # make readable for kubectl
+    kube::util::write_client_kubeconfig "${CONTROLPLANE_SUDO}" "${CERT_DIR}" "${ROOT_CA_FILE}" "${API_HOST}" "${API_SECURE_PORT}" controller
+    kube::util::write_client_kubeconfig "${CONTROLPLANE_SUDO}" "${CERT_DIR}" "${ROOT_CA_FILE}" "${API_HOST}" "${API_SECURE_PORT}" scheduler
+
+    ${KUBECTL} --kubeconfig "${CERT_DIR}/admin.kubeconfig" create clusterrolebinding kube-apiserver-kubelet-admin --clusterrole=system:kubelet-api-admin --user=kube-apiserver
+
+    ${KUBECTL} --kubeconfig "${CERT_DIR}/admin.kubeconfig" create clusterrolebinding kubelet-csr --clusterrole=system:certificates.k8s.io:certificatesigningrequests:selfnodeclient --group=system:nodes
+
+    ${KUBECTL} config set-cluster local-up-cluster --kubeconfig="${CERT_DIR}/admin-kube-aggregator.kubeconfig" --server="https://${API_HOST_IP}:31090"
+}
+
+start_controller_manager
+{
+    ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-controller-manager" \
+      --v="${LOG_LEVEL}" \
+      --vmodule="${LOG_SPEC}" \
+      --service-account-private-key-file="${SERVICE_ACCOUNT_KEY}" \
+      --service-cluster-ip-range="${SERVICE_CLUSTER_IP_RANGE}" \
+      --root-ca-file="${ROOT_CA_FILE}" \
+      --cluster-signing-cert-file="${CLUSTER_SIGNING_CERT_FILE}" \
+      --cluster-signing-key-file="${CLUSTER_SIGNING_KEY_FILE}" \
+      --enable-hostpath-provisioner="${ENABLE_HOSTPATH_PROVISIONER}" \
+      --pvclaimbinder-sync-period="${CLAIM_BINDER_SYNC_PERIOD}" \
+      --feature-gates="${FEATURE_GATES}" \
+      "${cloud_config_arg[@]}" \
+      --authentication-kubeconfig "${CERT_DIR}"/controller.kubeconfig \
+      --authorization-kubeconfig "${CERT_DIR}"/controller.kubeconfig \
+      --kubeconfig "${CERT_DIR}"/controller.kubeconfig \
+      --use-service-account-credentials \
+      --controllers="${KUBE_CONTROLLERS}" \
+      --leader-elect=false \
+      --cert-dir="${CERT_DIR}" \
+      --master="https://${API_HOST}:${API_SECURE_PORT}" >"${CTLRMGR_LOG}"
+}
+
+start_kubescheduler
+{
+    ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-scheduler" \
+      --v="${LOG_LEVEL}" \
+      --config=/tmp/kube-scheduler.yaml \
+      --feature-gates="${FEATURE_GATES}" \
+      --authentication-kubeconfig "${CERT_DIR}"/scheduler.kubeconfig \
+      --authorization-kubeconfig "${CERT_DIR}"/scheduler.kubeconfig \
+      --master="https://${API_HOST}:${API_SECURE_PORT}" >"${SCHEDULER_LOG}"
+}
+
+start_dns_addon
+{
+    ${KUBECTL} --kubeconfig="${CERT_DIR}/admin.kubeconfig" --namespace=kube-system create -f dns.yaml
+}
+
+start_kubelet
+{
+    all_kubelet_flags=(
+      "--v=${LOG_LEVEL}"
+      "--vmodule=${LOG_SPEC}"
+      "--container-runtime=${CONTAINER_RUNTIME}"
+      "--hostname-override=${HOSTNAME_OVERRIDE}"
+      "${cloud_config_arg[@]}"
+      "--bootstrap-kubeconfig=${CERT_DIR}/kubelet.kubeconfig"
+      "--kubeconfig=${CERT_DIR}/kubelet-rotated.kubeconfig"
+      ${container_runtime_endpoint_args[@]+"${container_runtime_endpoint_args[@]}"}
+      ${image_service_endpoint_args[@]+"${image_service_endpoint_args[@]}"}
+      ${KUBELET_FLAGS}
+    )
+
+    sudo -E "${GO_OUT}/kubelet" "${all_kubelet_flags[@]}" \
+      --config=/tmp/kubelet.yaml >"${KUBELET_LOG}"
+}
+
+start_kubeproxy
+{
+    sudo "${GO_OUT}/kube-proxy" \
+      --v="${LOG_LEVEL}" \
+      --config=/tmp/kube-proxy.yaml \
+      --master="https://${API_HOST}:${API_SECURE_PORT}" >"${PROXY_LOG}"
+}
+
+create_storage_class
+{
+    ${KUBECTL} --kubeconfig="${CERT_DIR}/admin.kubeconfig" create -f "${CLASS_FILE}"
+}
+
+```
+
+
+
+
+
