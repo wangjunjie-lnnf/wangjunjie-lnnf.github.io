@@ -12,7 +12,11 @@ tags: k8s
 
 ### 安装docker
 
-### 安装cri-docker
+https://docs.docker.com/engine/install/ubuntu/
+
+启动dockerd: `sudo service docker start`
+
+### 安装cri-dockerd
 
 ```shell
 
@@ -29,7 +33,7 @@ sudo /usr/bin/cri-dockerd 2> /dev/null &
 
 ```shell
 # 启动测试环境
-hack/local-up-cluster.sh -O
+sudo hack/local-up-cluster.sh -O
 
 # 获取集群成员列表
 kubectl --kubeconfig=/var/run/kubernetes/admin.kubeconfig get nodes
@@ -39,6 +43,8 @@ kubectl --kubeconfig=/var/run/kubernetes/admin.kubeconfig get nodes
 ## debug环境设置
 
 ### 参考测试环境脚本
+
+分析`hack/local-up-cluster.sh`的启动过程
 
 ```shell
 
@@ -196,7 +202,252 @@ create_storage_class
 
 ```
 
+### vscode配置
 
+```json
+
+{
+    "version": "0.2.0",
+    "configurations": [
+        // 0. sudo service docker start; sleep 5; sudo /usr/bin/cri-dockerd 2> /dev/null &
+        // 1. etcd --data-dir /tmp/tmp.SuYoMB6tEG 2> /dev/null &
+        // 2. kube-apiserver
+        {
+            "name": "kube-apiserver",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "cmd/kube-apiserver",
+            "args": [
+                "--authorization-mode=Node,RBAC",
+                "--v=3",
+                "--audit-policy-file=${workspaceFolder}/etc/kube-audit-policy-file",
+                "--cert-dir=${workspaceFolder}/etc/cert",
+                "--egress-selector-config-file=${workspaceFolder}/etc/kube_egress_selector_configuration.yaml",
+                "--client-ca-file=${workspaceFolder}/etc/cert/client-ca.crt",
+                "--kubelet-client-certificate=${workspaceFolder}/etc/cert/client-kube-apiserver.crt",
+                "--kubelet-client-key=${workspaceFolder}/etc/cert/client-kube-apiserver.key",
+                "--service-account-key-file=${workspaceFolder}/etc/kube-serviceaccount.key",
+                "--service-account-lookup=true",
+                "--service-account-issuer=https://kubernetes.default.svc",
+                "--service-account-jwks-uri=https://kubernetes.default.svc/openid/v1/jwks",
+                "--service-account-signing-key-file=${workspaceFolder}/etc/kube-serviceaccount.key",
+                "--enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,DefaultTolerationSeconds,Priority,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,ResourceQuota,NodeRestriction",
+                "--bind-address=0.0.0.0",
+                "--secure-port=6443",
+                "--tls-cert-file=${workspaceFolder}/etc/cert/serving-kube-apiserver.crt",
+                "--tls-private-key-file=${workspaceFolder}/etc/cert/serving-kube-apiserver.key",
+                "--storage-backend=etcd3",
+                "--storage-media-type=application/vnd.kubernetes.protobuf",
+                "--etcd-servers=http://127.0.0.1:2379",
+                "--service-cluster-ip-range=10.0.0.0/24",
+                "--feature-gates=AllAlpha=false",
+                "--external-hostname=localhost",
+                "--requestheader-username-headers=X-Remote-User",
+                "--requestheader-group-headers=X-Remote-Group",
+                "--requestheader-extra-headers-prefix=X-Remote-Extra-",
+                "--requestheader-client-ca-file=${workspaceFolder}/etc/cert/request-header-ca.crt",
+                "--requestheader-allowed-names=system:auth-proxy",
+                "--proxy-client-cert-file=${workspaceFolder}/etc/cert/client-auth-proxy.crt",
+                "--proxy-client-key-file=${workspaceFolder}/etc/cert/client-auth-proxy.key",
+                "--cors-allowed-origins=/127.0.0.1(:[0-9]+)?$,/localhost(:[0-9]+)?$"
+            ]
+        },
+        // _output/bin/kubectl --kubeconfig etc/cert/admin.kubeconfig create clusterrolebinding kube-apiserver-kubelet-admin --clusterrole=system:kubelet-api-admin --user=kube-apiserver
+        // _output/bin/kubectl --kubeconfig etc/cert/admin.kubeconfig create clusterrolebinding kubelet-csr --clusterrole=system:certificates.k8s.io:certificatesigningrequests:selfnodeclient --group=system:nodes
+        // _output/bin/kubectl --kubeconfig etc/cert/admin-kube-aggregator.kubeconfig config set-cluster local-up-cluster --server="https://127.0.0.1:31090"
+        // 3. kube-controller-manager
+        {
+            "name": "kube-controller-manager",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "cmd/kube-controller-manager",
+            "args": [
+                "--v=3",
+                "--service-account-private-key-file=${workspaceFolder}/etc/kube-serviceaccount.key",
+                "--service-cluster-ip-range=10.0.0.0/24",
+                "--root-ca-file=${workspaceFolder}/etc/cert/server-ca.crt",
+                "--cluster-signing-cert-file=${workspaceFolder}/etc/cert/client-ca.crt",
+                "--cluster-signing-key-file=${workspaceFolder}/etc/cert/client-ca.key",
+                "--enable-hostpath-provisioner=false",
+                "--pvclaimbinder-sync-period=15s",
+                "--feature-gates=AllAlpha=false",
+                "--authentication-kubeconfig", "${workspaceFolder}/etc/cert/controller.kubeconfig",
+                "--authorization-kubeconfig", "${workspaceFolder}/etc/cert/controller.kubeconfig",
+                "--kubeconfig", "${workspaceFolder}/etc/cert/controller.kubeconfig",
+                "--use-service-account-credentials",
+                "--controllers=*",
+                "--leader-elect=false",
+                "--cert-dir=${workspaceFolder}/etc/cert",
+                "--master=https://localhost:6443"
+            ]
+        },
+        // 4. kube-scheduler
+        {
+            "name": "kube-scheduler",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "cmd/kube-scheduler",
+            "args": [
+                "--v=3",
+                "--config=${workspaceFolder}/etc/kube-scheduler.yaml",
+                "--feature-gates=AllAlpha=false",
+                "--authentication-kubeconfig", "${workspaceFolder}/etc/cert/scheduler.kubeconfig",
+                "--authorization-kubeconfig", "${workspaceFolder}/etc/cert/scheduler.kubeconfig",
+                "--master=https://localhost:6443"
+            ]
+        },
+        // 5. start_dns_addon
+        // _output/bin/kubectl --kubeconfig etc/cert/admin.kubeconfig create --namespace=kube-system -f etc/dns.yaml
+        // 6. kubelet
+        {
+            "name": "kubelet",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "cmd/kubelet",
+            "asRoot": true,
+            "console": "integratedTerminal",
+            "args": [
+                "--v=3",
+                "--root-dir=${workspaceFolder}/etc/kubelet",
+                "--cert-dir=${workspaceFolder}/etc/kubelet/pki",
+                "--container-runtime=remote",
+                "--container-runtime-endpoint=unix:///run/cri-dockerd.sock",
+                "--hostname-override=127.0.0.1",
+                "--bootstrap-kubeconfig=${workspaceFolder}/etc/cert/kubelet.kubeconfig",
+                "--kubeconfig=${workspaceFolder}/etc/cert/kubelet-rotated.kubeconfig",
+                "--config=${workspaceFolder}/etc/kubelet.yaml"
+            ]
+        },
+        // 7. kube-proxy
+        {
+            "name": "kube-proxy",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "cmd/kube-proxy",
+            // "asRoot": true,
+            // "console": "integratedTerminal",
+            "args": [
+                "--v=3",
+                "--config=${workspaceFolder}/etc/kube-proxy.yaml",
+                "--master=https://localhost:6443"
+            ]
+        },
+        // 8. create_storage_class
+        // _output/bin/kubectl --kubeconfig etc/cert/admin.kubeconfig create -f cluster/addons/storage-class/local/default.yaml
+        {
+            "name": "kubectl",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "cmd/kubectl",
+            "env": {
+                "KUBECONFIG": "${workspaceFolder}/etc/cert/admin.kubeconfig"
+            },
+            "args": [
+                "get", "pods"
+            ],
+        }
+    ]
+}
+
+```
+
+# 系统组件
+
+## The control plane
+
+A Kubernetes control plane node runs a collection of system services that make up the control plane of the cluster. These services are the brains of the cluster where all the control and scheduling decisions happen. Behind the scenes, these services include `the API server`, `the cluster store`, `scheduler`, and `core controllers`. 
+
+`The API server` is the front-end into the control plane and all instructions and communication pass through it. 
+
+![control-plane](/assets/images/2023-05-04/control-plane.png)
+
+### The API server
+
+All communication, between all components, must go through the API server. It’s important to understand that internal system components, as well as external user components, all communicate through `the API server` – all roads lead to the API Server.
+
+It exposes a `RESTful API` that you `POST YAML` configuration files to over HTTPS. These YAML files, which we sometimes call manifests, describe the desired state of an application. This desired state includes things like which container images to use, which ports to expose, and how many Pod replicas to run.
+
+All requests to the API server are subject to authentication and authorization. Once these are done, the config in the YAML file is validated, persisted to the cluster store, and changes are scheduled to the worker nodes.
+
+### The cluster store
+
+`The cluster store` is the only stateful part of the control plane and persistently stores the entire configuration and state of the cluster. As such, it’s a vital component of every Kubernetes cluster – `no cluster store, no cluster`.
+
+The cluster store is currently `based on etcd`, a popular distributed database. As it’s the single source of truth for a cluster, you should run between 3-5 etcd replicas for high-availability, and you should provide adequate ways to recover when things go wrong.
+
+### The controller manager
+
+`The controller manager` implements all the background controllers that monitor cluster components and respond to events.
+
+Architecturally, the controller manager is a controller of controllers, meaning it spawns all the core controllers and monitors them.
+
+Some of the core controllers include `the Deployment controller`, `the StatefulSet controller`, and `the ReplicaSet controller`. Each one is responsible for a small subset of cluster intelligence and runs as a background watch-loop constantly watching the API Server for changes.
+
+`The goal of each controller is to ensure the observed state of the cluster matches the desired state`. 
+
+The following logic, implemented by each controller, is at the heart of Kubernetes and declarative design patterns:
+
+1. Obtain desired state
+2. Observe current state
+3. Determine differences
+4. Reconcile differences
+
+Each controller is also extremely specialized and only interested in its own little corner of the Kubernetes cluster. No attempt is made to over-complicate design by implementing awareness of other parts of the system. This is key to the distributed design of Kubernetes and adheres to the Unix philosophy of building complex systems from small specialized parts.
+
+### The scheduler
+
+At a high level, `the scheduler` watches the API server for new work tasks and assigns them to appropriate healthy worker nodes. Behind the scenes, it implements complex logic that `filters out nodes incapable` of running tasks, and then `ranks the nodes that are capable`. The ranking system is complex, but the node with the highest-ranking score is selected to run the task.
+
+When identifying nodes capable of running a task, the scheduler performs various predicate checks. These include: `is the node tainted`, `are there any affinity or anti-affinity rules`, `is the required network port available on the node`, `does it have sufficient available resources` etc. Any node incapable of running the task is ignored, and those remaining are ranked according to things such as does it already have the required image, how much free resource does it have, how many tasks is it currently running. Each is worth points, and the node with the most points is selected to run the task.
+
+If the scheduler doesn’t find a suitable node, the task isn’t scheduled and gets marked as pending.
+
+The scheduler is only responsible for picking the nodes to run tasks, it isn’t responsible for running them. A task is normally a Pod/container. 
+
+## Worker nodes
+
+`Worker nodes` are where user applications run.
+At a high-level they do three things:
+
+1. Watch the API server for new work assignments
+2. Execute work assignments
+3. Report back to the control plane (via the API server)
+
+![work-node](/assets/images/2023-05-04/work-node.png)
+
+### Kubelet
+
+The `kubelet` is the main Kubernetes agent and runs on every worker node.
+
+When you join a node to a cluster, the process installs the kubelet, which is then responsible for `registering it with the cluster`. This registers the node’s CPU, memory, and storage into the wider cluster pool.
+
+One of the main jobs of the kubelet is to `watch the API server for new work tasks`. Any time it sees one, it executes the task and maintains a reporting channel back to the control plane.
+
+If a kubelet can’t run a task, it reports back to the control plane and lets the control plane decide what actions to take. For example, if a kubelet cannot execute a task, it simply reports back to the control plane and the control plane decides what to do.
+
+### Container runtime
+
+The kubelet needs a container runtime to perform container-related tasks. This includes pulling images and starting and stopping containers.
+
+In the early days, `Kubernetes` had native support for `Docker`. More recently, it’s moved to a plugin model called the `Container Runtime Interface (CRI)`. At a high-level, the CRI masks the internal machinery of Kubernetes and exposes a clean documented interface for 3rd-party container runtimes to plug into.
+
+### Kube-proxy
+
+The `kube-proxy` runs on every node and is responsible for `local cluster networking`. It ensures each node gets its own unique IP address, and it implements local iptables or IPVS rules to handle routing and load-balancing of traffic. 
+
+## Kubernetes DNS
+
+Every Kubernetes cluster has an internal `DNS service` that is vital to service discovery. 
+
+The cluster’s DNS service has a `static IP address` that is hard-coded into every Pod on the cluster. This ensures every app can locate it and use it for discovery. Service registration is also automatic. This means apps don’t need to be coded with the intelligence to register with Kubernetes service discovery.
+
+Cluster DNS is based on the open-source `CoreDNS` project (https://coredns.io/).
 
 
 
