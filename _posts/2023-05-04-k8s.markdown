@@ -32,8 +32,7 @@ sudo /usr/bin/cri-dockerd 2> /dev/null &
 hack/local-up-cluster.sh -O
 
 # 获取集群成员列表
-export KUBECONFIG=/var/run/kubernetes/admin.kubeconfig
-kubectl get nodes
+kubectl --kubeconfig=/var/run/kubernetes/admin.kubeconfig get nodes
 
 ```
 
