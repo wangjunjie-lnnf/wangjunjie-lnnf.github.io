@@ -10,7 +10,7 @@ tags: docker
 
 `docker`由两部分组成：`docker/cli`编译出`docker`，`moby`项目编译出`dockerd`
 
-## debug
+## 搭建测试环境
 
 ### cli
 
@@ -66,8 +66,17 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 COPY --from=godlv           /go/bin/* /go/bin/
 
-# 最后增加ENTRYPOINT直接在重启启动时编译和远程调试
-ENTRYPOINT make binary; dlv --listen=:2345 --headless=true --api-version=2 exec build/docker
+```
+
+在`make dev`启动的容器中执行命令
+
+```shell
+
+# 编译
+make make binary
+
+# 远程调试
+dlv --listen=:2345 --headless=true --api-version=2 exec build/docker run hello-world 
 
 ```
 
@@ -95,16 +104,260 @@ This means that the port can be published in multiple ways:
 2. `DELVE_PORT=2345:2345` - exposes debugger on port `2345` without binding to specific IP
 3. `DELVE_PORT=2345` - same as above
 
-在`Makefile`中增加以下内容
-
 ```Makefile
 
-dev: build
-	$(DOCKER_RUN_DOCKER) ./hack/make.sh binary
-	$(DOCKER_RUN_DOCKER) dlv --listen=:2346 --headless=true --api-version=2 exec bundles/binary-daemon/dockerd
+shell: build  ## start a shell inside the build env
+	$(DOCKER_RUN_DOCKER) bash
+
+# 通过根目录下的Dockerfile构建dockerd的开发环境
+build: bundles
+	$(BUILD_CMD) $(BUILD_OPTS) $(shell_target) --load -t "$(DOCKER_IMAGE)" .
 
 ```
 
-通过命令`make BIND_DIR=. DOCKER_DEBUG=1 DELVE_PORT=2346:2346 dev`启动远程调试
+在`make ... shell`启动的容器中执行命令
+
+```shell
+
+# 编译
+./hack/make.sh binary
+
+# 远程调试
+dlv --listen=:2346 --headless=true --api-version=2 exec bundles/binary-daemon/dockerd
+
+```
 
 ## 常用命令
+
+```txt
+
+Usage:  docker [OPTIONS] COMMAND
+
+A self-sufficient runtime for containers
+
+Common Commands:
+  run         Create and run a new container from an image
+  exec        Execute a command in a running container
+  ps          List containers
+  build       Build an image from a Dockerfile
+  pull        Download an image from a registry
+  push        Upload an image to a registry
+  images      List images
+  login       Log in to a registry
+  logout      Log out from a registry
+  search      Search Docker Hub for images
+  version     Show the Docker version information
+  info        Display system-wide information
+
+Management Commands:
+  builder     Manage builds
+  buildx*     Docker Buildx (Docker Inc., v0.10.4)
+  container   Manage containers
+  context     Manage contexts
+  image       Manage images
+  manifest    Manage Docker image manifests and manifest lists
+  network     Manage networks
+  plugin      Manage plugins
+  system      Manage Docker
+  trust       Manage trust on Docker images
+  volume      Manage volumes
+
+Swarm Commands:
+  swarm       Manage Swarm
+
+Commands:
+  attach      Attach local standard input, output, and error streams to a running container
+  commit      Create a new image from a container's changes
+  cp          Copy files/folders between a container and the local filesystem
+  create      Create a new container
+  diff        Inspect changes to files or directories on a container's filesystem
+  events      Get real time events from the server
+  export      Export a container's filesystem as a tar archive
+  history     Show the history of an image
+  import      Import the contents from a tarball to create a filesystem image
+  inspect     Return low-level information on Docker objects
+  kill        Kill one or more running containers
+  load        Load an image from a tar archive or STDIN
+  logs        Fetch the logs of a container
+  pause       Pause all processes within one or more containers
+  port        List port mappings or a specific mapping for the container
+  rename      Rename a container
+  restart     Restart one or more containers
+  rm          Remove one or more containers
+  rmi         Remove one or more images
+  save        Save one or more images to a tar archive (streamed to STDOUT by default)
+  start       Start one or more stopped containers
+  stats       Display a live stream of container(s) resource usage statistics
+  stop        Stop one or more running containers
+  tag         Create a tag TARGET_IMAGE that refers to SOURCE_IMAGE
+  top         Display the running processes of a container
+  unpause     Unpause all processes within one or more containers
+  update      Update configuration of one or more containers
+  wait        Block until one or more containers stop, then print their exit codes
+
+```
+
+## 源码分析
+
+以`docker run hello-world`为例分析实现过程
+
+### cli
+
+```go
+
+func main() {
+	dockerCli := command.NewDockerCli()
+	runDocker(dockerCli)
+	{
+		tcmd := newDockerCommand(dockerCli)
+		{
+			cmd := &cobra.Command{
+				Use:              "docker [OPTIONS] COMMAND [ARG...]",
+				Short:            "A self-sufficient runtime for containers",
+				SilenceUsage:     true,
+				SilenceErrors:    true,
+				TraverseChildren: true,
+				RunE: func(cmd *cobra.Command, args []string) error {
+					if len(args) == 0 {
+						return command.ShowHelp(dockerCli.Err())(cmd, args)
+					}
+					return fmt.Errorf("docker: '%s' is not a docker command.\nSee 'docker --help'", args[0])
+				},
+				PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+					return isSupported(cmd, dockerCli)
+				},
+				DisableFlagsInUseLine: true,
+			}
+			cmd.SetIn(dockerCli.In())
+			cmd.SetOut(dockerCli.Out())
+			cmd.SetErr(dockerCli.Err())
+
+			// 构造支持的命令列表
+			commands.AddCommands(cmd, dockerCli)
+			{
+				cmd.AddCommand(
+					container.NewRunCommand(dockerCli),
+					container.NewExecCommand(dockerCli),
+					container.NewPsCommand(dockerCli),
+					image.NewBuildCommand(dockerCli),
+					image.NewPullCommand(dockerCli),
+					image.NewPushCommand(dockerCli),
+					image.NewImagesCommand(dockerCli),
+					registry.NewLoginCommand(dockerCli),
+					registry.NewLogoutCommand(dockerCli),
+					registry.NewSearchCommand(dockerCli),
+					system.NewVersionCommand(dockerCli),
+					system.NewInfoCommand(dockerCli),
+
+					// management commands
+					builder.NewBuilderCommand(dockerCli),
+					checkpoint.NewCheckpointCommand(dockerCli),
+					container.NewContainerCommand(dockerCli),
+					context.NewContextCommand(dockerCli),
+					image.NewImageCommand(dockerCli),
+					manifest.NewManifestCommand(dockerCli),
+					network.NewNetworkCommand(dockerCli),
+					plugin.NewPluginCommand(dockerCli),
+					system.NewSystemCommand(dockerCli),
+					trust.NewTrustCommand(dockerCli),
+					volume.NewVolumeCommand(dockerCli),
+
+					// orchestration (swarm) commands
+					config.NewConfigCommand(dockerCli),
+					node.NewNodeCommand(dockerCli),
+					secret.NewSecretCommand(dockerCli),
+					service.NewServiceCommand(dockerCli),
+					stack.NewStackCommand(dockerCli),
+					swarm.NewSwarmCommand(dockerCli),
+
+					// legacy commands may be hidden
+					hide(container.NewAttachCommand(dockerCli)),
+					hide(container.NewCommitCommand(dockerCli)),
+					hide(container.NewCopyCommand(dockerCli)),
+					hide(container.NewCreateCommand(dockerCli)),
+					hide(container.NewDiffCommand(dockerCli)),
+					hide(container.NewExportCommand(dockerCli)),
+					hide(container.NewKillCommand(dockerCli)),
+					hide(container.NewLogsCommand(dockerCli)),
+					hide(container.NewPauseCommand(dockerCli)),
+					hide(container.NewPortCommand(dockerCli)),
+					hide(container.NewRenameCommand(dockerCli)),
+					hide(container.NewRestartCommand(dockerCli)),
+					hide(container.NewRmCommand(dockerCli)),
+					hide(container.NewStartCommand(dockerCli)),
+					hide(container.NewStatsCommand(dockerCli)),
+					hide(container.NewStopCommand(dockerCli)),
+					hide(container.NewTopCommand(dockerCli)),
+					hide(container.NewUnpauseCommand(dockerCli)),
+					hide(container.NewUpdateCommand(dockerCli)),
+					hide(container.NewWaitCommand(dockerCli)),
+					hide(image.NewHistoryCommand(dockerCli)),
+					hide(image.NewImportCommand(dockerCli)),
+					hide(image.NewLoadCommand(dockerCli)),
+					hide(image.NewRemoveCommand(dockerCli)),
+					hide(image.NewSaveCommand(dockerCli)),
+					hide(image.NewTagCommand(dockerCli)),
+					hide(system.NewEventsCommand(dockerCli)),
+					hide(system.NewInspectCommand(dockerCli)),
+				)
+			}
+		}
+
+		cmd, args := tcmd.HandleGlobalFlags()
+		cmd.SetArgs(args)
+		return cmd.Execute()
+		{
+			// 子命令匹配和参数解析
+			cmd, flags, err = c.Traverse(args)
+			{
+				// 匹配子命令列表
+				cmd := c.findNext(arg)
+				if cmd == nil {
+					return c, args, nil
+				}
+			
+				// 参数解析
+				c.ParseFlags(flags)
+
+				// 支持多级子命令嵌套
+				return cmd.Traverse(args[i+1:])
+			}
+
+			// 执行命令
+			cmd.execute(flags)
+		}
+	}
+}
+
+```
+
+以`docker run`命令为例
+
+```go
+
+cmd := &cobra.Command{
+	Use:   "run [OPTIONS] IMAGE [COMMAND] [ARG...]",
+	Short: "Create and run a new container from an image",
+	Args:  cli.RequiresMinArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// 第一个参数表示image
+		copts.Image = args[0]
+		if len(args) > 1 {
+			copts.Args = args[1:]
+		}
+		return runRun(dockerCli, cmd.Flags(), &options, copts)
+		{
+			return runContainer(dockerCli, ropts, copts, containerConfig)
+			{
+				// TODO
+			}
+		}
+	},
+	ValidArgsFunction: completion.ImageNames(dockerCli),
+	Annotations: map[string]string{
+		"category-top": "1",
+		"aliases":      "docker container run, docker run",
+	},
+}
+
+```

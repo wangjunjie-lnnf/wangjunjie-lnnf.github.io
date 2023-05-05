@@ -6,7 +6,7 @@ categories: jekyll
 tags: k8s
 ---
 
-# debug
+# 搭建测试环境
 
 ## 测试环境设置
 
@@ -357,6 +357,8 @@ create_storage_class
 
 ```
 
+---
+
 # 系统组件
 
 ## The control plane
@@ -448,6 +450,36 @@ Every Kubernetes cluster has an internal `DNS service` that is vital to service 
 The cluster’s DNS service has a `static IP address` that is hard-coded into every Pod on the cluster. This ensures every app can locate it and use it for discovery. Service registration is also automatic. This means apps don’t need to be coded with the intelligence to register with Kubernetes service discovery.
 
 Cluster DNS is based on the open-source `CoreDNS` project (https://coredns.io/).
+
+---
+
+# Pods
+
+The point is, a Kubernetes `Pod` is a construct for running one or more containers.
+
+Pods themselves don’t actually run applications – `applications always run in containers`. `The Pod is just an execution environment` to run one or more containers. Keeping it high level, Pods ring-fence an area of the host OS and run one or more containers.
+
+If you’re running multiple containers in a Pod, they all share the same Pod environment. This includes the `network stack`, `volumes`, `IPC namespace`, `shared memory`, and more.
+
+If two containers in the same Pod need to talk to each other (`container-to-container` within the Pod) they can use the Pod’s `localhost` interface. 
+
+Pods are also the `minimum unit of scheduling` in Kubernetes. If you need to scale an app, you add or remove Pods. 
+
+The deployment of a Pod is an atomic operation. This means a Pod is only ready for service when all its containers are up and running. `The entire Pod either comes up and is put into service, or it doesn’t`. 
+
+A single Pod can only be `scheduled to a single node` - Kubernetes cannot schedule a single Pod across multiple nodes. This is also true of multi-container Pods – all containers in the same Pod run on the same node. 
+
+Pods are mortal – they’re created, they live, and they die. If they die unexpectedly, you don’t bring them back to life. Instead, Kubernetes `starts a new one in its place`. This new one looks, smells, and feels like the old one. However, it’s a shiny new Pod with a shiny new ID and IP address. 
+
+`Pods are immutable`. This means you don’t change them once they’re running.
+
+For example, once a Pod is running, you never log on to it and change or update its configuration. If you need to change or update it, you replace it with a new one running the new configuration. Whenever we talk about updating Pods, we really mean delete the old one and replace it with a new one.
+
+
+
+
+
+
 
 
 
