@@ -335,29 +335,280 @@ func main() {
 
 ```go
 
-cmd := &cobra.Command{
-    Use:   "run [OPTIONS] IMAGE [COMMAND] [ARG...]",
-    Short: "Create and run a new container from an image",
-    Args:  cli.RequiresMinArgs(1),
-    RunE: func(cmd *cobra.Command, args []string) error {
-        // 第一个参数表示image
-        copts.Image = args[0]
-        if len(args) > 1 {
-            copts.Args = args[1:]
-        }
-        return runRun(dockerCli, cmd.Flags(), &options, copts)
-        {
-            return runContainer(dockerCli, ropts, copts, containerConfig)
-            {
-                // TODO
+func NewRunCommand(dockerCli command.Cli) *cobra.Command {
+	var options runOptions
+	var copts *containerOptions
+
+    cmd := &cobra.Command{
+        Use:   "run [OPTIONS] IMAGE [COMMAND] [ARG...]",
+        Short: "Create and run a new container from an image",
+        Args:  cli.RequiresMinArgs(1),
+        RunE: func(cmd *cobra.Command, args []string) error {
+            // 第一个参数表示image
+            copts.Image = args[0]
+            if len(args) > 1 {
+                copts.Args = args[1:]
             }
-        }
-    },
-    ValidArgsFunction: completion.ImageNames(dockerCli),
-    Annotations: map[string]string{
-        "category-top": "1",
-        "aliases":      "docker container run, docker run",
-    },
+
+            return runRun(dockerCli, cmd.Flags(), &options, copts)
+            {
+                // 与dockerd建立链接
+                client := dockerCli.Client()
+                {
+                    cli.initialize()
+                    {
+                        cli.init.Do(func() {
+                            // unix:///var/run/docker.sock
+                            cli.dockerEndpoint, cli.initErr = cli.getDockerEndPoint()
+                            cli.client = newAPIClientFromEndpoint(cli.dockerEndpoint, cli.configFile)
+                            cli.initializeFromClient()
+                        })
+                    }
+                }
+
+                // HTTP_PROXY, HTTPS_PROXY
+                proxyConfig := dockerCli.ConfigFile().ParseProxyConfig(client.DaemonHost(), ...)
+                containerConfig, err := parse(flags, copts, dockerCli.ServerInfo().OSType)
+
+                return runContainer(dockerCli, ropts, copts, containerConfig)
+                {
+                    // 创建容器
+                    createResponse := createContainer(ctx, dockerCli, containerConfig, &opts.createOptions)
+                    {
+                        dockerCli.Client().ContainerCreate(ctx, config, hostConfig, networkingConfig, platform, opts.name)
+                        {
+                            cli.post(ctx, "/containers/create", query, body, nil)
+                        }
+                    }
+
+                    // attach io
+                    attach := config.AttachStdin || config.AttachStdout || config.AttachStderr
+                    if attach {
+                        attachContainer(ctx, dockerCli, &errCh, config, createResponse.ID)
+                        {
+                            dockerCli.Client().ContainerAttach(ctx, containerID, options)
+                            {
+                                cli.postHijacked(ctx, "/containers/"+container+"/attach", query, nil, headers)
+                            }
+                        }
+                    }
+                    
+                    // 启动容器
+                    client.ContainerStart(ctx, createResponse.ID, types.ContainerStartOptions{})
+                    {
+                        cli.post(ctx, "/containers/"+containerID+"/start", query, nil, nil)
+                    }
+                }
+            }
+        },
+        ValidArgsFunction: completion.ImageNames(dockerCli),
+        Annotations: map[string]string{
+            "category-top": "1",
+            "aliases":      "docker container run, docker run",
+        },
+    }
+
+
+    // 命令行参数列表
+	flags := cmd.Flags()
+    flags.BoolVarP(&options.detach, "detach", "d", false, "Run container in background and print container ID")
+
+    command.AddPlatformFlag(flags, &options.platform)
+	copts = addFlags(flags)
+    {
+        // General purpose flags
+	    flags.VarP(&copts.attach, "attach", "a", "Attach to STDIN, STDOUT or STDERR")
+        flags.VarP(&copts.env, "env", "e", "Set environment variables")
+        flags.StringVar(&copts.entrypoint, "entrypoint", "", "Overwrite the default ENTRYPOINT of the image")
+        flags.StringVarP(&copts.user, "user", "u", "", "Username or UID (format: <name|uid>[:<group|gid>])")
+	    flags.StringVarP(&copts.workingDir, "workdir", "w", "", "Working directory inside the container")
+    }
 }
 
 ```
+
+### moby
+
+```go
+
+func main() {
+    cmd := newDaemonCommand()
+    {
+        cmd := &cobra.Command{
+            Use:           "dockerd [OPTIONS]",
+            Short:         "A self-sufficient runtime for containers.",
+            SilenceUsage:  true,
+            SilenceErrors: true,
+            Args:          cli.NoArgs,
+            RunE: func(cmd *cobra.Command, args []string) error {
+                opts.flags = cmd.Flags()
+                return runDaemon(opts)
+                {
+                    daemonCli := NewDaemonCli()
+	                daemonCli.start(opts)
+                    {
+                        // 加载/etc/docker/daemon.json
+                        cli.Config = loadDaemonCliConfig(opts)
+
+                        // config.Root默认/var/lib/docker: 存储image和container
+                        daemon.CreateDaemonRoot(cli.Config)
+
+                        // config.ExecRoot默认/var/run/docker
+                        system.MkdirAll(cli.Config.ExecRoot, 0700);
+
+                        // 创建unix:///var/run/docker.sock
+                        loadListeners(cli, serverConfig)
+
+                        // 启动contianerd
+                        cli.initContainerD(ctx)
+                        {
+                            supervisor.Start(ctx, ...)
+                            {
+                                go r.monitorDaemon(ctx)
+                                {
+                                    // 执行containerd --config /var/run/docker/containerd/containerd.toml 
+                                    r.startContainerd()
+                                }
+                            }
+                        }
+
+                        daemon.NewDaemon(ctx, cli.Config, pluginStore)
+                        {
+                            // 与contianerd建立链接
+                            d.containerdCli = containerd.New(config.ContainerdAddr, ...)
+                            d.initLibcontainerd(ctx)
+                            {
+                                daemon.containerd = remote.NewClient(ctx, daemon.containerdCli, ...)
+                            }
+                        }
+
+                        // 创建路由表
+                        initRouter(routerOptions)
+                        {
+                            routers := []router.Router{
+                                // we need to add the checkpoint router before the container router or the DELETE gets masked
+                                checkpointrouter.NewRouter(opts.daemon, decoder),
+                                container.NewRouter(opts.daemon, decoder, opts.daemon.RawSysInfo().CgroupUnified),
+                                {
+                                    r.routes = []router.Route{
+                                        // HEAD
+                                        router.NewHeadRoute("/containers/{name:.*}/archive", r.headContainersArchive),
+                                        // GET
+                                        router.NewGetRoute("/containers/json", r.getContainersJSON),
+                                        router.NewGetRoute("/containers/{name:.*}/export", r.getContainersExport),
+                                        router.NewGetRoute("/containers/{name:.*}/changes", r.getContainersChanges),
+                                        router.NewGetRoute("/containers/{name:.*}/json", r.getContainersByName),
+                                        router.NewGetRoute("/containers/{name:.*}/top", r.getContainersTop),
+                                        router.NewGetRoute("/containers/{name:.*}/logs", r.getContainersLogs),
+                                        router.NewGetRoute("/containers/{name:.*}/stats", r.getContainersStats),
+                                        router.NewGetRoute("/containers/{name:.*}/attach/ws", r.wsContainersAttach),
+                                        router.NewGetRoute("/exec/{id:.*}/json", r.getExecByID),
+                                        router.NewGetRoute("/containers/{name:.*}/archive", r.getContainersArchive),
+                                        // POST
+                                        // #dockerd#3.1 /containers/create
+                                        router.NewPostRoute("/containers/create", r.postContainersCreate),
+                                        router.NewPostRoute("/containers/{name:.*}/kill", r.postContainersKill),
+                                        router.NewPostRoute("/containers/{name:.*}/pause", r.postContainersPause),
+                                        router.NewPostRoute("/containers/{name:.*}/unpause", r.postContainersUnpause),
+                                        router.NewPostRoute("/containers/{name:.*}/restart", r.postContainersRestart),
+                                        // #dockerd#3.3 /containers/{name:.*}/start
+                                        router.NewPostRoute("/containers/{name:.*}/start", r.postContainersStart),
+                                        router.NewPostRoute("/containers/{name:.*}/stop", r.postContainersStop),
+                                        router.NewPostRoute("/containers/{name:.*}/wait", r.postContainersWait),
+                                        router.NewPostRoute("/containers/{name:.*}/resize", r.postContainersResize),
+                                        // #dockerd#3.2 /containers/{name:.*}/attach
+                                        router.NewPostRoute("/containers/{name:.*}/attach", r.postContainersAttach),
+                                        router.NewPostRoute("/containers/{name:.*}/exec", r.postContainerExecCreate),
+                                        router.NewPostRoute("/exec/{name:.*}/start", r.postContainerExecStart),
+                                        router.NewPostRoute("/exec/{name:.*}/resize", r.postContainerExecResize),
+                                        router.NewPostRoute("/containers/{name:.*}/rename", r.postContainerRename),
+                                        router.NewPostRoute("/containers/{name:.*}/update", r.postContainerUpdate),
+                                        router.NewPostRoute("/containers/prune", r.postContainersPrune),
+                                        router.NewPostRoute("/commit", r.postCommit),
+                                        // PUT
+                                        router.NewPutRoute("/containers/{name:.*}/archive", r.putContainersArchive),
+                                        // DELETE
+                                        router.NewDeleteRoute("/containers/{name:.*}", r.deleteContainers),
+                                    }
+                                }
+
+                                image.NewRouter(
+                                    opts.daemon.ImageService(),
+                                    opts.daemon.ReferenceStore,
+                                    opts.daemon.ImageService().DistributionServices().ImageStore,
+                                    opts.daemon.ImageService().DistributionServices().LayerStore,
+                                ),
+                                systemrouter.NewRouter(opts.daemon, opts.cluster, opts.buildkit, opts.features),
+                                volume.NewRouter(opts.daemon.VolumesService(), opts.cluster),
+                                build.NewRouter(opts.buildBackend, opts.daemon, opts.features),
+                                sessionrouter.NewRouter(opts.sessionManager),
+                                swarmrouter.NewRouter(opts.cluster),
+                                pluginrouter.NewRouter(opts.daemon.PluginManager()),
+                                distributionrouter.NewRouter(opts.daemon.ImageService()),
+                            }
+
+                            opts.api.InitRouter(routers...)
+                        }
+
+                        // 开始处理请求
+                        go cli.api.Wait(serveAPIWait) {
+                            s.serveAPI()
+                        }
+                    }
+                }
+            },
+            DisableFlagsInUseLine: true
+        }
+
+        // 命令行参数
+        flags := cmd.Flags()
+        // 默认配置文件/etc/docker/daemon.json
+        flags.StringVar(&opts.configFile, "config-file", defaultDaemonConfigFile, "Daemon configuration file")
+        // daemonOptions: 命令行参数
+        opts.installFlags(flags)
+        // daemonConfig: 命令行参数
+        installConfigFlags(opts.daemonConfig, flags)
+    }
+
+    cmd.Execute()
+}
+
+```
+
+`post /containers/{name:.*}/start`
+
+```go
+
+func (s *containerRouter) postContainersStart(ctx context.Context, ...) error {
+    s.backend.ContainerStart(vars["name"], hostConfig, checkpoint, checkpointDir)
+    {
+        ctr := daemon.GetContainer(name)
+        daemon.containerStart(ctr, checkpoint, checkpointDir, true)
+        {
+            daemon.conditionalMountOnStart(container)
+            daemon.initializeNetworking(container)
+            spec := daemon.createSpec(container)
+
+            // 请求containerd创建并启动容器
+            daemon.containerd.Create(ctx, container.ID, spec, shim, createOptions)
+            {
+                container := containers.Container{
+                    ID: id,
+                    Runtime: containers.RuntimeInfo{
+                        Name: c.runtime,
+                    },
+                }
+
+                // 向containerd发送grpc请求
+                c.ContainerService().Create(ctx, container)
+            }
+
+            pid := daemon.containerd.Start(context.Background(), container.ID, checkpointDir, ...)
+        }
+    }
+}
+
+```
+
+### containerd
+
