@@ -8,7 +8,14 @@ tags: docker
 
 # docker
 
-`docker`由两部分组成：`docker/cli`编译出`docker`，`moby`项目编译出`dockerd`
+![docker-engine](/assets/images/2023-04-24/docker-engine.png)
+
+`docker`由4部分组成：
+* `docker/cli`编译出`docker`，命令行接口
+* `moby`项目编译出`dockerd`，为client提供服务，管理image
+* `containerd`负责管理容器生命周期
+* `runc`负责对接OS运行容器
+
 
 ## 搭建测试环境
 
@@ -73,7 +80,7 @@ COPY --from=godlv           /go/bin/* /go/bin/
 ```shell
 
 # 编译
-make make binary
+make binary
 
 # 远程调试
 dlv --listen=:2345 --headless=true --api-version=2 exec build/docker run hello-world 
@@ -126,6 +133,17 @@ build: bundles
 dlv --listen=:2346 --headless=true --api-version=2 exec bundles/binary-daemon/dockerd
 
 ```
+
+### containerd
+
+* 安装依赖`sudo apt install btrfs-progs libbtrfs-dev`
+* 直接使用`make`编译
+
+### runc
+
+`runc`是一个命令行工具
+
+---
 
 ## 常用命令
 
@@ -201,6 +219,8 @@ Commands:
 
 以`docker run hello-world`为例分析实现过程
 
+![docker-run](/assets/images/2023-04-24/docker-run.png)
+
 ### cli
 
 ```go
@@ -261,44 +281,6 @@ func main() {
                     system.NewSystemCommand(dockerCli),
                     trust.NewTrustCommand(dockerCli),
                     volume.NewVolumeCommand(dockerCli),
-
-                    // orchestration (swarm) commands
-                    config.NewConfigCommand(dockerCli),
-                    node.NewNodeCommand(dockerCli),
-                    secret.NewSecretCommand(dockerCli),
-                    service.NewServiceCommand(dockerCli),
-                    stack.NewStackCommand(dockerCli),
-                    swarm.NewSwarmCommand(dockerCli),
-
-                    // legacy commands may be hidden
-                    hide(container.NewAttachCommand(dockerCli)),
-                    hide(container.NewCommitCommand(dockerCli)),
-                    hide(container.NewCopyCommand(dockerCli)),
-                    hide(container.NewCreateCommand(dockerCli)),
-                    hide(container.NewDiffCommand(dockerCli)),
-                    hide(container.NewExportCommand(dockerCli)),
-                    hide(container.NewKillCommand(dockerCli)),
-                    hide(container.NewLogsCommand(dockerCli)),
-                    hide(container.NewPauseCommand(dockerCli)),
-                    hide(container.NewPortCommand(dockerCli)),
-                    hide(container.NewRenameCommand(dockerCli)),
-                    hide(container.NewRestartCommand(dockerCli)),
-                    hide(container.NewRmCommand(dockerCli)),
-                    hide(container.NewStartCommand(dockerCli)),
-                    hide(container.NewStatsCommand(dockerCli)),
-                    hide(container.NewStopCommand(dockerCli)),
-                    hide(container.NewTopCommand(dockerCli)),
-                    hide(container.NewUnpauseCommand(dockerCli)),
-                    hide(container.NewUpdateCommand(dockerCli)),
-                    hide(container.NewWaitCommand(dockerCli)),
-                    hide(image.NewHistoryCommand(dockerCli)),
-                    hide(image.NewImportCommand(dockerCli)),
-                    hide(image.NewLoadCommand(dockerCli)),
-                    hide(image.NewRemoveCommand(dockerCli)),
-                    hide(image.NewSaveCommand(dockerCli)),
-                    hide(image.NewTagCommand(dockerCli)),
-                    hide(system.NewEventsCommand(dockerCli)),
-                    hide(system.NewInspectCommand(dockerCli)),
                 )
             }
         }
@@ -359,7 +341,7 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
                     {
                         cli.init.Do(func() {
                             // unix:///var/run/docker.sock
-                            cli.dockerEndpoint, cli.initErr = cli.getDockerEndPoint()
+                            cli.dockerEndpoint = cli.getDockerEndPoint()
                             cli.client = newAPIClientFromEndpoint(cli.dockerEndpoint, cli.configFile)
                             cli.initializeFromClient()
                         })
@@ -368,6 +350,7 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 
                 // HTTP_PROXY, HTTPS_PROXY
                 proxyConfig := dockerCli.ConfigFile().ParseProxyConfig(client.DaemonHost(), ...)
+                // 解析参数到containerConfig
                 containerConfig, err := parse(flags, copts, dockerCli.ServerInfo().OSType)
 
                 return runContainer(dockerCli, ropts, copts, containerConfig)
@@ -375,13 +358,23 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
                     // 创建容器
                     createResponse := createContainer(ctx, dockerCli, containerConfig, &opts.createOptions)
                     {
+                        // 下载镜像
+                        pullImage(ctx, dockerCli, config.Image, opts.platform, pullOut)
+                        {
+                            dockerCli.Client().ImageCreate(ctx, image, options)
+                            {
+                                cli.post(ctx, "/images/create", query, nil, headers)
+                            }
+                        }
+
+                        // 创建容器
                         dockerCli.Client().ContainerCreate(ctx, config, hostConfig, networkingConfig, platform, opts.name)
                         {
                             cli.post(ctx, "/containers/create", query, body, nil)
                         }
                     }
 
-                    // attach io
+                    // 嫁接io
                     attach := config.AttachStdin || config.AttachStdout || config.AttachStderr
                     if attach {
                         attachContainer(ctx, dockerCli, &errCh, config, createResponse.ID)
@@ -427,6 +420,8 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 
 ```
 
+---
+
 ### moby
 
 ```go
@@ -462,14 +457,18 @@ func main() {
                         // 启动contianerd
                         cli.initContainerD(ctx)
                         {
-                            supervisor.Start(ctx, ...)
-                            {
-                                go r.monitorDaemon(ctx)
+                            // 可以借此参数实现dockerd和containerd的联合debug
+                            if cli.Config.ContainerdAddr == "" {
+                                supervisor.Start(ctx, ...)
                                 {
-                                    // 执行containerd --config /var/run/docker/containerd/containerd.toml 
-                                    r.startContainerd()
+                                    go r.monitorDaemon(ctx)
+                                    {
+                                        // 执行containerd --config /var/run/docker/containerd/containerd.toml 
+                                        r.startContainerd()
+                                    }
                                 }
                             }
+                            
                         }
 
                         daemon.NewDaemon(ctx, cli.Config, pluginStore)
@@ -536,8 +535,27 @@ func main() {
                                     opts.daemon.ImageService(),
                                     opts.daemon.ReferenceStore,
                                     opts.daemon.ImageService().DistributionServices().ImageStore,
-                                    opts.daemon.ImageService().DistributionServices().LayerStore,
-                                ),
+                                    opts.daemon.ImageService().DistributionServices().LayerStore),
+                                {
+                                    r.routes = []router.Route{
+                                        // GET
+                                        router.NewGetRoute("/images/json", r.getImagesJSON),
+                                        router.NewGetRoute("/images/search", r.getImagesSearch),
+                                        router.NewGetRoute("/images/get", r.getImagesGet),
+                                        router.NewGetRoute("/images/{name:.*}/get", r.getImagesGet),
+                                        router.NewGetRoute("/images/{name:.*}/history", r.getImagesHistory),
+                                        router.NewGetRoute("/images/{name:.*}/json", r.getImagesByName),
+                                        // POST
+                                        router.NewPostRoute("/images/load", r.postImagesLoad),
+                                        router.NewPostRoute("/images/create", r.postImagesCreate),
+                                        router.NewPostRoute("/images/{name:.*}/push", r.postImagesPush),
+                                        router.NewPostRoute("/images/{name:.*}/tag", r.postImagesTag),
+                                        router.NewPostRoute("/images/prune", r.postImagesPrune),
+                                        // DELETE
+                                        router.NewDeleteRoute("/images/{name:.*}", r.deleteImages),
+                                    }
+                                }
+
                                 systemrouter.NewRouter(opts.daemon, opts.cluster, opts.buildkit, opts.features),
                                 volume.NewRouter(opts.daemon.VolumesService(), opts.cluster),
                                 build.NewRouter(opts.buildBackend, opts.daemon, opts.features),
@@ -575,40 +593,1446 @@ func main() {
 
 ```
 
-`post /containers/{name:.*}/start`
+下载镜像: `post /images/create`
 
 ```go
 
-func (s *containerRouter) postContainersStart(ctx context.Context, ...) error {
-    s.backend.ContainerStart(vars["name"], hostConfig, checkpoint, checkpointDir)
-    {
-        ctr := daemon.GetContainer(name)
-        daemon.containerStart(ctr, checkpoint, checkpointDir, true)
-        {
-            daemon.conditionalMountOnStart(container)
-            daemon.initializeNetworking(container)
-            spec := daemon.createSpec(container)
+// Creates an image from Pull or from Import
+func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 
-            // 请求containerd创建并启动容器
-            daemon.containerd.Create(ctx, container.ID, spec, shim, createOptions)
+    httputils.ParseForm(r)
+
+    var (
+		image       = r.Form.Get("fromImage")
+		repo        = r.Form.Get("repo")
+		tag         = r.Form.Get("tag")
+	)
+
+    if image != "" { // pull
+        metaHeaders := map[string][]string{}
+		for k, v := range r.Header {
+			if strings.HasPrefix(k, "X-Meta-") {
+				metaHeaders[k] = v
+			}
+		}
+
+        s.backend.PullImage(ctx, image, tag, platform, metaHeaders, ...)
+        {
+            ref := reference.ParseNormalizedNamed(image)
+            pullImageWithReference(ctx, ref, platform, metaHeaders, ...)
             {
-                container := containers.Container{
-                    ID: id,
-                    Runtime: containers.RuntimeInfo{
-                        Name: c.runtime,
-                    },
+                distribution.Pull(ctx, ref, imagePullConfig, cs)
+                {
+                    // 配置的镜像仓库
+                    repoInfo := config.RegistryService.ResolveRepository(ref)
+                    endpoints := config.RegistryService.LookupPullEndpoints(reference.Domain(repoInfo.Name))
+
+                    // 挨个尝试多个镜像仓库
+                    for _, endpoint := range endpoints {
+                        newPuller(endpoint, repoInfo, config, local).pull(ctx, ref)
+                        {
+                            pullRepository(ctx, ref)
+                            {
+                                pullTag(ctx, ref, p.config.Platform)
+                                {
+                                    // 获取元数据
+                                    manifest := p.manifestStore.Get(ctx, desc, ref)
+
+                                    // 根据镜像类型下载数据
+                                    switch v := manifest.(type) {
+
+                                    case *schema2.DeserializedManifest:
+                                        pullSchema2(ctx, ref, v /*mfst*/, platform)
+                                        {
+                                            // 下载构成image的layer
+                                            pullSchema2Layers(ctx, mfst.Target(), mfst.Layers, platform)
+                                            {
+                                                // 判断此image是否已下载
+                                                if _, err := p.config.ImageStore.Get(ctx, target.Digest); err == nil {
+                                                    // If the image already exists locally, no need to pull anything.
+                                                    return target.Digest, nil
+                                                }
+
+                                                var descriptors []xfer.DownloadDescriptor
+                                                for _, d := range layers {
+                                                    layerDescriptor := &layerDescriptor{
+                                                        digest:          d.Digest,
+                                                        repo:            p.repo,
+                                                        repoInfo:        p.repoInfo,
+                                                        metadataService: p.metadataService,
+                                                        src:             d,
+                                                    }
+
+                                                    descriptors = append(descriptors, layerDescriptor)
+                                                }
+
+                                                p.config.DownloadManager.Download(ctx, downloadRootFS, descriptors, ...)
+                                                {
+                                                    for _, descriptor := range layers {
+                                                        xferFunc = ldm.makeDownloadFunc(descriptor, rootFS.ChainID(), nil)
+                                                        {
+                                                            downloadReader, size = descriptor.Download(d.transfer.context(), ...)
+                                                            reader := ioutils.NewCancelReadCloser(d.transfer.context(), downloadReader)
+                                                            // 解析layer数据
+			                                                inflatedLayerData, err := archive.DecompressStream(reader)
+                                                            // 注册到本地的注册表
+                                                            d.layerStore.Register(inflatedLayerData, parentLayer)
+                                                            {
+                                                                // Create new roLayer
+                                                                layer := &roLayer{
+                                                                    parent:         p,
+                                                                    cacheID:        stringid.GenerateRandomID(),
+                                                                    referenceCount: 1,
+                                                                    layerStore:     ls,
+                                                                    references:     map[Layer]struct{}{},
+                                                                    descriptor:     descriptor,
+                                                                }
+
+                                                                // 按overlay2的格式存储layer
+                                                                ls.driver.Create(layer.cacheID, pid, nil)
+                                                                ls.applyTar(tx, ts, pid, layer)
+                                                                storeLayer(tx, layer)
+                                                            }
+                                                        }
+
+                                                        ldm.tm.transfer(transferKey, xferFunc, ...)
+                                                    }
+                                                }
+
+                                                // 保存已下载image的信息
+                                                p.config.ImageStore.Put(ctx, configJSON)
+                                            }
+                                        }
+
+                                    case *ocischema.DeserializedManifest:
+                                        pullOCI(ctx, ref, v, platform)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else { // import
+        src := r.Form.Get("fromSrc")
+        s.backend.ImportImage(src, repo, platform, tag, message, r.Body, ...)
+    }
+}
+
+```
+
+创建容器: `post /containers/create`
+
+```go
+
+func (s *containerRouter) postContainersCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+
+    httputils.ParseForm(r)
+
+    name := r.Form.Get("name")
+
+    // 解析容器的配置信息
+    config, hostConfig, networkingConfig := s.decoder.DecodeConfig(r.Body)
+
+    s.backend.ContainerCreate(types.ContainerCreateConfig{
+		Name:             name,
+		Config:           config,
+		HostConfig:       hostConfig,
+		NetworkingConfig: networkingConfig,
+		AdjustCPUShares:  adjustCPUShares,
+		Platform:         platform,
+	})
+    {
+        daemon.containerCreate(createOpts{
+            params:                  params,
+            managed:                 false,
+            ignoreImagesArgsEscaped: false})
+        {
+            daemon.create(opts)
+            {
+                // 先获取对应的image
+                img := daemon.imageService.GetImage(opts.params.Config.Image, opts.params.Platform)
+                // 容器配置可以修改创建镜像的配置
+                daemon.mergeAndVerifyConfig(opts.params.Config, img)
+
+                // 创建容器: 记录容器的配置和image
+                ctr := daemon.newContainer(opts.params.Name, os, opts.params.Config, opts.params.HostConfig, imgID, opts.managed)
+                {
+                    id, name = daemon.generateIDAndName(name)
+                    // 初始命令和参数
+                    entrypoint, args := daemon.getEntrypointAndArgs(config.Entrypoint, config.Cmd)
+
+                    base := daemon.newBaseContainer(id)
+                    base.Created = time.Now().UTC()
+                    base.Managed = managed
+                    base.Path = entrypoint
+                    base.Args = args // FIXME: de-duplicate from config
+                    base.Config = config
+                    base.HostConfig = &containertypes.HostConfig{}
+                    base.ImageID = imgID
+                    base.NetworkSettings = &network.Settings{IsAnonymousEndpoint: noExplicitName}
+                    base.Name = name
+                    base.Driver = daemon.imageService.GraphDriverName()
+                    base.OS = operatingSystem
                 }
 
-                // 向containerd发送grpc请求
-                c.ContainerService().Create(ctx, container)
-            }
+                // 初始化rwLayer
+                initFunc := setupInitLayer(daemon.idMapping)
+                {
+                    for pth, typ := range map[string]string{
+                        "/dev/pts":         "dir",
+                        "/dev/shm":         "dir",
+                        "/proc":            "dir",
+                        "/sys":             "dir",
+                        "/.dockerenv":      "file",
+                        "/etc/resolv.conf": "file",
+                        "/etc/hosts":       "file",
+                        "/etc/hostname":    "file",
+                        "/dev/console":     "file",
+                        "/etc/mtab":        "/proc/mounts",
+                    } {
+                        ...
+                    }
+                }
 
-            pid := daemon.containerd.Start(context.Background(), container.ID, checkpointDir, ...)
+                // 为每个容器创建一个可读写的layer: 基于overlay2格式创建一个目录
+                rwLayer := daemon.imageService.CreateLayer(ctr, initFunc)
+                {
+                    ls.initMount(m.mountID, pid, mountLabel, initFunc, storageOpt)
+                    {
+                        ls.driver.Get(initID, "")
+                        {
+                            // rwLayer以及image的各个layer以overlay的格式挂载之后作为root
+                            mount("overlay", mountTarget, "overlay", 0, mountData)
+                        }
+                    }
+                }
+
+                ctr.RWLayer = rwLayer
+
+                // 注册容器: 保存状态到文件
+                daemon.Register(ctr)
+                {
+                    ctr.CheckpointTo(daemon.containersReplica)
+                }
+            }
         }
     }
 }
 
 ```
 
+attach容器: `post post /containers/{name:.*}/attach`
+
+```go
+
+func (s *containerRouter) postContainersAttach(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+
+    httputils.ParseForm(r)
+    containerName := vars["name"]
+
+    setupStreams := func(multiplexed bool) (io.ReadCloser, io.Writer, io.Writer, error) {
+		conn, _ := hijacker.Hijack()
+		// set raw mode
+		conn.Write([]byte{})
+
+		closer := func() error {
+			httputils.CloseStreams(conn)
+			return nil
+		}
+		return ioutils.NewReadCloserWrapper(conn, closer), conn, conn, nil
+	}
+
+    attachConfig := &backend.ContainerAttachConfig{
+		GetStreams: setupStreams,
+		UseStdin:   httputils.BoolValue(r, "stdin"),
+		UseStdout:  httputils.BoolValue(r, "stdout"),
+		UseStderr:  httputils.BoolValue(r, "stderr"),
+		Logs:       httputils.BoolValue(r, "logs"),
+		Stream:     httputils.BoolValue(r, "stream"),
+		DetachKeys: detachKeys,
+		MuxStreams: true,
+	}
+
+    s.backend.ContainerAttach(containerName, attachConfig /*c*/)
+    {
+        // 从仓库里查找容器
+	    ctr := daemon.GetContainer(containerName)
+
+        inStream, outStream, errStream, err := c.GetStreams(multiplexed)
+        if cfg.UseStdin {
+            cfg.Stdin = inStream
+        }
+        if cfg.UseStdout {
+            cfg.Stdout = outStream
+        }
+        if cfg.UseStderr {
+            cfg.Stderr = errStream
+        }
+
+        daemon.containerAttach(ctr, &cfg, c.Logs, c.Stream)
+        {
+            // 通过pipe嫁接stdin
+            if cfg.Stdin != nil {
+                r, w := io.Pipe()
+                cfg.Stdin = r
+            }
+        }
+    }
+}
+
+```
+
+启动容器: `post /containers/{name:.*}/start`
+
+```go
+
+func (s *containerRouter) postContainersStart(ctx context.Context, ...) error {
+
+    hostConfig := s.decoder.DecodeHostConfig(r.Body)
+    checkpoint := r.Form.Get("checkpoint")
+	checkpointDir := r.Form.Get("checkpoint-dir")
+
+    s.backend.ContainerStart(vars["name"], hostConfig, checkpoint, checkpointDir)
+    {
+        ctr := daemon.GetContainer(name)
+
+        daemon.setHostConfig(ctr, hostConfig)
+
+        daemon.containerStart(ctr /*container*/, checkpoint, checkpointDir, true)
+        {
+            daemon.conditionalMountOnStart(container)
+            {
+                daemon.Mount(container)
+                {
+                    // 挂载到rwLayer
+                    container.RWLayer.Mount(container.GetMountLabel())
+                }
+            }
+
+            daemon.initializeNetworking(container)
+
+            // 容器规格的完整描述
+            spec := daemon.createSpec(container)
+
+            shim, createOptions := daemon.getLibcontainerdCreateOptions(container)
+            {
+                // Ensure a runtime has been assigned to this container
+                if container.HostConfig.Runtime == "" {
+                    // 默认io.containerd.runc.v2
+                    container.HostConfig.Runtime = daemon.configStore.GetDefaultRuntimeName()
+                    container.CheckpointTo(daemon.containersReplica)
+                }
+
+                // 获取containerd-shim-runc-v2的路径
+                rt := daemon.getRuntime(container.HostConfig.Runtime)
+                return rt.Shim.Binary, rt.Shim.Opts, nil
+            }
+
+            // 请求containerd创建并启动容器
+            daemon.containerd.Create(ctx, container.ID, spec, shim, createOptions)
+            {
+                bdir := c.bundleDir(id)
+                newOpts := []containerd.NewContainerOpts{
+                    containerd.WithSpec(ociSpec),
+                    containerd.WithRuntime(shim, runtimeOptions),
+                    WithBundle(bdir, ociSpec),
+                }
+                opts = append(opts, newOpts...)
+
+                c.client.NewContainer(ctx, id, opts...)
+                {
+                    container := containers.Container{
+                        ID: id,
+                        Runtime: containers.RuntimeInfo{
+                            Name: c.runtime,
+                        },
+                    }
+
+                    // 向containerd发送grpc请求:/containers/Create
+                    c.ContainerService().Create(ctx, container)
+                }
+            }
+
+            pid := daemon.containerd.Start(context.Background(), container.ID, checkpointDir, ...)
+            {
+                ctr := c.getContainer(ctx, id)
+                t = ctr.NewTask(ctx, ..., taskOpts...)
+                {
+                    request := &tasks.CreateTaskRequest{
+                        ContainerID: c.id,
+                        Terminal:    cfg.Terminal,
+                        Stdin:       cfg.Stdin,
+                        Stdout:      cfg.Stdout,
+                        Stderr:      cfg.Stderr,
+                    }
+
+                    info := TaskInfo{
+                        runtime: r.Runtime.Name,
+                    }
+                    // 配置参数
+                    for _, o := range opts {
+                        o(ctx, c.client, &info)
+                    }
+                    if info.RootFS != nil {
+                        for _, m := range info.RootFS {
+                            request.Rootfs = append(request.Rootfs, &types.Mount{
+                                Type:    m.Type,
+                                Source:  m.Source,
+                                Options: m.Options,
+                            })
+                        }
+                    }
+
+                    // 向containerd发送grpc请求:/tasks/Create
+                    c.client.TaskService().Create(ctx, request)
+
+                    t := &task{
+                        client: c.client,
+                        io:     i,
+                        id:     c.id,
+                        c:      c,
+                    }
+
+                    return t
+                }
+
+                t.Start(ctx)
+                {
+                    // 向containerd发送grpc请求:/tasks/Start
+                    t.client.TaskService().Start(ctx, &tasks.StartRequest{ContainerID: t.id})
+                }
+            }
+
+            container.SetRunning(pid, true)
+        }
+    }
+}
+
+```
+
+---
+
 ### containerd
 
+```go
+
+func main() {
+    app := command.App()
+    {
+        app := cli.NewApp()
+	    app.Name = "containerd"
+
+        // 命令行参数
+        app.Flags = []cli.Flag{
+            cli.StringFlag{
+                Name:  "config,c",
+                Usage: "path to the configuration file",
+                Value: filepath.Join(defaults.DefaultConfigDir, "config.toml"),
+            },
+            cli.StringFlag{
+                Name:  "log-level,l",
+                Usage: "set the logging level [trace, debug, info, warn, error, fatal, panic]",
+            },
+            cli.StringFlag{
+                Name:  "address,a",
+                Usage: "address for containerd's GRPC server",
+            },
+            cli.StringFlag{
+                Name:  "root",
+                Usage: "containerd root directory",
+            },
+            cli.StringFlag{
+                Name:  "state",
+                Usage: "containerd state directory",
+            },
+        }
+        app.Flags = append(app.Flags, serviceFlags()...)
+
+        // 支持的子命令
+        app.Commands = []cli.Command{
+            configCommand,
+            publishCommand,
+            ociHook,
+        }
+
+        app.Action = func(context *cli.Context) error {
+            // 解析配置文件
+            configPath := context.GlobalString("config")
+            srvconfig.LoadConfig(configPath, config)
+
+            // 解析命令行参数
+            applyFlags(context, config)
+
+            server := server.New(ctx, config)
+            {
+                apply(ctx, config)
+
+                // 加载插件
+                plugins := LoadPlugins(ctx, config)
+
+                // grpcService allows GRPC services to be registered with the underlying server
+                type grpcService interface {
+                    Register(*grpc.Server) error
+                }
+
+                // tcpService allows GRPC services to be registered with the underlying tcp server
+                type tcpService interface {
+                    RegisterTCP(*grpc.Server) error
+                }
+
+                // ttrpcService allows TTRPC services to be registered with the underlying server
+                type ttrpcService interface {
+                    RegisterTTRPC(*ttrpc.Server) error
+                }
+
+                ttrpcServer := newTTRPCServer()
+                grpcServer = grpc.NewServer(serverOpts...)
+		        tcpServer  = grpc.NewServer(tcpServerOpts...)
+
+                s = &Server{
+                    grpcServer:  grpcServer,
+                    tcpServer:   tcpServer,
+                    ttrpcServer: ttrpcServer,
+                    config:      config,
+                }
+
+                for _, p := range plugins {
+                    result := p.Init(initContext)
+                    instance := result.Instance()
+
+                    if src, ok := instance.(grpcService); ok {
+                        grpcServices = append(grpcServices, src)
+                    }
+                    if src, ok := instance.(ttrpcService); ok {
+                        ttrpcServices = append(ttrpcServices, src)
+                    }
+                    if service, ok := instance.(tcpService); ok {
+                        tcpServices = append(tcpServices, service)
+                    }
+                }
+
+                // register services after all plugins have been initialized
+                for _, service := range grpcServices {
+                    service.Register(grpcServer)
+                }
+                for _, service := range ttrpcServices {
+                    service.RegisterTTRPC(ttrpcServer)
+                }
+                for _, service := range tcpServices {
+                    service.RegisterTCP(tcpServer)
+                }
+            }
+
+            if config.Debug.Address != "" {
+                l = net.Listen("tcp", config.Debug.Address)
+                serve(ctx, l, server.ServeDebug)
+            }
+
+            if config.Metrics.Address != "" {
+                l := net.Listen("tcp", config.Metrics.Address)
+                serve(ctx, l, server.ServeMetrics)
+            }
+
+            tl := sys.GetLocalListener(config.TTRPC.Address, ...)
+            serve(ctx, tl, server.ServeTTRPC)
+
+            if config.GRPC.TCPAddress != "" {
+                l := net.Listen("tcp", config.GRPC.TCPAddress)
+                serve(ctx, l, server.ServeTCP)
+            }
+
+            l := sys.GetLocalListener(config.GRPC.Address, ...)
+            serve(ctx, l, server.ServeGRPC)
+
+            <-done
+        }
+    }
+
+    app.Run(os.Args)
+}
+
+```
+
+`container`服务插件
+
+```go
+
+// 注册containers服务
+func init() {
+    plugin.Register(&plugin.Registration{
+		Type: plugin.ServicePlugin,
+		ID:   services.ContainersService,
+		Requires: []plugin.Type{
+			plugin.EventPlugin,
+			plugin.MetadataPlugin,
+		},
+		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
+			m, err := ic.Get(plugin.MetadataPlugin)
+			ep, err := ic.Get(plugin.EventPlugin)
+
+			db := m.(*metadata.DB)
+			return &local{
+				Store:     metadata.NewContainerStore(db),
+				db:        db,
+				publisher: ep.(events.Publisher),
+			}, nil
+		},
+	})
+}
+
+// 创建容器
+func (l *local) Create(ctx context.Context, req *api.CreateContainerRequest, _ ...grpc.CallOption) (*api.CreateContainerResponse, error) {
+
+    container := containerFromProto(&req.Container)
+    l.Store.Create(ctx, container)
+    {
+        bkt := createContainersBucket(tx, namespace)
+        cbkt := bkt.CreateBucket([]byte(container.ID))
+        // 存入bbolt-db
+        writeContainer(cbkt, &container)
+    }
+
+}
+
+```
+
+`task`服务插件
+
+```go
+
+// 注册RuntimePluginV2插件
+func init() {
+	plugin.Register(&plugin.Registration{
+		Type: plugin.RuntimePluginV2,
+		ID:   "task",
+		Requires: []plugin.Type{
+			plugin.EventPlugin,
+			plugin.MetadataPlugin,
+		},
+		Config: &Config{
+			Platforms: defaultPlatforms(),
+		},
+		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
+			config := ic.Config.(*Config)
+			supportedPlatforms, err := parsePlatforms(config.Platforms)
+
+			ic.Meta.Platforms = supportedPlatforms
+
+			m, err := ic.Get(plugin.MetadataPlugin)
+			ep, err := ic.GetByID(plugin.EventPlugin, "exchange")
+			cs := metadata.NewContainerStore(m.(*metadata.DB))
+			events := ep.(*exchange.Exchange)
+
+			// shimManager管理shim
+			shimManager, err := NewShimManager(ic.Context, &ManagerConfig{
+				Root:         ic.Root,
+				State:        ic.State,
+				Address:      ic.Address,
+				TTRPCAddress: ic.TTRPCAddress,
+				Events:       events,
+				Store:        cs,
+				SchedCore:    config.SchedCore,
+			})
+
+            // 通过shim管理容器
+			return NewTaskManager(shimManager), nil
+		},
+	})
+}
+
+// 注册TasksService插件
+func init() {
+	plugin.Register(&plugin.Registration{
+		Type:     plugin.ServicePlugin,
+		ID:       services.TasksService,
+		Requires: tasksServiceRequires,
+		Config:   &Config{},
+		InitFn:   initFunc,
+	})
+}
+
+func initFunc(ic *plugin.InitContext) (interface{}, error) {
+
+	v2r, err := ic.GetByID(plugin.RuntimePluginV2, "task")
+	m, err := ic.Get(plugin.MetadataPlugin)
+	ep, err := ic.Get(plugin.EventPlugin)
+    monitor, err := ic.Get(plugin.TaskMonitorPlugin)
+
+    db := m.(*metadata.DB)
+	l := &local{
+		runtimes:   runtimes,
+		containers: metadata.NewContainerStore(db),
+		store:      db.ContentStore(),
+		publisher:  ep.(events.Publisher),
+		monitor:    monitor.(runtime.TaskMonitor),
+		v2Runtime:  v2r.(runtime.PlatformRuntime),
+	}
+
+    // 当前正在执行的容器列表
+    v2Tasks, err := l.v2Runtime.Tasks(ic.Context, true)
+	for _, t := range v2Tasks {
+		l.monitor.Monitor(t, nil)
+	}
+}
+
+// 创建task
+func (l *local) Create(ctx context.Context, r *api.CreateTaskRequest, _ ...grpc.CallOption) (*api.CreateTaskResponse, error) {
+
+    container, err := l.getContainer(ctx, r.ContainerID)
+
+    opts := runtime.CreateOpts{
+		Spec: container.Spec,
+		IO: runtime.IO{
+			Stdin:    r.Stdin,
+			Stdout:   r.Stdout,
+			Stderr:   r.Stderr,
+			Terminal: r.Terminal,
+		},
+		Checkpoint:     checkpointPath,
+		Runtime:        container.Runtime.Name,
+		RuntimeOptions: container.Runtime.Options,
+		TaskOptions:    r.Options,
+	}
+	if r.RuntimePath != "" {
+		opts.Runtime = r.RuntimePath
+	}
+	for _, m := range r.Rootfs {
+		opts.Rootfs = append(opts.Rootfs, mount.Mount{
+			Type:    m.Type,
+			Source:  m.Source,
+			Options: m.Options,
+		})
+	}
+
+    // 默认io.containerd.runc.v2
+    rtime, err := l.getRuntime(container.Runtime.Name)
+    rtime.Create(ctx, r.ContainerID, opts)
+    {
+        process := m.manager.Start(ctx, taskID, opts)
+        {
+            // container的存储路径
+            bundle := NewBundle(ctx, m.root, m.state, id, opts.Spec.Value)
+            shim := m.startShim(ctx, bundle, id, opts)
+            {
+                // 查找containerd-shim-runc-v2的路径
+                runtimePath := m.resolveRuntimePath(opts.Runtime)
+
+                b := shimBinary(bundle, shimBinaryConfig{
+                    runtime:      runtimePath,
+                    address:      m.containerdAddress,
+                    ttrpcAddress: m.containerdTTRPCAddress,
+                    schedCore:    m.schedCore,
+                })
+
+                shim := b.Start(ctx, topts, ...)
+                {
+                    args := []string{"-id", b.bundle.ID}
+                    args = append(args, "start")
+
+                    // 执行`containerd-shim-runc-v2 -namespace xxx -address xxx -id xxx start`
+                    cmd := client.Command(
+                        ctx,
+                        &client.CommandConfig{
+                            Runtime:      b.runtime,
+                            Address:      b.containerdAddress,
+                            TTRPCAddress: b.containerdTTRPCAddress,
+                            Path:         b.bundle.Path,
+                            Opts:         opts,
+                            Args:         args,
+                            SchedCore:    b.schedCore,
+                        })
+
+                    // 获取shim的stdout
+                    out := cmd.CombinedOutput()
+                    address := strings.TrimSpace(string(out))
+                    // stdout表示unix://xxx，用于向shim发送指令
+	                conn := client.Connect(address, client.AnonDialer)
+
+                    client := ttrpc.NewClient(conn, ttrpc.WithOnClose(onCloseWithShimLog))
+                    return &shim{
+                        bundle: b.bundle,
+                        client: client,
+                    }, nil
+                }
+            }
+
+            shimTask := &shimTask{
+                shim: shim,
+                task: task.NewTaskClient(shim.client),
+            }
+
+            return shimTask
+        }
+
+        shim := process.(*shimTask)
+        shim.Create(ctx, opts)
+        {
+            s.task.Create(ctx, request)
+            {
+                request := &task.CreateTaskRequest{
+                    ID:         s.ID(),
+                    Bundle:     s.bundle.Path,
+                    Stdin:      opts.IO.Stdin,
+                    Stdout:     opts.IO.Stdout,
+                    Stderr:     opts.IO.Stderr,
+                    Terminal:   opts.IO.Terminal,
+                    Checkpoint: opts.Checkpoint,
+                    Options:    topts,
+                }
+
+                for _, m := range opts.Rootfs {
+                    request.Rootfs = append(request.Rootfs, &types.Mount{
+                        Type:    m.Type,
+                        Source:  m.Source,
+                        Options: m.Options,
+                    })
+                }
+
+                // 向shim发送Create指令
+                s.task.Create(ctx, request)
+                {
+                    c.client.Call(ctx, "containerd.task.v2.Task", "Create", req, &resp)
+                }
+            }
+        }
+    }
+}
+
+// 启动task
+func (l *local) Start(ctx context.Context, r *api.StartRequest, _ ...grpc.CallOption) (*api.StartResponse, error) {
+
+    t := l.getTask(ctx, r.ContainerID)
+    p := runtime.Process(t)
+    p.Start(ctx)
+    {
+        // 向shim发送Start指令
+        p.shim.task.Start(ctx, &task.StartRequest{
+            ID:     p.shim.ID(),
+            ExecID: p.id,
+	    })
+        {
+            c.client.Call(ctx, "containerd.task.v2.Task", "Start", req, &resp)
+        }
+    }
+}
+
+```
+
+---
+
+### shim
+
+`shim`在启动后会`fork`子进程，原始进程退出，由子进程提供grpc服务接收`containerd`的指令, 目的是`containerd`退出时不影响`shim`
+
+```go
+
+func main() {
+	shim.RunManager(context.Background(), manager.NewShimManager("io.containerd.runc.v2"))
+    {
+        run(ctx, manager, ...)
+        {
+            // 命令行参数
+            parseFlags()
+
+            // Handle explicit actions
+	        switch action {
+            case "start":
+                opts := StartOpts{
+                    ContainerdBinary: containerdBinaryFlag,
+                    Address:          addressFlag,
+                    TTRPCAddress:     ttrpcAddress,
+                    Debug:            debugFlag,
+                }
+
+                address := manager.Start(ctx, id, opts)
+                {
+                    // 重新执行`shim -namespace xxx ...`
+                    cmd := newCommand(ctx, id, opts.ContainerdBinary, opts.Address, opts.TTRPCAddress, opts.Debug)
+
+                    // 创建unix-domain用于接收containerd的指令
+	                address := shim.SocketAddress(ctx, opts.Address, grouping)
+                    socket := shim.NewSocket(address)
+                    f := socket.File()
+                    // fork之后继承socket
+	                cmd.ExtraFiles = append(cmd.ExtraFiles, f)
+                    cmd.Start()
+                }
+
+                // 通过stdout响应address给containerd
+                os.Stdout.WriteString(address)
+
+                // 父进程退出
+                return nil
+            }
+
+            // fork之后的子进程继续执行
+
+            // 加载插件
+            plugins := plugin.Graph(...)
+            for _, p := range plugins {
+                result := p.Init(initContext)
+                instance := result.Instance()
+
+                if src, ok := instance.(ttrpcService); ok {
+                    ttrpcServices = append(ttrpcServices, src)
+                }
+
+                if src, ok := instance.(ttrpcServerOptioner); ok {
+                    ttrpcUnaryInterceptors = append(ttrpcUnaryInterceptors, src.UnaryInterceptor())
+                }
+            }
+
+            // 创建rpc服务
+            unaryInterceptor := chainUnaryServerInterceptors(ttrpcUnaryInterceptors...)
+	        server := newServer(ttrpc.WithUnaryServerInterceptor(unaryInterceptor))
+
+            for _, srv := range ttrpcServices {
+                srv.RegisterTTRPC(server)
+            }
+
+            // 启动服务
+            serve(ctx, server, signals, sd.Shutdown)
+        }
+    }
+}
+
+// 注册task服务插件
+func init() {
+	plugin.Register(&plugin.Registration{
+		Type: plugin.TTRPCPlugin,
+		ID:   "task",
+		Requires: []plugin.Type{
+			plugin.EventPlugin,
+			plugin.InternalPlugin,
+		},
+		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
+			pp, err := ic.GetByID(plugin.EventPlugin, "publisher")
+			ss, err := ic.GetByID(plugin.InternalPlugin, "shutdown")
+			
+			return task.NewTaskService(ic.Context, pp.(shim.Publisher), ss.(shutdown.Service))
+		},
+	})
+
+}
+
+// Create指令
+func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *taskAPI.CreateTaskResponse, err error) {
+
+    container := runc.NewContainer(ctx, s.platform, r)
+    {
+        config := &process.CreateConfig{
+            ID:               r.ID,
+            Bundle:           r.Bundle,
+            Runtime:          opts.BinaryName,
+            Rootfs:           mounts,
+            Terminal:         r.Terminal,
+            Stdin:            r.Stdin,
+            Stdout:           r.Stdout,
+            Stderr:           r.Stderr,
+            Checkpoint:       r.Checkpoint,
+            ParentCheckpoint: r.ParentCheckpoint,
+            Options:          r.Options,
+        }
+
+        WriteOptions(r.Bundle, opts)
+        WriteRuntime(r.Bundle, opts.BinaryName)
+
+        // 创建init进程
+        p := newInit(
+            ctx,
+            r.Bundle,
+            filepath.Join(r.Bundle, "work"),
+            ns,
+            platform,
+            config,
+            &opts,
+            rootfs,
+        )
+        {
+            runtime := process.NewRunc(options.Root, path, namespace, options.BinaryName, options.CriuPath, options.SystemdCgroup)
+            {
+                return &runc.Runc{
+                    Command:       runtime,
+                    Log:           filepath.Join(path, "log.json"),
+                    LogFormat:     runc.JSON,
+                    PdeathSignal:  unix.SIGKILL,
+                    Root:          filepath.Join(root, namespace),
+                    Criu:          criu,
+                    SystemdCgroup: systemd,
+                }
+            }
+
+            p := &Init{
+                id:        id,
+                runtime:   runtime,
+                pausing:   new(atomicBool),
+                stdio:     stdio,
+                status:    0,
+                waitBlock: make(chan struct{}),
+            }
+            p.initState = &createdState{p: p}
+        }
+
+        p.Create(ctx, config)
+        {
+            opts := &runc.CreateOpts{
+                PidFile:      pidFile.Path(),
+                NoPivot:      p.NoPivotRoot,
+                NoNewKeyring: p.NoNewKeyring,
+            }
+
+            p.runtime.Create(ctx, r.ID, r.Bundle, opts)
+            {
+                args := []string{"create", "--bundle", bundle}
+                cmd := r.command(context, append(args, id)...)
+                cmd.ExtraFiles = opts.ExtraFiles
+
+                // 执行指令`runc create --bundle xxx`
+                ec := Monitor.Start(cmd)
+                Monitor.Wait(cmd, ec)
+            }
+        }
+    }
+
+}
+
+// Start指令
+func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.StartResponse, error) {
+
+    container := s.getContainer(r.ID)
+    container.Start(ctx, r)
+    {
+        p := c.Process(r.ExecID)
+        // 启动init进程
+        p.Start(ctx)
+        {
+            p.initState.Start(ctx)
+            {
+                p.runtime.Start(ctx, p.id)
+                {
+                    // 执行命令`runc start xxx`
+                    r.runOrError(r.command(context, "start", id))
+                }
+            }
+        }
+    }
+
+}
+
+```
+
+---
+
+### runc
+
+```go
+
+func main() {
+    app := cli.NewApp()
+	app.Name = "runc"
+
+    // 命令行参数
+	app.Flags = []cli.Flag{
+		cli.BoolFlag{
+			Name:  "debug",
+			Usage: "enable debug logging",
+		},
+		cli.StringFlag{
+			Name:  "log",
+			Value: "",
+			Usage: "set the log file to write runc logs to (default is '/dev/stderr')",
+		},
+		cli.StringFlag{
+			Name:  "log-format",
+			Value: "text",
+			Usage: "set the log format ('text' (default), or 'json')",
+		},
+		cli.StringFlag{
+			Name:  "root",
+			Value: root,
+			Usage: "root directory for storage of container state (this should be located in tmpfs)",
+		},
+		cli.StringFlag{
+			Name:  "criu",
+			Value: "criu",
+			Usage: "path to the criu binary used for checkpoint and restore",
+		},
+		cli.BoolFlag{
+			Name:  "systemd-cgroup",
+			Usage: "enable systemd cgroup support, expects cgroupsPath to be of form \"slice:prefix:name\" for e.g. \"system.slice:runc:434234\"",
+		},
+		cli.StringFlag{
+			Name:  "rootless",
+			Value: "auto",
+			Usage: "ignore cgroup permission errors ('true', 'false', or 'auto')",
+		},
+	}
+
+    // 命令列表
+	app.Commands = []cli.Command{
+		checkpointCommand,
+		createCommand,
+		deleteCommand,
+		eventsCommand,
+		execCommand,
+		killCommand,
+		listCommand,
+		pauseCommand,
+		psCommand,
+		restoreCommand,
+		resumeCommand,
+		runCommand,
+		specCommand,
+		startCommand,
+		stateCommand,
+		updateCommand,
+		featuresCommand,
+	}
+
+    app.Run(os.Args)
+}
+
+// create命令
+createCommand = cli.Command{
+	Name:  "create",
+	Usage: "create a container",
+
+    Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:  "bundle, b",
+			Value: "",
+			Usage: `path to the root of the bundle directory, defaults to the current directory`,
+		},
+		cli.StringFlag{
+			Name:  "console-socket",
+			Value: "",
+			Usage: "path to an AF_UNIX socket which will receive a file descriptor referencing the master end of the console's pseudoterminal",
+		},
+		cli.StringFlag{
+			Name:  "pid-file",
+			Value: "",
+			Usage: "specify the file to write the process id to",
+		},
+		cli.BoolFlag{
+			Name:  "no-pivot",
+			Usage: "do not use pivot root to jail process inside rootfs.  This should be used whenever the rootfs is on top of a ramdisk",
+		},
+		cli.BoolFlag{
+			Name:  "no-new-keyring",
+			Usage: "do not create a new session keyring for the container.  This will cause the container to inherit the calling processes session key",
+		},
+		cli.IntFlag{
+			Name:  "preserve-fds",
+			Usage: "Pass N additional file descriptors to the container (stdio + $LISTEN_FDS + N in total)",
+		},
+	},
+
+	Action: func(context *cli.Context) error {
+		startContainer(context, CT_ACT_CREATE, nil)
+        {
+            spec := setupSpec(context)
+
+            container := createContainer(context, id, spec)
+            {
+                factory := loadFactory(context)
+                {
+                    return libcontainer.New(abs, intelRdtManager,
+                        libcontainer.CriuPath(context.GlobalString("criu")),
+                        libcontainer.NewuidmapPath(newuidmap),
+                        libcontainer.NewgidmapPath(newgidmap))
+                    {
+                        return &LinuxFactory{
+                            Root:      root,
+                            InitPath:  "/proc/self/exe",
+                            InitArgs:  []string{os.Args[0], "init"},
+                            Validator: validate.New(),
+                            CriuPath:  "criu",
+                        }
+                    }
+                }
+
+                factory.Create(id, config)
+                {
+                    c := &linuxContainer{
+                        id:            id,
+                        root:          containerRoot,
+                        config:        config,
+                        initPath:      l.InitPath,
+                        initArgs:      l.InitArgs,
+                        criuPath:      l.CriuPath,
+                        newuidmapPath: l.NewuidmapPath,
+                        newgidmapPath: l.NewgidmapPath,
+                        cgroupManager: cm,
+                    }
+
+                    c.state = &stoppedState{c: c}
+                }
+            }
+
+            r := &runner{
+                enableSubreaper: !context.Bool("no-subreaper"),
+                shouldDestroy:   !context.Bool("keep"),
+                container:       container,
+                listenFDs:       listenFDs,
+                notifySocket:    notifySocket,
+                consoleSocket:   context.String("console-socket"),
+                detach:          context.Bool("detach"),
+                pidFile:         context.String("pid-file"),
+                preserveFDs:     context.Int("preserve-fds"),
+                action:          action,
+                criuOpts:        criuOpts,
+                init:            true,
+            }
+
+            r.run(spec.Process)
+            {
+                process := newProcess(*config)
+                {
+                    lp := &libcontainer.Process{
+                        Args: p.Args,
+                        Env:  p.Env,
+                        User:            fmt.Sprintf("%d:%d", p.User.UID, p.User.GID),
+                        Cwd:             p.Cwd,
+                        Label:           p.SelinuxLabel,
+                        NoNewPrivileges: &p.NoNewPrivileges,
+                        AppArmorProfile: p.ApparmorProfile,
+                    }
+
+                    if p.Capabilities != nil {
+                        lp.Capabilities = &configs.Capabilities{}
+                        lp.Capabilities.Bounding = p.Capabilities.Bounding
+                        lp.Capabilities.Effective = p.Capabilities.Effective
+                        lp.Capabilities.Inheritable = p.Capabilities.Inheritable
+                        lp.Capabilities.Permitted = p.Capabilities.Permitted
+                        lp.Capabilities.Ambient = p.Capabilities.Ambient
+                    }
+                    for _, gid := range p.User.AdditionalGids {
+                        lp.AdditionalGroups = append(lp.AdditionalGroups, strconv.FormatUint(uint64(gid), 10))
+                    }
+                    for _, rlimit := range p.Rlimits {
+                        rl, err := createLibContainerRlimit(rlimit)
+                        if err != nil {
+                            return nil, err
+                        }
+                        lp.Rlimits = append(lp.Rlimits, rl)
+                    }
+                    return lp, nil
+                }
+
+                process.Init = r.init
+
+                switch r.action {
+                case CT_ACT_CREATE:
+                    err = r.container.Start(process)
+                    {
+                        c.start(process)
+                        {
+                            parent := c.newParentProcess(process)
+                            {
+                                parentInitPipe, childInitPipe := utils.NewSockPair("init")
+                                parentLogPipe, childLogPipe := os.Pipe()
+
+                                cmd := c.commandTemplate(p, childInitPipe, childLogPipe)
+                                {
+                                    cmd := exec.Command(c.initPath, c.initArgs[1:]...)
+                                    cmd.Args[0] = c.initArgs[0]
+                                    cmd.Stdin = p.Stdin
+                                    cmd.Stdout = p.Stdout
+                                    cmd.Stderr = p.Stderr
+                                    cmd.Dir = c.config.Rootfs
+
+                                    cmd.ExtraFiles = append(cmd.ExtraFiles, childInitPipe)
+                                    cmd.Env = append(cmd.Env,
+                                        "_LIBCONTAINER_INITPIPE="+strconv.Itoa(stdioFdCount+len(cmd.ExtraFiles)-1),
+                                        "_LIBCONTAINER_STATEDIR="+c.root,
+                                    )
+                                }
+
+                                return c.newInitProcess(p, cmd, messageSockPair, logFilePair)
+                                {
+                                    // 存储namespace
+                                    data, err := c.bootstrapData(c.config.Namespaces.CloneFlags(), nsMaps, initStandard)
+
+                                    init := &initProcess{
+                                        cmd:             cmd,
+                                        messageSockPair: messageSockPair,
+                                        logFilePair:     logFilePair,
+                                        manager:         c.cgroupManager,
+                                        intelRdtManager: c.intelRdtManager,
+                                        config:          c.newInitConfig(p),
+                                        container:       c,
+                                        process:         p,
+                                        bootstrapData:   data,
+                                        sharePidns:      sharePidns,
+                                    }
+                                    c.initProcess = init
+                                    return init, nil
+                                }
+                            }
+
+                            parent.start()
+                            {
+                                // fork之后执行runc init指令
+                                p.cmd.Start()
+
+                                // 设置cgroup
+                                p.manager.Apply(p.pid())
+                                {
+                                    // 设置cgroup
+                                    CreateCgroupPath(m.dirPath, m.config)
+                                    // 写入pid
+                                    cgroups.WriteCgroupProc(m.dirPath, pid)
+                                }
+                            }
+                        }
+                    }
+                case CT_ACT_RESTORE:
+                    err = r.container.Restore(process, r.criuOpts)
+                case CT_ACT_RUN:
+                    err = r.container.Run(process)
+                default:
+                    panic("Unknown action")
+                }
+            }
+        }
+	},
+}
+
+```
+
+`nsexec`: 利用cgo先于go-runtime执行，用于设置namespace
+
+```c
+void nsexec(void)
+{
+    pipenum = getenv_int("_LIBCONTAINER_INITPIPE");
+	if (pipenum < 0) {
+		/* We are not a runc init. Just return to go runtime. */
+		return;
+	}
+
+	// #runc#1.0.1 nl_parse: 通过pipe同步config
+    nl_parse(pipenum, &config);
+
+    if (config.namespaces)
+		join_namespaces(config.namespaces);
+}
+```
+
+```go
+// runc init的作用是执行OS相关操作
+func init() {
+	// #runc#3.2 runc init
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		// This is the golang entry point for runc init, executed
+		// before main() but after libcontainer/nsenter's nsexec().
+
+		level, err := strconv.Atoi(os.Getenv("_LIBCONTAINER_LOGLEVEL"))
+		logPipeFd, err := strconv.Atoi(os.Getenv("_LIBCONTAINER_LOGPIPE"))
+
+		logrus.SetLevel(logrus.Level(level))
+		logrus.SetOutput(os.NewFile(uintptr(logPipeFd), "logpipe"))
+		logrus.SetFormatter(new(logrus.JSONFormatter))
+
+		factory, _ := libcontainer.New("")
+        {
+            l := &LinuxFactory{
+                Root:      root,
+                InitPath:  "/proc/self/exe",
+                InitArgs:  []string{os.Args[0], "init"},
+                Validator: validate.New(),
+                CriuPath:  "criu",
+            }
+
+            return l
+        }
+
+		factory.StartInitialization()
+        {
+            i := newContainerInit(it, pipe, consoleSocket, fifofd, logPipeFd, mountFds)
+            {
+                // 父子进程通过pipe传递config
+                var config *initConfig
+                json.NewDecoder(pipe).Decode(&config)
+
+                return &linuxStandardInit{
+                    pipe:          pipe,
+                    consoleSocket: consoleSocket,
+                    parentPid:     unix.Getppid(),
+                    config:        config,
+                    fifoFd:        fifoFd,
+                    logFd:         logFd,
+                    mountFds:      mountFds,
+                }, nil
+            }
+
+            i.Init()
+            {
+                setupNetwork(l.config)
+
+                setupRoute(l.config.Config)
+
+                prepareRootfs(l.pipe, l.config, l.mountFds)
+                {
+                    prepareRoot(config)
+                    {
+                        // config.Rootfs已经在dockerd中`mount rwLayer imageLayers overlay`
+	                    mount(config.Rootfs, config.Rootfs, "", "bind", unix.MS_BIND|unix.MS_REC, "")
+                    }
+
+                    // 切换root文件系统
+                    pivotRoot(config.Rootfs)
+                }
+
+                // pipe是双向的, 一直阻塞到start命令读取pipe
+                unix.Write(fd, []byte("0"))
+
+                // 容器真正的init进程
+                name := exec.LookPath(l.config.Args[0])
+                // 万事俱备，执行init进程
+                system.Exec(name, l.config.Args[0:], os.Environ())
+            }
+        }
+	}
+}
+
+// runc start
+var startCommand = cli.Command{
+    Name:  "start",
+	Usage: "executes the user defined process in a created container",
+    Action: func(context *cli.Context) error {
+
+		container := getContainer(context)
+		
+		status, err := container.Status()
+		
+		switch status {
+		case libcontainer.Created:
+			
+			container.Exec()
+            {
+                c.exec()
+                {
+                    blockingFifoOpenCh := awaitFifoOpen(path)
+                    for {
+                        select {
+                        // 读取pipe，触发执行init进程
+                        case result := <-blockingFifoOpenCh:
+                            return handleFifoResult(result)
+                    }
+                }
+            }
+			
+			return nil
+		case libcontainer.Stopped:
+			return errors.New("cannot start a container that has stopped")
+		case libcontainer.Running:
+			return errors.New("cannot start an already running container")
+		default:
+			return fmt.Errorf("cannot start a container in the %s state", status)
+		}
+	},
+}
+```
