@@ -494,11 +494,11 @@ Cluster DNS is based on the open-source `CoreDNS` project (https://coredns.io/).
 package main
 
 import (
-	"io"
-	"log"
-	"net/http"
+    "io"
+    "log"
+    "net/http"
 
-	restful "github.com/emicklei/go-restful/v3"
+    restful "github.com/emicklei/go-restful/v3"
 )
 
 // This example shows the minimal code needed to get a restful.WebService working.
@@ -506,14 +506,14 @@ import (
 // GET http://localhost:8080/hello
 
 func main() {
-	ws := new(restful.WebService)
-	ws.Route(ws.GET("/hello").To(hello))
-	restful.Add(ws)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+    ws := new(restful.WebService)
+    ws.Route(ws.GET("/hello").To(hello))
+    restful.Add(ws)
+    log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func hello(req *restful.Request, resp *restful.Response) {
-	io.WriteString(resp, "world")
+    io.WriteString(resp, "world")
 }
 ```
 
@@ -521,7 +521,7 @@ func hello(req *restful.Request, resp *restful.Response) {
 
 ```go
 func init() {
-	DefaultContainer = NewContainer()
+    DefaultContainer = NewContainer()
     {
         return &Container{
             webServices:            []*WebService{},
@@ -535,15 +535,15 @@ func init() {
             contentEncodingEnabled: false}
     }
 
-	DefaultContainer.ServeMux = http.DefaultServeMux
+    DefaultContainer.ServeMux = http.DefaultServeMux
 }
 
 func main() {
-	ws := new(restful.WebService)
-	ws.Route(ws.GET("/hello").To(hello))
+    ws := new(restful.WebService)
+    ws.Route(ws.GET("/hello").To(hello))
 
     // 把ws添加到DefaultContainer
-	restful.Add(ws)
+    restful.Add(ws)
     {
         DefaultContainer.Add(service)
         {
@@ -566,10 +566,10 @@ func main() {
         }
     }
 
-	http.ListenAndServe(":8080", nil/*handler*/)
+    http.ListenAndServe(":8080", nil/*handler*/)
     {
         server := &Server{Addr: addr, Handler: handler}
-	    server.ListenAndServe()
+        server.ListenAndServe()
         {
             ln := net.Listen("tcp", addr)
             srv.Serve(ln)
@@ -604,7 +604,7 @@ func main() {
                                 h, _ := mux.Handler(r)
                                 {
                                     host := stripHostPort(r.Host)
-	                                path := cleanPath(r.URL.Path)
+                                    path := cleanPath(r.URL.Path)
                                     return mux.handler(host, r.URL.Path /*path*/)
                                     {
                                         h, pattern = mux.match(path)
@@ -616,7 +616,7 @@ func main() {
                                 }
 
                                 // 统一转给Container.dispatch派发请求
-	                            h.ServeHTTP(w, r)
+                                h.ServeHTTP(w, r)
                                 {
                                     // 再次路由，默认CurlyRouter
                                     webService, route = c.router.SelectRoute(c.webServices, httpRequest)
@@ -639,13 +639,13 @@ func main() {
 ```go
 
 func NewAPIServerCommand() *cobra.Command {
-	s := options.NewServerRunOptions()
+    s := options.NewServerRunOptions()
     cmd := &cobra.Command{
-		Use: "kube-apiserver",
+        Use: "kube-apiserver",
         RunE: func(cmd *cobra.Command, args []string) error {
-			// set default options
-			completedOptions := Complete(s)
-			return Run(completedOptions, genericapiserver.SetupSignalHandler())
+            // set default options
+            completedOptions := Complete(s)
+            return Run(completedOptions, genericapiserver.SetupSignalHandler())
             {
                 server := CreateServerChain(completeOptions)
                 {
@@ -671,7 +671,7 @@ func NewAPIServerCommand() *cobra.Command {
                                     
                                     // 创建Container
                                     gorestfulContainer := restful.NewContainer()
-	                                gorestfulContainer.ServeMux = http.NewServeMux()
+                                    gorestfulContainer.ServeMux = http.NewServeMux()
 
                                     director := director{
                                         name:               name,
@@ -909,20 +909,20 @@ func NewAPIServerCommand() *cobra.Command {
                     }
                 }
             }
-		},
+        },
     }
 
     fs := cmd.Flags()
-	// 命令行参数
-	namedFlagSets := s.Flags()
-	verflag.AddFlags(namedFlagSets.FlagSet("global"))
-	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
-	options.AddCustomGlobalFlags(namedFlagSets.FlagSet("generic"))
-	for _, f := range namedFlagSets.FlagSets {
-		fs.AddFlagSet(f)
-	}
+    // 命令行参数
+    namedFlagSets := s.Flags()
+    verflag.AddFlags(namedFlagSets.FlagSet("global"))
+    globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
+    options.AddCustomGlobalFlags(namedFlagSets.FlagSet("generic"))
+    for _, f := range namedFlagSets.FlagSets {
+        fs.AddFlagSet(f)
+    }
 
-	return cmd
+    return cmd
 }
 
 ```
@@ -935,14 +935,14 @@ func NewAPIServerCommand() *cobra.Command {
 // Resources which are exported to the RESTful API of apiserver need to implement this interface. It is expected
 // that objects may implement any of the below interfaces.
 type Storage interface {
-	// New returns an empty object that can be used with Create and Update after request data has been put into it.
-	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
-	New() runtime.Object
+    // New returns an empty object that can be used with Create and Update after request data has been put into it.
+    // This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
+    New() runtime.Object
 
-	// Destroy cleans up its resources on shutdown.
-	// Destroy has to be implemented in thread-safe way and be prepared
-	// for being called more than once.
-	Destroy()
+    // Destroy cleans up its resources on shutdown.
+    // Destroy has to be implemented in thread-safe way and be prepared
+    // for being called more than once.
+    Destroy()
 }
 
 // 根据rest.Storage实现的接口自动生成handler
@@ -953,40 +953,40 @@ func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storag
     group, version := a.group.GroupVersion.Group, a.group.GroupVersion.Version
 
     // If there is a subresource, namespace scoping is defined by the parent resource
-	var namespaceScoped bool
-	if isSubresource {
-		parentStorage, ok := a.group.Storage[resource]
-		scoper, ok := parentStorage.(rest.Scoper)
-		namespaceScoped = scoper.NamespaceScoped()
+    var namespaceScoped bool
+    if isSubresource {
+        parentStorage, ok := a.group.Storage[resource]
+        scoper, ok := parentStorage.(rest.Scoper)
+        namespaceScoped = scoper.NamespaceScoped()
 
-	} else {
-		scoper, ok := storage.(rest.Scoper)
-		namespaceScoped = scoper.NamespaceScoped()
+    } else {
+        scoper, ok := storage.(rest.Scoper)
+        namespaceScoped = scoper.NamespaceScoped()
     }
 
     // what verbs are supported by the storage, used to know what verbs we support per path
-	// POST: New()/Create()
-	creater, isCreater := storage.(rest.Creater)
-	namedCreater, isNamedCreater := storage.(rest.NamedCreater)
-	// LIST: NewList()/List()
-	lister, isLister := storage.(rest.Lister)
-	// GET: Get()
-	getter, isGetter := storage.(rest.Getter)
-	getterWithOptions, isGetterWithOptions := storage.(rest.GetterWithOptions)
-	// DELETE: Delete()
-	gracefulDeleter, isGracefulDeleter := storage.(rest.GracefulDeleter)
-	collectionDeleter, isCollectionDeleter := storage.(rest.CollectionDeleter)
-	// PUT: New()/Update()
-	updater, isUpdater := storage.(rest.Updater)
-	// PATCH: Getter/Updater
-	patcher, isPatcher := storage.(rest.Patcher)
-	// WATCH: Watch()
-	watcher, isWatcher := storage.(rest.Watcher)
-	// CONNECT: Connect()
-	connecter, isConnecter := storage.(rest.Connecter)
+    // POST: New()/Create()
+    creater, isCreater := storage.(rest.Creater)
+    namedCreater, isNamedCreater := storage.(rest.NamedCreater)
+    // LIST: NewList()/List()
+    lister, isLister := storage.(rest.Lister)
+    // GET: Get()
+    getter, isGetter := storage.(rest.Getter)
+    getterWithOptions, isGetterWithOptions := storage.(rest.GetterWithOptions)
+    // DELETE: Delete()
+    gracefulDeleter, isGracefulDeleter := storage.(rest.GracefulDeleter)
+    collectionDeleter, isCollectionDeleter := storage.(rest.CollectionDeleter)
+    // PUT: New()/Update()
+    updater, isUpdater := storage.(rest.Updater)
+    // PATCH: Getter/Updater
+    patcher, isPatcher := storage.(rest.Patcher)
+    // WATCH: Watch()
+    watcher, isWatcher := storage.(rest.Watcher)
+    // CONNECT: Connect()
+    connecter, isConnecter := storage.(rest.Connecter)
 
     nameParam := ws.PathParameter("name", "name of the "+kind).DataType("string")
-	pathParam := ws.PathParameter("path", "path to the resource").DataType("string")
+    pathParam := ws.PathParameter("path", "path to the resource").DataType("string")
 
     // Handle non-namespace scoped resources like nodes.
     resourcePath := resource
@@ -1033,163 +1033,163 @@ func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storag
     // 为每个action生成handler
     for _, action := range actions {
         // 示例数据
-		producedObject := storageMeta.ProducesObject(action.Verb)
+        producedObject := storageMeta.ProducesObject(action.Verb)
 
-		switch action.Verb {
-		case "GET": // Get a resource.
-			var handler restful.RouteFunction
-			if isGetterWithOptions {
-				handler = restfulGetResourceWithOptions(getterWithOptions, reqScope, isSubresource)
-			} else {
-				handler = restfulGetResource(getter, reqScope)
-			}
+        switch action.Verb {
+        case "GET": // Get a resource.
+            var handler restful.RouteFunction
+            if isGetterWithOptions {
+                handler = restfulGetResourceWithOptions(getterWithOptions, reqScope, isSubresource)
+            } else {
+                handler = restfulGetResource(getter, reqScope)
+            }
 
-			doc := "read the specified " + kind
-			if isSubresource {
-				doc = "read " + subresource + " of the specified " + kind
-			}
-			route := ws.GET(action.Path).To(handler).Doc(doc)
-			
-			addParams(route, action.Params)
-			routes = append(routes, route)
-		case "LIST": // List all resources of a kind.
-			doc := "list objects of kind " + kind
-			if isSubresource {
-				doc = "list " + subresource + " of objects of kind " + kind
-			}
-			handler := metrics.InstrumentRouteFunc(..., restfulListResource(lister, watcher, ...))
-			route := ws.GET(action.Path).To(handler).Doc(doc)
+            doc := "read the specified " + kind
+            if isSubresource {
+                doc = "read " + subresource + " of the specified " + kind
+            }
+            route := ws.GET(action.Path).To(handler).Doc(doc)
             
-			AddObjectParams(ws, route, versionedListOptions)
+            addParams(route, action.Params)
+            routes = append(routes, route)
+        case "LIST": // List all resources of a kind.
+            doc := "list objects of kind " + kind
+            if isSubresource {
+                doc = "list " + subresource + " of objects of kind " + kind
+            }
+            handler := metrics.InstrumentRouteFunc(..., restfulListResource(lister, watcher, ...))
+            route := ws.GET(action.Path).To(handler).Doc(doc)
+            
+            AddObjectParams(ws, route, versionedListOptions)
 
-			switch {
-			case isLister && isWatcher:
-				doc := "list or watch objects of kind " + kind
-				if isSubresource {
-					doc = "list or watch " + subresource + " of objects of kind " + kind
-				}
-				route.Doc(doc)
-			case isWatcher:
-				doc := "watch objects of kind " + kind
-				if isSubresource {
-					doc = "watch " + subresource + "of objects of kind " + kind
-				}
-				route.Doc(doc)
-			}
+            switch {
+            case isLister && isWatcher:
+                doc := "list or watch objects of kind " + kind
+                if isSubresource {
+                    doc = "list or watch " + subresource + " of objects of kind " + kind
+                }
+                route.Doc(doc)
+            case isWatcher:
+                doc := "watch objects of kind " + kind
+                if isSubresource {
+                    doc = "watch " + subresource + "of objects of kind " + kind
+                }
+                route.Doc(doc)
+            }
 
-			addParams(route, action.Params)
-			routes = append(routes, route)
-		case "PUT": // Update a resource.
-			doc := "replace the specified " + kind
-			if isSubresource {
-				doc = "replace " + subresource + " of the specified " + kind
-			}
-			handler := metrics.InstrumentRouteFunc(..., restfulUpdateResource(updater, ...))
-			route := ws.PUT(action.Path).To(handler).Doc(doc)
+            addParams(route, action.Params)
+            routes = append(routes, route)
+        case "PUT": // Update a resource.
+            doc := "replace the specified " + kind
+            if isSubresource {
+                doc = "replace " + subresource + " of the specified " + kind
+            }
+            handler := metrics.InstrumentRouteFunc(..., restfulUpdateResource(updater, ...))
+            route := ws.PUT(action.Path).To(handler).Doc(doc)
 
-			addParams(route, action.Params)
-			routes = append(routes, route)
-		case "PATCH": // Partially update a resource
-			doc := "partially update the specified " + kind
-			if isSubresource {
-				doc = "partially update " + subresource + " of the specified " + kind
-			}
-			handler := metrics.InstrumentRouteFunc(..., restfulPatchResource(patcher, ...))
-			route := ws.PATCH(action.Path).To(handler).Doc(doc)
-			
-			addParams(route, action.Params)
-			routes = append(routes, route)
-		case "POST": // Create a resource.
-			var handler restful.RouteFunction
-			if isNamedCreater {
-				handler = restfulCreateNamedResource(namedCreater, reqScope, admit)
-			} else {
-				handler = restfulCreateResource(creater, reqScope, admit)
-			}
-			handler = metrics.InstrumentRouteFunc(..., handler)
-			doc := "create" + article + kind
-			if isSubresource {
-				doc = "create " + subresource + " of" + article + kind
-			}
-			route := ws.POST(action.Path).To(handler).Doc(doc)
+            addParams(route, action.Params)
+            routes = append(routes, route)
+        case "PATCH": // Partially update a resource
+            doc := "partially update the specified " + kind
+            if isSubresource {
+                doc = "partially update " + subresource + " of the specified " + kind
+            }
+            handler := metrics.InstrumentRouteFunc(..., restfulPatchResource(patcher, ...))
+            route := ws.PATCH(action.Path).To(handler).Doc(doc)
+            
+            addParams(route, action.Params)
+            routes = append(routes, route)
+        case "POST": // Create a resource.
+            var handler restful.RouteFunction
+            if isNamedCreater {
+                handler = restfulCreateNamedResource(namedCreater, reqScope, admit)
+            } else {
+                handler = restfulCreateResource(creater, reqScope, admit)
+            }
+            handler = metrics.InstrumentRouteFunc(..., handler)
+            doc := "create" + article + kind
+            if isSubresource {
+                doc = "create " + subresource + " of" + article + kind
+            }
+            route := ws.POST(action.Path).To(handler).Doc(doc)
 
-			addParams(route, action.Params)
-			routes = append(routes, route)
-		case "DELETE": // Delete a resource.
-			article := GetArticleForNoun(kind, " ")
-			doc := "delete" + article + kind
-			if isSubresource {
-				doc = "delete " + subresource + " of" + article + kind
-			}
-			deleteReturnType := versionedStatus
-			if deleteReturnsDeletedObject {
-				deleteReturnType = producedObject
-			}
-			handler := metrics.InstrumentRouteFunc(..., restfulDeleteResource(gracefulDeleter, isGracefulDeleter, ...))
-			route := ws.DELETE(action.Path).To(handler).Doc(doc)
-			
-			addParams(route, action.Params)
-			routes = append(routes, route)
-		case "DELETECOLLECTION":
-			doc := "delete collection of " + kind
-			if isSubresource {
-				doc = "delete collection of " + subresource + " of a " + kind
-			}
-			handler := metrics.InstrumentRouteFunc(..., restfulDeleteCollection(collectionDeleter, isCollectionDeleter, ...))
-			route := ws.DELETE(action.Path).To(handler).Doc(doc)
+            addParams(route, action.Params)
+            routes = append(routes, route)
+        case "DELETE": // Delete a resource.
+            article := GetArticleForNoun(kind, " ")
+            doc := "delete" + article + kind
+            if isSubresource {
+                doc = "delete " + subresource + " of" + article + kind
+            }
+            deleteReturnType := versionedStatus
+            if deleteReturnsDeletedObject {
+                deleteReturnType = producedObject
+            }
+            handler := metrics.InstrumentRouteFunc(..., restfulDeleteResource(gracefulDeleter, isGracefulDeleter, ...))
+            route := ws.DELETE(action.Path).To(handler).Doc(doc)
+            
+            addParams(route, action.Params)
+            routes = append(routes, route)
+        case "DELETECOLLECTION":
+            doc := "delete collection of " + kind
+            if isSubresource {
+                doc = "delete collection of " + subresource + " of a " + kind
+            }
+            handler := metrics.InstrumentRouteFunc(..., restfulDeleteCollection(collectionDeleter, isCollectionDeleter, ...))
+            route := ws.DELETE(action.Path).To(handler).Doc(doc)
 
-			addParams(route, action.Params)
-			routes = append(routes, route)
-		// deprecated in 1.11
+            addParams(route, action.Params)
+            routes = append(routes, route)
+        // deprecated in 1.11
         // WATCH替换为LIST watch --fieldSelector=xxx
-		case "WATCH": // Watch a resource.
-			doc := "watch changes to an object of kind " + kind
-			if isSubresource {
-				doc = "watch changes to " + subresource + " of an object of kind " + kind
-			}
-			doc += ". deprecated: use the 'watch' parameter with a list operation instead, filtered to a single item with the 'fieldSelector' parameter."
-			
-			routes = append(routes, route)
-		// deprecated in 1.11
+        case "WATCH": // Watch a resource.
+            doc := "watch changes to an object of kind " + kind
+            if isSubresource {
+                doc = "watch changes to " + subresource + " of an object of kind " + kind
+            }
+            doc += ". deprecated: use the 'watch' parameter with a list operation instead, filtered to a single item with the 'fieldSelector' parameter."
+            
+            routes = append(routes, route)
+        // deprecated in 1.11
         // WATCH替换为LIST watch
-		case "WATCHLIST": // Watch all resources of a kind.
-			doc := "watch individual changes to a list of " + kind
-			if isSubresource {
-				doc = "watch individual changes to a list of " + subresource + " of " + kind
-			}
-			doc += ". deprecated: use the 'watch' parameter with a list operation instead."
-			
-			routes = append(routes, route)
-		case "CONNECT":
-			for _, method := range connecter.ConnectMethods() {
-				connectProducedObject := storageMeta.ProducesObject(method)
-				if connectProducedObject == nil {
-					connectProducedObject = "string"
-				}
-				doc := "connect " + method + " requests to " + kind
-				if isSubresource {
-					doc = "connect " + method + " requests to " + subresource + " of " + kind
-				}
-				handler := metrics.InstrumentRouteFunc(..., restfulConnectResource(connecter, ...))
-				route := ws.Method(method).Path(action.Path).To(handler).Doc(doc)
+        case "WATCHLIST": // Watch all resources of a kind.
+            doc := "watch individual changes to a list of " + kind
+            if isSubresource {
+                doc = "watch individual changes to a list of " + subresource + " of " + kind
+            }
+            doc += ". deprecated: use the 'watch' parameter with a list operation instead."
+            
+            routes = append(routes, route)
+        case "CONNECT":
+            for _, method := range connecter.ConnectMethods() {
+                connectProducedObject := storageMeta.ProducesObject(method)
+                if connectProducedObject == nil {
+                    connectProducedObject = "string"
+                }
+                doc := "connect " + method + " requests to " + kind
+                if isSubresource {
+                    doc = "connect " + method + " requests to " + subresource + " of " + kind
+                }
+                handler := metrics.InstrumentRouteFunc(..., restfulConnectResource(connecter, ...))
+                route := ws.Method(method).Path(action.Path).To(handler).Doc(doc)
 
-				addParams(route, action.Params)
-				routes = append(routes, route)
-			}
-		default:
-			return nil, nil, fmt.Errorf("unrecognized action verb: %s", action.Verb)
-		}
+                addParams(route, action.Params)
+                routes = append(routes, route)
+            }
+        default:
+            return nil, nil, fmt.Errorf("unrecognized action verb: %s", action.Verb)
+        }
 
-		for _, route := range routes {
-			route.Metadata(ROUTE_META_GVK, metav1.GroupVersionKind{
-				Group:   reqScope.Kind.Group,
-				Version: reqScope.Kind.Version,
-				Kind:    reqScope.Kind.Kind,
-			})
-			route.Metadata(ROUTE_META_ACTION, strings.ToLower(action.Verb))
-			ws.Route(route)
-		}
-	}
+        for _, route := range routes {
+            route.Metadata(ROUTE_META_GVK, metav1.GroupVersionKind{
+                Group:   reqScope.Kind.Group,
+                Version: reqScope.Kind.Version,
+                Kind:    reqScope.Kind.Kind,
+            })
+            route.Metadata(ROUTE_META_ACTION, strings.ToLower(action.Verb))
+            ws.Route(route)
+        }
+    }
 }
 
 // 以pods为例分析其存储结构
@@ -1211,305 +1211,305 @@ if resource := "pods"; ResourceEnabled(resource) {
 
 
 type Store struct {
-	// KeyRootFunc returns the root etcd key for this resource; should not
-	// include trailing "/".  This is used for operations that work on the
-	// entire collection (listing and watching).
-	KeyRootFunc func(ctx context.Context) string
+    // KeyRootFunc returns the root etcd key for this resource; should not
+    // include trailing "/".  This is used for operations that work on the
+    // entire collection (listing and watching).
+    KeyRootFunc func(ctx context.Context) string
 
-	// KeyFunc returns the key for a specific object in the collection.
-	// KeyFunc is called for Create/Update/Get/Delete.
-	KeyFunc func(ctx context.Context, name string) (string, error)
+    // KeyFunc returns the key for a specific object in the collection.
+    // KeyFunc is called for Create/Update/Get/Delete.
+    KeyFunc func(ctx context.Context, name string) (string, error)
 
-	// ObjectNameFunc returns the name of an object or an error.
-	ObjectNameFunc func(obj runtime.Object) (string, error)
+    // ObjectNameFunc returns the name of an object or an error.
+    ObjectNameFunc func(obj runtime.Object) (string, error)
 
-	// TTLFunc returns the TTL (time to live) that objects should be persisted
-	// with. The existing parameter is the current TTL or the default for this
-	// operation. The update parameter indicates whether this is an operation
-	// against an existing object.
-	//
-	// Objects that are persisted with a TTL are evicted once the TTL expires.
-	TTLFunc func(obj runtime.Object, existing uint64, update bool) (uint64, error)
+    // TTLFunc returns the TTL (time to live) that objects should be persisted
+    // with. The existing parameter is the current TTL or the default for this
+    // operation. The update parameter indicates whether this is an operation
+    // against an existing object.
+    //
+    // Objects that are persisted with a TTL are evicted once the TTL expires.
+    TTLFunc func(obj runtime.Object, existing uint64, update bool) (uint64, error)
 
-	// PredicateFunc returns a matcher corresponding to the provided labels
-	// and fields. The SelectionPredicate returned should return true if the
-	// object matches the given field and label selectors.
-	PredicateFunc func(label labels.Selector, field fields.Selector) storage.SelectionPredicate
+    // PredicateFunc returns a matcher corresponding to the provided labels
+    // and fields. The SelectionPredicate returned should return true if the
+    // object matches the given field and label selectors.
+    PredicateFunc func(label labels.Selector, field fields.Selector) storage.SelectionPredicate
 
-	// CreateStrategy implements resource-specific behavior during creation.
-	CreateStrategy rest.RESTCreateStrategy
-	// BeginCreate is an optional hook that returns a "transaction-like"
-	// commit/revert function which will be called at the end of the operation,
-	// but before AfterCreate and Decorator, indicating via the argument
-	// whether the operation succeeded.  If this returns an error, the function
-	// is not called.  Almost nobody should use this hook.
-	BeginCreate BeginCreateFunc
-	// AfterCreate implements a further operation to run after a resource is
-	// created and before it is decorated, optional.
-	AfterCreate AfterCreateFunc
+    // CreateStrategy implements resource-specific behavior during creation.
+    CreateStrategy rest.RESTCreateStrategy
+    // BeginCreate is an optional hook that returns a "transaction-like"
+    // commit/revert function which will be called at the end of the operation,
+    // but before AfterCreate and Decorator, indicating via the argument
+    // whether the operation succeeded.  If this returns an error, the function
+    // is not called.  Almost nobody should use this hook.
+    BeginCreate BeginCreateFunc
+    // AfterCreate implements a further operation to run after a resource is
+    // created and before it is decorated, optional.
+    AfterCreate AfterCreateFunc
 
-	// UpdateStrategy implements resource-specific behavior during updates.
-	UpdateStrategy rest.RESTUpdateStrategy
-	// BeginUpdate is an optional hook that returns a "transaction-like"
-	// commit/revert function which will be called at the end of the operation,
-	// but before AfterUpdate and Decorator, indicating via the argument
-	// whether the operation succeeded.  If this returns an error, the function
-	// is not called.  Almost nobody should use this hook.
-	BeginUpdate BeginUpdateFunc
-	// AfterUpdate implements a further operation to run after a resource is
-	// updated and before it is decorated, optional.
-	AfterUpdate AfterUpdateFunc
+    // UpdateStrategy implements resource-specific behavior during updates.
+    UpdateStrategy rest.RESTUpdateStrategy
+    // BeginUpdate is an optional hook that returns a "transaction-like"
+    // commit/revert function which will be called at the end of the operation,
+    // but before AfterUpdate and Decorator, indicating via the argument
+    // whether the operation succeeded.  If this returns an error, the function
+    // is not called.  Almost nobody should use this hook.
+    BeginUpdate BeginUpdateFunc
+    // AfterUpdate implements a further operation to run after a resource is
+    // updated and before it is decorated, optional.
+    AfterUpdate AfterUpdateFunc
 
-	// DeleteStrategy implements resource-specific behavior during deletion.
-	DeleteStrategy rest.RESTDeleteStrategy
-	// AfterDelete implements a further operation to run after a resource is
-	// deleted and before it is decorated, optional.
-	AfterDelete AfterDeleteFunc
-	// ReturnDeletedObject determines whether the Store returns the object
-	// that was deleted. Otherwise, return a generic success status response.
-	ReturnDeletedObject bool
-	// ShouldDeleteDuringUpdate is an optional function to determine whether
-	// an update from existing to obj should result in a delete.
-	// If specified, this is checked in addition to standard finalizer,
-	// deletionTimestamp, and deletionGracePeriodSeconds checks.
-	ShouldDeleteDuringUpdate func(ctx context.Context, key string, obj, existing runtime.Object) bool
+    // DeleteStrategy implements resource-specific behavior during deletion.
+    DeleteStrategy rest.RESTDeleteStrategy
+    // AfterDelete implements a further operation to run after a resource is
+    // deleted and before it is decorated, optional.
+    AfterDelete AfterDeleteFunc
+    // ReturnDeletedObject determines whether the Store returns the object
+    // that was deleted. Otherwise, return a generic success status response.
+    ReturnDeletedObject bool
+    // ShouldDeleteDuringUpdate is an optional function to determine whether
+    // an update from existing to obj should result in a delete.
+    // If specified, this is checked in addition to standard finalizer,
+    // deletionTimestamp, and deletionGracePeriodSeconds checks.
+    ShouldDeleteDuringUpdate func(ctx context.Context, key string, obj, existing runtime.Object) bool
 }
 
 // Get retrieves the item from storage.
 func (e *Store) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
-	obj := e.NewFunc()
-	key, err := e.KeyFunc(ctx, name)
-	
+    obj := e.NewFunc()
+    key, err := e.KeyFunc(ctx, name)
+    
     // 查询etcd
-	e.Storage.Get(ctx, key, storage.GetOptions{ResourceVersion: options.ResourceVersion}, obj);
+    e.Storage.Get(ctx, key, storage.GetOptions{ResourceVersion: options.ResourceVersion}, obj);
 
-	if e.Decorator != nil {
-		e.Decorator(obj)
-	}
-	return obj, nil
+    if e.Decorator != nil {
+        e.Decorator(obj)
+    }
+    return obj, nil
 }
 
 // 列表查询
 // List returns a list of items matching labels and field according to the store's PredicateFunc.
 func (e *Store) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
-	label := labels.Everything()
-	if options != nil && options.LabelSelector != nil {
-		label = options.LabelSelector
-	}
-	field := fields.Everything()
-	if options != nil && options.FieldSelector != nil {
-		field = options.FieldSelector
-	}
-	out := e.ListPredicate(ctx, e.PredicateFunc(label, field), options)
-	
-	if e.Decorator != nil {
-		e.Decorator(out)
-	}
-	return out, nil
+    label := labels.Everything()
+    if options != nil && options.LabelSelector != nil {
+        label = options.LabelSelector
+    }
+    field := fields.Everything()
+    if options != nil && options.FieldSelector != nil {
+        field = options.FieldSelector
+    }
+    out := e.ListPredicate(ctx, e.PredicateFunc(label, field), options)
+    
+    if e.Decorator != nil {
+        e.Decorator(out)
+    }
+    return out, nil
 }
 
 // Create inserts a new item according to the unique key from the object.
 func (e *Store) Create(ctx context.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
-	
-	if e.BeginCreate != nil {
-		fn, err := e.BeginCreate(ctx, obj, options)
-		
-		finishCreate = fn
-		defer func() {
-			finishCreate(ctx, false)
-		}()
-	}
+    
+    if e.BeginCreate != nil {
+        fn, err := e.BeginCreate(ctx, obj, options)
+        
+        finishCreate = fn
+        defer func() {
+            finishCreate(ctx, false)
+        }()
+    }
 
-	rest.BeforeCreate(e.CreateStrategy, ctx, obj);
+    rest.BeforeCreate(e.CreateStrategy, ctx, obj);
 
-	name, err := e.ObjectNameFunc(obj)
-	key, err := e.KeyFunc(ctx, name)
-	qualifiedResource := e.qualifiedResourceFromContext(ctx)
-	ttl, err := e.calculateTTL(obj, 0, false)
-	
-	out := e.NewFunc()
+    name, err := e.ObjectNameFunc(obj)
+    key, err := e.KeyFunc(ctx, name)
+    qualifiedResource := e.qualifiedResourceFromContext(ctx)
+    ttl, err := e.calculateTTL(obj, 0, false)
+    
+    out := e.NewFunc()
 
     // 插入etcd
-	e.Storage.Create(ctx, key, obj, out, ttl, dryrun.IsDryRun(options.DryRun));
+    e.Storage.Create(ctx, key, obj, out, ttl, dryrun.IsDryRun(options.DryRun));
 
-	// The operation has succeeded.  Call the finish function if there is one,
-	// and then make sure the defer doesn't call it again.
-	fn := finishCreate
-	finishCreate = finishNothing
-	fn(ctx, true)
+    // The operation has succeeded.  Call the finish function if there is one,
+    // and then make sure the defer doesn't call it again.
+    fn := finishCreate
+    finishCreate = finishNothing
+    fn(ctx, true)
 
-	if e.AfterCreate != nil {
-		e.AfterCreate(out, options)
-	}
-	if e.Decorator != nil {
-		e.Decorator(out)
-	}
-	return out, nil
+    if e.AfterCreate != nil {
+        e.AfterCreate(out, options)
+    }
+    if e.Decorator != nil {
+        e.Decorator(out)
+    }
+    return out, nil
 }
 
 func (e *Store) Update(ctx context.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc, forceAllowCreate bool, options *metav1.UpdateOptions) (runtime.Object, bool, error) {
-	key, err := e.KeyFunc(ctx, name)
+    key, err := e.KeyFunc(ctx, name)
 
-	out := e.NewFunc()
-	// deleteObj is only used in case a deletion is carried out
-	var deleteObj runtime.Object
+    out := e.NewFunc()
+    // deleteObj is only used in case a deletion is carried out
+    var deleteObj runtime.Object
 
-	e.Storage.GuaranteedUpdate(ctx, key, out, true, storagePreconditions, func(existing runtime.Object, res storage.ResponseMeta) (runtime.Object, *uint64, error) {
-		existingResourceVersion, err := e.Storage.Versioner().ObjectResourceVersion(existing)
-		
-		// Given the existing object, get the new object
-		obj, err := objInfo.UpdatedObject(ctx, existing)
+    e.Storage.GuaranteedUpdate(ctx, key, out, true, storagePreconditions, func(existing runtime.Object, res storage.ResponseMeta) (runtime.Object, *uint64, error) {
+        existingResourceVersion, err := e.Storage.Versioner().ObjectResourceVersion(existing)
+        
+        // Given the existing object, get the new object
+        obj, err := objInfo.UpdatedObject(ctx, existing)
 
         newResourceVersion, err := e.Storage.Versioner().ObjectResourceVersion(obj)
         doUnconditionalUpdate := newResourceVersion == 0 && e.UpdateStrategy.AllowUnconditionalUpdate()
 
         // 不存在则插入
-		if existingResourceVersion == 0 {
-			if e.BeginCreate != nil {
-				fn, err := e.BeginCreate(ctx, obj, newCreateOptionsFromUpdateOptions(options))
-				finishCreate = fn
-				defer func() {
-					finishCreate(ctx, false)
-				}()
-			}
+        if existingResourceVersion == 0 {
+            if e.BeginCreate != nil {
+                fn, err := e.BeginCreate(ctx, obj, newCreateOptionsFromUpdateOptions(options))
+                finishCreate = fn
+                defer func() {
+                    finishCreate(ctx, false)
+                }()
+            }
 
-			creating = true
-			creatingObj = obj
-			rest.BeforeCreate(e.CreateStrategy, ctx, obj);
-		
-			ttl, err := e.calculateTTL(obj, 0, false)
+            creating = true
+            creatingObj = obj
+            rest.BeforeCreate(e.CreateStrategy, ctx, obj);
+        
+            ttl, err := e.calculateTTL(obj, 0, false)
 
-			fn := finishCreate
-			finishCreate = finishNothing
-			fn(ctx, true)
+            fn := finishCreate
+            finishCreate = finishNothing
+            fn(ctx, true)
 
-			return obj, &ttl, nil
-		}
+            return obj, &ttl, nil
+        }
 
-		creating = false
-		creatingObj = nil
-		if doUnconditionalUpdate {
+        creating = false
+        creatingObj = nil
+        if doUnconditionalUpdate {
             // 无条件更新
-			// Update the object's resource version to match the latest
-			// storage object's resource version.
-			err = e.Storage.Versioner().UpdateObject(obj, res.ResourceVersion)
-		} else {
+            // Update the object's resource version to match the latest
+            // storage object's resource version.
+            err = e.Storage.Versioner().UpdateObject(obj, res.ResourceVersion)
+        } else {
             // 对比版本号: 乐观锁
-			if newResourceVersion != existingResourceVersion {
-				return nil, nil, apierrors.NewConflict(qualifiedResource, name, fmt.Errorf(OptimisticLockErrorMsg))
-			}
-		}
+            if newResourceVersion != existingResourceVersion {
+                return nil, nil, apierrors.NewConflict(qualifiedResource, name, fmt.Errorf(OptimisticLockErrorMsg))
+            }
+        }
 
-		var finishUpdate FinishFunc = finishNothing
+        var finishUpdate FinishFunc = finishNothing
 
-		if e.BeginUpdate != nil {
-			fn, err := e.BeginUpdate(ctx, obj, existing, options)
-			
-			finishUpdate = fn
-			defer func() {
-				finishUpdate(ctx, false)
-			}()
-		}
+        if e.BeginUpdate != nil {
+            fn, err := e.BeginUpdate(ctx, obj, existing, options)
+            
+            finishUpdate = fn
+            defer func() {
+                finishUpdate(ctx, false)
+            }()
+        }
 
-		rest.BeforeUpdate(e.UpdateStrategy, ctx, obj, existing); 
-		
-		ttl, err := e.calculateTTL(obj, res.TTL, true)
+        rest.BeforeUpdate(e.UpdateStrategy, ctx, obj, existing); 
+        
+        ttl, err := e.calculateTTL(obj, res.TTL, true)
 
-		fn := finishUpdate
-		finishUpdate = finishNothing
-		fn(ctx, true)
+        fn := finishUpdate
+        finishUpdate = finishNothing
+        fn(ctx, true)
 
-		if int64(ttl) != res.TTL {
-			return obj, &ttl, nil
-		}
-		return obj, nil, nil
-	}, dryrun.IsDryRun(options.DryRun), nil)
+        if int64(ttl) != res.TTL {
+            return obj, &ttl, nil
+        }
+        return obj, nil, nil
+    }, dryrun.IsDryRun(options.DryRun), nil)
 
-	if creating {
-		if e.AfterCreate != nil {
-			e.AfterCreate(out, newCreateOptionsFromUpdateOptions(options))
-		}
-	} else {
-		if e.AfterUpdate != nil {
-			e.AfterUpdate(out, options)
-		}
-	}
-	if e.Decorator != nil {
-		e.Decorator(out)
-	}
-	return out, creating, nil
+    if creating {
+        if e.AfterCreate != nil {
+            e.AfterCreate(out, newCreateOptionsFromUpdateOptions(options))
+        }
+    } else {
+        if e.AfterUpdate != nil {
+            e.AfterUpdate(out, options)
+        }
+    }
+    if e.Decorator != nil {
+        e.Decorator(out)
+    }
+    return out, creating, nil
 }
 
 // Delete removes the item from storage.
 // options can be mutated by rest.BeforeDelete due to a graceful deletion strategy.
 func (e *Store) Delete(ctx context.Context, name string, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
-	key, err := e.KeyFunc(ctx, name)
-	obj := e.NewFunc()
+    key, err := e.KeyFunc(ctx, name)
+    obj := e.NewFunc()
 
     // 先查询
-	e.Storage.Get(ctx, key, storage.GetOptions{}, obj)
+    e.Storage.Get(ctx, key, storage.GetOptions{}, obj)
 
-	// support older consumers of delete by treating "nil" as delete immediately
-	if options == nil {
-		options = metav1.NewDeleteOptions(0)
-	}
-	var preconditions storage.Preconditions
-	if options.Preconditions != nil {
-		preconditions.UID = options.Preconditions.UID
-		preconditions.ResourceVersion = options.Preconditions.ResourceVersion
-	}
-	graceful, pendingGraceful, err := rest.BeforeDelete(e.DeleteStrategy, ctx, obj, options)
-	
-	// this means finalizers cannot be updated via DeleteOptions if a deletion is already pending
-	if pendingGraceful {
-		out, err := e.finalizeDelete(ctx, obj, false, options)
-		return out, false, err
-	}
+    // support older consumers of delete by treating "nil" as delete immediately
+    if options == nil {
+        options = metav1.NewDeleteOptions(0)
+    }
+    var preconditions storage.Preconditions
+    if options.Preconditions != nil {
+        preconditions.UID = options.Preconditions.UID
+        preconditions.ResourceVersion = options.Preconditions.ResourceVersion
+    }
+    graceful, pendingGraceful, err := rest.BeforeDelete(e.DeleteStrategy, ctx, obj, options)
+    
+    // this means finalizers cannot be updated via DeleteOptions if a deletion is already pending
+    if pendingGraceful {
+        out, err := e.finalizeDelete(ctx, obj, false, options)
+        return out, false, err
+    }
 
     // 再删除
-	// delete immediately, or no graceful deletion supported
-	out = e.NewFunc()
-	e.Storage.Delete(ctx, key, out, &preconditions, storage.ValidateObjectFunc(deleteValidation), dryrun.IsDryRun(options.DryRun), nil)
+    // delete immediately, or no graceful deletion supported
+    out = e.NewFunc()
+    e.Storage.Delete(ctx, key, out, &preconditions, storage.ValidateObjectFunc(deleteValidation), dryrun.IsDryRun(options.DryRun), nil)
 
-	out, err = e.finalizeDelete(ctx, out, true, options)
-	return out, true, err
+    out, err = e.finalizeDelete(ctx, out, true, options)
+    return out, true, err
 }
 
 func (e *Store) Watch(ctx context.Context, options *metainternalversion.ListOptions) (watch.Interface, error) {
-	label := labels.Everything()
-	if options != nil && options.LabelSelector != nil {
-		label = options.LabelSelector
-	}
-	field := fields.Everything()
-	if options != nil && options.FieldSelector != nil {
-		field = options.FieldSelector
-	}
-	predicate := e.PredicateFunc(label, field)
+    label := labels.Everything()
+    if options != nil && options.LabelSelector != nil {
+        label = options.LabelSelector
+    }
+    field := fields.Everything()
+    if options != nil && options.FieldSelector != nil {
+        field = options.FieldSelector
+    }
+    predicate := e.PredicateFunc(label, field)
 
-	resourceVersion := ""
-	if options != nil {
-		resourceVersion = options.ResourceVersion
-		predicate.AllowWatchBookmarks = options.AllowWatchBookmarks
-	}
-	return e.WatchPredicate(ctx, predicate, resourceVersion)
+    resourceVersion := ""
+    if options != nil {
+        resourceVersion = options.ResourceVersion
+        predicate.AllowWatchBookmarks = options.AllowWatchBookmarks
+    }
+    return e.WatchPredicate(ctx, predicate, resourceVersion)
 }
 
 // WatchPredicate starts a watch for the items that matches.
 func (e *Store) WatchPredicate(ctx context.Context, p storage.SelectionPredicate, resourceVersion string) (watch.Interface, error) {
-	storageOpts := storage.ListOptions{ResourceVersion: resourceVersion, Predicate: p, Recursive: true}
+    storageOpts := storage.ListOptions{ResourceVersion: resourceVersion, Predicate: p, Recursive: true}
 
-	key := e.KeyRootFunc(ctx)
-	if name, ok := p.MatchesSingle(); ok {
-		if k, err := e.KeyFunc(ctx, name); err == nil {
-			key = k
-			storageOpts.Recursive = false
-		}
-		// if we cannot extract a key based on the current context, the
-		// optimization is skipped
-	}
+    key := e.KeyRootFunc(ctx)
+    if name, ok := p.MatchesSingle(); ok {
+        if k, err := e.KeyFunc(ctx, name); err == nil {
+            key = k
+            storageOpts.Recursive = false
+        }
+        // if we cannot extract a key based on the current context, the
+        // optimization is skipped
+    }
 
     // 持续监听变更
-	w, err := e.Storage.Watch(ctx, key, storageOpts)
+    w, err := e.Storage.Watch(ctx, key, storageOpts)
     {
         return s.watcher.Watch(...)
         {
@@ -1581,60 +1581,60 @@ func (e *Store) WatchPredicate(ctx context.Context, p storage.SelectionPredicate
             return wc
         }
     }
-	
-	if e.Decorator != nil {
-		return newDecoratedWatcher(ctx, w, e.Decorator), nil
-	}
-	return w, nil
+    
+    if e.Decorator != nil {
+        return newDecoratedWatcher(ctx, w, e.Decorator), nil
+    }
+    return w, nil
 }
 
 
 // PodStorage includes storage for pods and all sub resources
 type PodStorage struct {
-	Pod                 *REST
-	Binding             *BindingREST
-	LegacyBinding       *LegacyBindingREST
-	Eviction            *EvictionREST
-	Status              *StatusREST
-	EphemeralContainers *EphemeralContainersREST
-	Log                 *podrest.LogREST
-	Proxy               *podrest.ProxyREST
-	Exec                *podrest.ExecREST
-	Attach              *podrest.AttachREST
-	PortForward         *podrest.PortForwardREST
+    Pod                 *REST
+    Binding             *BindingREST
+    LegacyBinding       *LegacyBindingREST
+    Eviction            *EvictionREST
+    Status              *StatusREST
+    EphemeralContainers *EphemeralContainersREST
+    Log                 *podrest.LogREST
+    Proxy               *podrest.ProxyREST
+    Exec                *podrest.ExecREST
+    Attach              *podrest.AttachREST
+    PortForward         *podrest.PortForwardREST
 }
 
 // REST implements a RESTStorage for pods
 // REST继承genericregistry.Store
 type REST struct {
-	*genericregistry.Store
-	proxyTransport http.RoundTripper
+    *genericregistry.Store
+    proxyTransport http.RoundTripper
 }
 
 // NewStorage returns a RESTStorage object that will work against pods.
 func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGetter, proxyTransport http.RoundTripper, podDisruptionBudgetClient policyclient.PodDisruptionBudgetsGetter) (PodStorage, error) {
 
-	store := &genericregistry.Store{
-		NewFunc:                  func() runtime.Object { return &api.Pod{} },
-		NewListFunc:              func() runtime.Object { return &api.PodList{} },
-		PredicateFunc:            registrypod.MatchPod,
-		DefaultQualifiedResource: api.Resource("pods"),
+    store := &genericregistry.Store{
+        NewFunc:                  func() runtime.Object { return &api.Pod{} },
+        NewListFunc:              func() runtime.Object { return &api.PodList{} },
+        PredicateFunc:            registrypod.MatchPod,
+        DefaultQualifiedResource: api.Resource("pods"),
 
-		CreateStrategy:      registrypod.Strategy,
-		UpdateStrategy:      registrypod.Strategy,
-		DeleteStrategy:      registrypod.Strategy,
-		ResetFieldsStrategy: registrypod.Strategy,
-		ReturnDeletedObject: true,
+        CreateStrategy:      registrypod.Strategy,
+        UpdateStrategy:      registrypod.Strategy,
+        DeleteStrategy:      registrypod.Strategy,
+        ResetFieldsStrategy: registrypod.Strategy,
+        ReturnDeletedObject: true,
 
-		TableConvertor: printerstorage.TableConvertor{TableGenerator: printers.NewTableGenerator().With(printersinternal.AddHandlers)},
-	}
-	options := &generic.StoreOptions{
-		RESTOptions: optsGetter,
-		AttrFunc:    registrypod.GetAttrs,
-		TriggerFunc: map[string]storage.IndexerFunc{"spec.nodeName": registrypod.NodeNameTriggerFunc},
-		Indexers:    registrypod.Indexers(),
-	}
-	store.CompleteWithOptions(options);
+        TableConvertor: printerstorage.TableConvertor{TableGenerator: printers.NewTableGenerator().With(printersinternal.AddHandlers)},
+    }
+    options := &generic.StoreOptions{
+        RESTOptions: optsGetter,
+        AttrFunc:    registrypod.GetAttrs,
+        TriggerFunc: map[string]storage.IndexerFunc{"spec.nodeName": registrypod.NodeNameTriggerFunc},
+        Indexers:    registrypod.Indexers(),
+    }
+    store.CompleteWithOptions(options);
     {
         if e.Storage.Storage == nil {
             e.Storage.Codec = opts.StorageConfig.Codec
@@ -1681,26 +1681,26 @@ func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGet
         }
     }
 
-	statusStore := *store
-	statusStore.UpdateStrategy = registrypod.StatusStrategy
-	statusStore.ResetFieldsStrategy = registrypod.StatusStrategy
-	ephemeralContainersStore := *store
-	ephemeralContainersStore.UpdateStrategy = registrypod.EphemeralContainersStrategy
+    statusStore := *store
+    statusStore.UpdateStrategy = registrypod.StatusStrategy
+    statusStore.ResetFieldsStrategy = registrypod.StatusStrategy
+    ephemeralContainersStore := *store
+    ephemeralContainersStore.UpdateStrategy = registrypod.EphemeralContainersStrategy
 
-	bindingREST := &BindingREST{store: store}
-	return PodStorage{
-		Pod:                 &REST{store, proxyTransport},
-		Binding:             &BindingREST{store: store},
-		LegacyBinding:       &LegacyBindingREST{bindingREST},
-		Eviction:            newEvictionStorage(&statusStore, podDisruptionBudgetClient),
-		Status:              &StatusREST{store: &statusStore},
-		EphemeralContainers: &EphemeralContainersREST{store: &ephemeralContainersStore},
-		Log:                 &podrest.LogREST{Store: store, KubeletConn: k},
-		Proxy:               &podrest.ProxyREST{Store: store, ProxyTransport: proxyTransport},
-		Exec:                &podrest.ExecREST{Store: store, KubeletConn: k},
-		Attach:              &podrest.AttachREST{Store: store, KubeletConn: k},
-		PortForward:         &podrest.PortForwardREST{Store: store, KubeletConn: k},
-	}, nil
+    bindingREST := &BindingREST{store: store}
+    return PodStorage{
+        Pod:                 &REST{store, proxyTransport},
+        Binding:             &BindingREST{store: store},
+        LegacyBinding:       &LegacyBindingREST{bindingREST},
+        Eviction:            newEvictionStorage(&statusStore, podDisruptionBudgetClient),
+        Status:              &StatusREST{store: &statusStore},
+        EphemeralContainers: &EphemeralContainersREST{store: &ephemeralContainersStore},
+        Log:                 &podrest.LogREST{Store: store, KubeletConn: k},
+        Proxy:               &podrest.ProxyREST{Store: store, ProxyTransport: proxyTransport},
+        Exec:                &podrest.ExecREST{Store: store, KubeletConn: k},
+        Attach:              &podrest.AttachREST{Store: store, KubeletConn: k},
+        PortForward:         &podrest.PortForwardREST{Store: store, KubeletConn: k},
+    }, nil
 }
 
 ```
