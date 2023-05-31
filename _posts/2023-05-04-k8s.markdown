@@ -479,6 +479,163 @@ Cluster DNS is based on the open-source `CoreDNS` project (https://coredns.io/).
 
 ## kube-apiserver
 
+`kube-apiserver`采用`go-restfull`框架实现`restful`风格的api
+
+![restful](/assets/images/2023-05-04/restful.png)
+
+`go-restfull`核心概念
+
+![go-restful](/assets/images/2023-05-04/go-restful.png)
+
+
+`go-restfull` [demo](https://github.com/emicklei/go-restful/blob/v3/examples/hello/restful-hello-world.go)
+
+```go
+package main
+
+import (
+	"io"
+	"log"
+	"net/http"
+
+	restful "github.com/emicklei/go-restful/v3"
+)
+
+// This example shows the minimal code needed to get a restful.WebService working.
+//
+// GET http://localhost:8080/hello
+
+func main() {
+	ws := new(restful.WebService)
+	ws.Route(ws.GET("/hello").To(hello))
+	restful.Add(ws)
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func hello(req *restful.Request, resp *restful.Response) {
+	io.WriteString(resp, "world")
+}
+```
+
+`go-restfull`处理逻辑
+
+```go
+func init() {
+	DefaultContainer = NewContainer()
+    {
+        return &Container{
+            webServices:            []*WebService{},
+            ServeMux:               http.NewServeMux(),
+            isRegisteredOnRoot:     false,
+            containerFilters:       []FilterFunction{},
+            doNotRecover:           true,
+            recoverHandleFunc:      logStackOnRecover,
+            serviceErrorHandleFunc: writeServiceError,
+            router:                 CurlyRouter{},
+            contentEncodingEnabled: false}
+    }
+
+	DefaultContainer.ServeMux = http.DefaultServeMux
+}
+
+func main() {
+	ws := new(restful.WebService)
+	ws.Route(ws.GET("/hello").To(hello))
+
+    // 把ws添加到DefaultContainer
+	restful.Add(ws)
+    {
+        DefaultContainer.Add(service)
+        {
+            c.addHandler(service, c.ServeMux)
+            {
+                pattern := fixedPrefixPath(service.RootPath())
+                
+                // 由Container统一派发给ws处理请求
+                serveMux.HandleFunc(pattern, c.dispatch/*handler*/)
+                {
+                    mux.Handle(pattern, HandlerFunc(handler))
+                    {
+                        // 在路由表中记录每个uri的handler
+                        e := muxEntry{h: handler, pattern: pattern}
+                        mux.m[pattern] = e
+                    }
+                }
+            }
+            c.webServices = append(c.webServices, service)
+        }
+    }
+
+	http.ListenAndServe(":8080", nil/*handler*/)
+    {
+        server := &Server{Addr: addr, Handler: handler}
+	    server.ListenAndServe()
+        {
+            ln := net.Listen("tcp", addr)
+            srv.Serve(ln)
+            {
+                for {
+                    // 收到请求
+                    rw := l.Accept()
+                    c := srv.newConn(rw)
+                    {
+                        return &conn{
+                            server: srv,
+                            rwc:    rw,
+                        }
+                    }
+
+                    // 启动一个协程处理请求
+                    go c.serve(connCtx)
+                    {
+                        // 解析http请求
+                        w := c.readRequest(ctx)
+                        serverHandler{c.server}.ServeHTTP(w, w.req)
+                        {
+                            handler := sh.srv.Handler
+                            // 默认handler对应DefaultContainer.ServeMux
+                            if handler == nil {
+                                handler = DefaultServeMux
+                            }
+
+                            handler.ServeHTTP(rw, req)
+                            {
+                                // 根据req选择路由表的handler
+                                h, _ := mux.Handler(r)
+                                {
+                                    host := stripHostPort(r.Host)
+	                                path := cleanPath(r.URL.Path)
+                                    return mux.handler(host, r.URL.Path /*path*/)
+                                    {
+                                        h, pattern = mux.match(path)
+                                        {
+                                            v, ok := mux.m[path]
+                                            return v.h, v.pattern
+                                        }
+                                    }
+                                }
+
+                                // 统一转给Container.dispatch派发请求
+	                            h.ServeHTTP(w, r)
+                                {
+                                    // 再次路由，默认CurlyRouter
+                                    webService, route = c.router.SelectRoute(c.webServices, httpRequest)
+                                    route.Function(wrappedRequest, wrappedResponse)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+`kube-apiserver`启动过程，重点关注设置`go-restful`路由表的过程
+
 ```go
 
 func NewAPIServerCommand() *cobra.Command {
@@ -501,33 +658,69 @@ func NewAPIServerCommand() *cobra.Command {
                         kubeAPIServer := kubeAPIServerConfig.Complete().New(delegateAPIServer)
                         {
                             s := c.GenericConfig.New("kube-apiserver", delegationTarget)
+                            {
+                                // handler处理链: 在handler之前会添加认证授权限流等处理逻辑
+                                handlerChainBuilder := func(handler http.Handler) http.Handler {
+                                    return c.BuildHandlerChainFunc(handler, c.Config)
+                                }
+
+                                apiServerHandler := NewAPIServerHandler(..., handlerChainBuilder, ...)
+                                {
+                                    // 用于注册非restful的path
+                                    nonGoRestfulMux := mux.NewPathRecorderMux(name)
+                                    
+                                    // 创建Container
+                                    gorestfulContainer := restful.NewContainer()
+	                                gorestfulContainer.ServeMux = http.NewServeMux()
+
+                                    director := director{
+                                        name:               name,
+                                        goRestfulContainer: gorestfulContainer,
+                                        nonGoRestfulMux:    nonGoRestfulMux,
+                                    }
+
+                                    return &APIServerHandler{
+                                        FullHandlerChain:   handlerChainBuilder(director),
+                                        GoRestfulContainer: gorestfulContainer,
+                                        NonGoRestfulMux:    nonGoRestfulMux,
+                                        Director:           director,
+                                    }
+                                }
+
+                                s := &GenericAPIServer{
+                                    Handler:                    apiServerHandler,
+                                }
+
+                                installAPI(s, c.Config)
+                                {
+                                    routes.Version{Version: c.Version}.Install(s.Handler.GoRestfulContainer /*c*/)
+                                    {
+                                        // 注册/version及其handler
+                                        versionWS := new(restful.WebService)
+                                        versionWS.Path("/version")
+                                        versionWS.Route(
+                                            versionWS.GET("/").To(v.handleVersion).
+                                                Operation("getCodeVersion").
+                                                Produces(restful.MIME_JSON).
+                                                Consumes(restful.MIME_JSON).
+                                                Writes(version.Info{}))
+
+                                        c.Add(versionWS)
+                                    }
+                                }
+                            }
 
                             m := &Instance{
                                 GenericAPIServer:          s,
-                                ClusterAuthenticationInfo: c.ExtraConfig.ClusterAuthenticationInfo,
                             }
 
                             m.InstallLegacyAPI(&c, c.GenericConfig.RESTOptionsGetter)
                             {
-                                legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{
-                                    StorageFactory:              c.ExtraConfig.StorageFactory,
-                                    ProxyTransport:              c.ExtraConfig.ProxyTransport,
-                                    KubeletClientConfig:         c.ExtraConfig.KubeletClientConfig,
-                                    EventTTL:                    c.ExtraConfig.EventTTL,
-                                    ServiceIPRange:              c.ExtraConfig.ServiceIPRange,
-                                    SecondaryServiceIPRange:     c.ExtraConfig.SecondaryServiceIPRange,
-                                    ServiceNodePortRange:        c.ExtraConfig.ServiceNodePortRange,
-                                    LoopbackClientConfig:        c.GenericConfig.LoopbackClientConfig,
-                                    ServiceAccountIssuer:        c.ExtraConfig.ServiceAccountIssuer,
-                                    ExtendExpiration:            c.ExtraConfig.ExtendExpiration,
-                                    ServiceAccountMaxExpiration: c.ExtraConfig.ServiceAccountMaxExpiration,
-                                    APIAudiences:                c.GenericConfig.Authentication.APIAudiences,
-                                }
+                                legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{...}
 
                                 legacyRESTStorage, apiGroupInfo := legacyRESTStorageProvider.NewLegacyRESTStorage(...)
                                 {
                                     apiGroupInfo := genericapiserver.APIGroupInfo{
-                                        PrioritizedVersions:          legacyscheme.Scheme.PrioritizedVersionsForGroup(""),
                                         VersionedResourcesStorageMap: map[string]map[string]rest.Storage{},
                                         Scheme:                       legacyscheme.Scheme,
                                         ParameterCodec:               legacyscheme.ParameterCodec,
@@ -537,7 +730,7 @@ func NewAPIServerCommand() *cobra.Command {
                                     // apiserver以资源对象为核心构造restful风格的api
                                     // 每个资源相当于rdb中的表的概念，存储在etcd中
                                     storage := map[string]rest.Storage{}
-                                    if resource := "pods"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "pods"; ResourceEnabled(resource) {
                                         storage[resource] = podStorage.Pod
                                         storage[resource+"/attach"] = podStorage.Attach
                                         storage[resource+"/status"] = podStorage.Status
@@ -552,15 +745,15 @@ func NewAPIServerCommand() *cobra.Command {
                                         storage[resource+"/ephemeralcontainers"] = podStorage.EphemeralContainers
 
                                     }
-                                    if resource := "bindings"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "bindings"; ResourceEnabled(resource) {
                                         storage[resource] = podStorage.LegacyBinding
                                     }
 
-                                    if resource := "podtemplates"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "podtemplates"; ResourceEnabled(resource) {
                                         storage[resource] = podTemplateStorage
                                     }
 
-                                    if resource := "replicationcontrollers"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "replicationcontrollers"; ResourceEnabled(resource) {
                                         storage[resource] = controllerStorage.Controller
                                         storage[resource+"/status"] = controllerStorage.Status
                                         if legacyscheme.Scheme.IsVersionRegistered(schema.GroupVersion{Group: "autoscaling", Version: "v1"}) {
@@ -568,90 +761,63 @@ func NewAPIServerCommand() *cobra.Command {
                                         }
                                     }
 
-                                    if resource := "services"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "services"; ResourceEnabled(resource) {
                                         storage[resource] = serviceRESTStorage
                                         storage[resource+"/proxy"] = serviceRESTProxy
                                         storage[resource+"/status"] = serviceStatusStorage
                                     }
 
-                                    if resource := "endpoints"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "endpoints"; ResourceEnabled(resource) {
                                         storage[resource] = endpointsStorage
                                     }
 
-                                    if resource := "nodes"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "nodes"; ResourceEnabled(resource) {
                                         storage[resource] = nodeStorage.Node
                                         storage[resource+"/proxy"] = nodeStorage.Proxy
                                         storage[resource+"/status"] = nodeStorage.Status
                                     }
 
-                                    if resource := "events"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
-                                        storage[resource] = eventStorage
-                                    }
-
-                                    if resource := "limitranges"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
-                                        storage[resource] = limitRangeStorage
-                                    }
-
-                                    if resource := "resourcequotas"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
-                                        storage[resource] = resourceQuotaStorage
-                                        storage[resource+"/status"] = resourceQuotaStatusStorage
-                                    }
-
-                                    if resource := "namespaces"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "namespaces"; ResourceEnabled(resource) {
                                         storage[resource] = namespaceStorage
                                         storage[resource+"/status"] = namespaceStatusStorage
                                         storage[resource+"/finalize"] = namespaceFinalizeStorage
                                     }
 
-                                    if resource := "secrets"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
-                                        storage[resource] = secretStorage
-                                    }
-
-                                    if resource := "serviceaccounts"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
-                                        storage[resource] = serviceAccountStorage
-                                        if serviceAccountStorage.Token != nil {
-                                            storage[resource+"/token"] = serviceAccountStorage.Token
-                                        }
-                                    }
-
-                                    if resource := "persistentvolumes"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "persistentvolumes"; ResourceEnabled(resource) {
                                         storage[resource] = persistentVolumeStorage
                                         storage[resource+"/status"] = persistentVolumeStatusStorage
                                     }
 
-                                    if resource := "persistentvolumeclaims"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
-                                        storage[resource] = persistentVolumeClaimStorage
-                                        storage[resource+"/status"] = persistentVolumeClaimStatusStorage
-                                    }
-
-                                    if resource := "configmaps"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
+                                    if resource := "configmaps"; ResourceEnabled(resource) {
                                         storage[resource] = configMapStorage
-                                    }
-
-                                    if resource := "componentstatuses"; apiResourceConfigSource.ResourceEnabled(corev1.SchemeGroupVersion.WithResource(resource)) {
-                                        storage[resource] = componentstatus.NewStorage(componentStatusStorage{c.StorageFactory}.serversToValidate)
                                     }
 
                                     apiGroupInfo.VersionedResourcesStorageMap["v1"] = storage
                                 }
 
-                                m.GenericAPIServer.InstallLegacyAPIGroup(genericapiserver.DefaultLegacyAPIPrefix, &apiGroupInfo)
+                                m.GenericAPIServer.InstallLegacyAPIGroup(..., &apiGroupInfo)
                                 {
-                                    s.installAPIResources(apiPrefix, apiGroupInfo, openAPIModels)
+                                    s.installAPIResources(apiPrefix, apiGroupInfo, ...)
                                     {
                                         for _, groupVersion := range apiGroupInfo.PrioritizedVersions {
                                             apiGroupVersion := s.getAPIGroupVersion(apiGroupInfo, groupVersion, apiPrefix)
-                                            apiGroupVersion.InstallREST(s.Handler.GoRestfulContainer)
+
+                                            apiGroupVersion.InstallREST(s.Handler.GoRestfulContainer /*container*/)
                                             {
                                                 prefix := path.Join(g.Root, g.GroupVersion.Group, g.GroupVersion.Version)
+
                                                 installer := &APIInstaller{
                                                     group:             g,
                                                     prefix:            prefix,
                                                     minRequestTimeout: g.MinRequestTimeout,
                                                 }
 
-                                                installer.Install()
+                                                // 把返回的ws加入container
+                                                _, _, ws, _ := installer.Install()
                                                 {
+                                                    // 创建ws
+                                                    ws := a.newWebService()
+
                                                     paths := make([]string, len(a.group.Storage))
                                                     var i int = 0
                                                     for path := range a.group.Storage {
@@ -660,416 +826,40 @@ func NewAPIServerCommand() *cobra.Command {
                                                     }
                                                     sort.Strings(paths)
 
-                                                    // 每个资源对象根据实现的接口来决定支持的访问方式
+                                                    // 每个path生成ws中的一个router
                                                     for _, path := range paths {
                                                         a.registerResourceHandlers(path, a.group.Storage[path], ws)
-                                                        {
-                                                            resource, subresource := splitSubresource(path)
-                                                            group, version := a.group.GroupVersion.Group, a.group.GroupVersion.Version
-                                                            namespaceScoped = scoper.NamespaceScoped()
-
-                                                            // what verbs are supported by the storage, used to know what verbs we support per path
-                                                            // POST: New()/Create()
-                                                            creater, isCreater := storage.(rest.Creater)
-                                                            namedCreater, isNamedCreater := storage.(rest.NamedCreater)
-                                                            // LIST: NewList()/List()
-                                                            lister, isLister := storage.(rest.Lister)
-                                                            // GET: Get()
-                                                            getter, isGetter := storage.(rest.Getter)
-                                                            getterWithOptions, isGetterWithOptions := storage.(rest.GetterWithOptions)
-                                                            // DELETE: Delete()
-                                                            gracefulDeleter, isGracefulDeleter := storage.(rest.GracefulDeleter)
-                                                            collectionDeleter, isCollectionDeleter := storage.(rest.CollectionDeleter)
-                                                            // PUT: New()/Update()
-                                                            updater, isUpdater := storage.(rest.Updater)
-                                                            // PATCH: Getter/Updater
-                                                            patcher, isPatcher := storage.(rest.Patcher)
-                                                            // WATCH: Watch()
-                                                            watcher, isWatcher := storage.(rest.Watcher)
-                                                            // CONNECT: Connect()
-                                                            connecter, isConnecter := storage.(rest.Connecter)
-                                                            storageMeta, isMetadata := storage.(rest.StorageMetadata)
-                                                            storageVersionProvider, isStorageVersionProvider := storage.(rest.StorageVersionProvider)
-
-                                                            resourcePath := resource
-                                                            resourceParams := params
-                                                            itemPath := resourcePath + "/{name}"
-                                                            nameParams := append(params, nameParam)
-                                                            proxyParams := append(nameParams, pathParam)
-                                                            suffix := ""
-                                                            if isSubresource {
-                                                                suffix = "/" + subresource
-                                                                itemPath = itemPath + suffix
-                                                                resourcePath = itemPath
-                                                                resourceParams = nameParams
-                                                            }
-                                                            apiResource.Name = path
-                                                            apiResource.Namespaced = false
-                                                            apiResource.Kind = resourceKind
-                                                            namer := handlers.ContextBasedNaming{
-                                                                Namer:         a.group.Namer,
-                                                                ClusterScoped: true,
-                                                            }
-
-                                                            // Handler for standard REST verbs (GET, PUT, POST and DELETE).
-                                                            // Add actions at the resource path: /api/apiVersion/resource
-                                                            actions = appendIf(actions, action{"LIST", resourcePath, resourceParams, namer, false}, isLister)
-                                                            actions = appendIf(actions, action{"POST", resourcePath, resourceParams, namer, false}, isCreater)
-                                                            actions = appendIf(actions, action{"DELETECOLLECTION", resourcePath, resourceParams, namer, false}, isCollectionDeleter)
-                                                            // DEPRECATED in 1.11
-                                                            actions = appendIf(actions, action{"WATCHLIST", "watch/" + resourcePath, resourceParams, namer, false}, allowWatchList)
-
-                                                            // Add actions at the item path: /api/apiVersion/resource/{name}
-                                                            actions = appendIf(actions, action{"GET", itemPath, nameParams, namer, false}, isGetter)
-                                                            if getSubpath {
-                                                                actions = appendIf(actions, action{"GET", itemPath + "/{path:*}", proxyParams, namer, false}, isGetter)
-                                                            }
-                                                            actions = appendIf(actions, action{"PUT", itemPath, nameParams, namer, false}, isUpdater)
-                                                            actions = appendIf(actions, action{"PATCH", itemPath, nameParams, namer, false}, isPatcher)
-                                                            actions = appendIf(actions, action{"DELETE", itemPath, nameParams, namer, false}, isGracefulDeleter)
-                                                            // DEPRECATED in 1.11
-                                                            actions = appendIf(actions, action{"WATCH", "watch/" + itemPath, nameParams, namer, false}, isWatcher)
-                                                            actions = appendIf(actions, action{"CONNECT", itemPath, nameParams, namer, false}, isConnecter)
-                                                            actions = appendIf(actions, action{"CONNECT", itemPath + "/{path:*}", proxyParams, namer, false}, isConnecter && connectSubpath)
-
-                                                            for _, action := range actions {
-                                                                switch action.Verb {
-                                                                case "GET": // Get a resource.
-                                                                    var handler restful.RouteFunction
-                                                                    if isGetterWithOptions {
-                                                                        handler = restfulGetResourceWithOptions(getterWithOptions, reqScope, isSubresource)
-                                                                    } else {
-                                                                        handler = restfulGetResource(getter, reqScope)
-                                                                    }
-
-                                                                    if needOverride {
-                                                                        // need change the reported verb
-                                                                        handler = metrics.InstrumentRouteFunc(verbOverrider.OverrideMetricsVerb(action.Verb), group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, handler)
-                                                                    } else {
-                                                                        handler = metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, handler)
-                                                                    }
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-
-                                                                    doc := "read the specified " + kind
-                                                                    if isSubresource {
-                                                                        doc = "read " + subresource + " of the specified " + kind
-                                                                    }
-                                                                    route := ws.GET(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("read"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(append(storageMeta.ProducesMIMETypes(action.Verb), mediaTypes...)...).
-                                                                        Returns(http.StatusOK, "OK", producedObject).
-                                                                        Writes(producedObject)
-                                                                    if isGetterWithOptions {
-                                                                        if err := AddObjectParams(ws, route, versionedGetOptions); err != nil {
-                                                                            return nil, nil, err
-                                                                        }
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                case "LIST": // List all resources of a kind.
-                                                                    doc := "list objects of kind " + kind
-                                                                    if isSubresource {
-                                                                        doc = "list " + subresource + " of objects of kind " + kind
-                                                                    }
-                                                                    handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulListResource(lister, watcher, reqScope, false, a.minRequestTimeout))
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    route := ws.GET(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("list"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(append(storageMeta.ProducesMIMETypes(action.Verb), allMediaTypes...)...).
-                                                                        Returns(http.StatusOK, "OK", versionedList).
-                                                                        Writes(versionedList)
-                                                                    if err := AddObjectParams(ws, route, versionedListOptions); err != nil {
-                                                                        return nil, nil, err
-                                                                    }
-                                                                    switch {
-                                                                    case isLister && isWatcher:
-                                                                        doc := "list or watch objects of kind " + kind
-                                                                        if isSubresource {
-                                                                            doc = "list or watch " + subresource + " of objects of kind " + kind
-                                                                        }
-                                                                        route.Doc(doc)
-                                                                    case isWatcher:
-                                                                        doc := "watch objects of kind " + kind
-                                                                        if isSubresource {
-                                                                            doc = "watch " + subresource + "of objects of kind " + kind
-                                                                        }
-                                                                        route.Doc(doc)
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                case "PUT": // Update a resource.
-                                                                    doc := "replace the specified " + kind
-                                                                    if isSubresource {
-                                                                        doc = "replace " + subresource + " of the specified " + kind
-                                                                    }
-                                                                    handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulUpdateResource(updater, reqScope, admit))
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    route := ws.PUT(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("replace"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(append(storageMeta.ProducesMIMETypes(action.Verb), mediaTypes...)...).
-                                                                        Returns(http.StatusOK, "OK", producedObject).
-                                                                        // TODO: in some cases, the API may return a v1.Status instead of the versioned object
-                                                                        // but currently go-restful can't handle multiple different objects being returned.
-                                                                        Returns(http.StatusCreated, "Created", producedObject).
-                                                                        Reads(defaultVersionedObject).
-                                                                        Writes(producedObject)
-                                                                    if err := AddObjectParams(ws, route, versionedUpdateOptions, disabledParams...); err != nil {
-                                                                        return nil, nil, err
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                case "PATCH": // Partially update a resource
-                                                                    doc := "partially update the specified " + kind
-                                                                    if isSubresource {
-                                                                        doc = "partially update " + subresource + " of the specified " + kind
-                                                                    }
-                                                                    supportedTypes := []string{
-                                                                        string(types.JSONPatchType),
-                                                                        string(types.MergePatchType),
-                                                                        string(types.StrategicMergePatchType),
-                                                                        string(types.ApplyPatchType),
-                                                                    }
-                                                                    handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulPatchResource(patcher, reqScope, admit, supportedTypes))
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    route := ws.PATCH(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Consumes(supportedTypes...).
-                                                                        Operation("patch"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(append(storageMeta.ProducesMIMETypes(action.Verb), mediaTypes...)...).
-                                                                        Returns(http.StatusOK, "OK", producedObject).
-                                                                        // Patch can return 201 when a server side apply is requested
-                                                                        Returns(http.StatusCreated, "Created", producedObject).
-                                                                        Reads(metav1.Patch{}).
-                                                                        Writes(producedObject)
-                                                                    if err := AddObjectParams(ws, route, versionedPatchOptions, disabledParams...); err != nil {
-                                                                        return nil, nil, err
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                case "POST": // Create a resource.
-                                                                    var handler restful.RouteFunction
-                                                                    if isNamedCreater {
-                                                                        handler = restfulCreateNamedResource(namedCreater, reqScope, admit)
-                                                                    } else {
-                                                                        handler = restfulCreateResource(creater, reqScope, admit)
-                                                                    }
-                                                                    handler = metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, handler)
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    article := GetArticleForNoun(kind, " ")
-                                                                    doc := "create" + article + kind
-                                                                    if isSubresource {
-                                                                        doc = "create " + subresource + " of" + article + kind
-                                                                    }
-                                                                    route := ws.POST(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("create"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(append(storageMeta.ProducesMIMETypes(action.Verb), mediaTypes...)...).
-                                                                        Returns(http.StatusOK, "OK", producedObject).
-                                                                        // TODO: in some cases, the API may return a v1.Status instead of the versioned object
-                                                                        // but currently go-restful can't handle multiple different objects being returned.
-                                                                        Returns(http.StatusCreated, "Created", producedObject).
-                                                                        Returns(http.StatusAccepted, "Accepted", producedObject).
-                                                                        Reads(defaultVersionedObject).
-                                                                        Writes(producedObject)
-                                                                    if err := AddObjectParams(ws, route, versionedCreateOptions, disabledParams...); err != nil {
-                                                                        return nil, nil, err
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                case "DELETE": // Delete a resource.
-                                                                    article := GetArticleForNoun(kind, " ")
-                                                                    doc := "delete" + article + kind
-                                                                    if isSubresource {
-                                                                        doc = "delete " + subresource + " of" + article + kind
-                                                                    }
-                                                                    deleteReturnType := versionedStatus
-                                                                    if deleteReturnsDeletedObject {
-                                                                        deleteReturnType = producedObject
-                                                                    }
-                                                                    handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulDeleteResource(gracefulDeleter, isGracefulDeleter, reqScope, admit))
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    route := ws.DELETE(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("delete"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(append(storageMeta.ProducesMIMETypes(action.Verb), mediaTypes...)...).
-                                                                        Writes(deleteReturnType).
-                                                                        Returns(http.StatusOK, "OK", deleteReturnType).
-                                                                        Returns(http.StatusAccepted, "Accepted", deleteReturnType)
-                                                                    if isGracefulDeleter {
-                                                                        route.Reads(versionedDeleterObject)
-                                                                        route.ParameterNamed("body").Required(false)
-                                                                        if err := AddObjectParams(ws, route, versionedDeleteOptions); err != nil {
-                                                                            return nil, nil, err
-                                                                        }
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                case "DELETECOLLECTION":
-                                                                    doc := "delete collection of " + kind
-                                                                    if isSubresource {
-                                                                        doc = "delete collection of " + subresource + " of a " + kind
-                                                                    }
-                                                                    handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulDeleteCollection(collectionDeleter, isCollectionDeleter, reqScope, admit))
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    route := ws.DELETE(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("deletecollection"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(append(storageMeta.ProducesMIMETypes(action.Verb), mediaTypes...)...).
-                                                                        Writes(versionedStatus).
-                                                                        Returns(http.StatusOK, "OK", versionedStatus)
-                                                                    if isCollectionDeleter {
-                                                                        route.Reads(versionedDeleterObject)
-                                                                        route.ParameterNamed("body").Required(false)
-                                                                        if err := AddObjectParams(ws, route, versionedDeleteOptions); err != nil {
-                                                                            return nil, nil, err
-                                                                        }
-                                                                    }
-                                                                    if err := AddObjectParams(ws, route, versionedListOptions, "watch", "allowWatchBookmarks"); err != nil {
-                                                                        return nil, nil, err
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                // deprecated in 1.11
-                                                                case "WATCH": // Watch a resource.
-                                                                    doc := "watch changes to an object of kind " + kind
-                                                                    if isSubresource {
-                                                                        doc = "watch changes to " + subresource + " of an object of kind " + kind
-                                                                    }
-                                                                    doc += ". deprecated: use the 'watch' parameter with a list operation instead, filtered to a single item with the 'fieldSelector' parameter."
-                                                                    handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulListResource(lister, watcher, reqScope, true, a.minRequestTimeout))
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    route := ws.GET(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("watch"+namespaced+kind+strings.Title(subresource)+operationSuffix).
-                                                                        Produces(allMediaTypes...).
-                                                                        Returns(http.StatusOK, "OK", versionedWatchEvent).
-                                                                        Writes(versionedWatchEvent)
-                                                                    if err := AddObjectParams(ws, route, versionedListOptions); err != nil {
-                                                                        return nil, nil, err
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                // deprecated in 1.11
-                                                                case "WATCHLIST": // Watch all resources of a kind.
-                                                                    doc := "watch individual changes to a list of " + kind
-                                                                    if isSubresource {
-                                                                        doc = "watch individual changes to a list of " + subresource + " of " + kind
-                                                                    }
-                                                                    doc += ". deprecated: use the 'watch' parameter with a list operation instead."
-                                                                    handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulListResource(lister, watcher, reqScope, true, a.minRequestTimeout))
-                                                                    handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                    route := ws.GET(action.Path).To(handler).
-                                                                        Doc(doc).
-                                                                        Param(ws.QueryParameter("pretty", "If 'true', then the output is pretty printed.")).
-                                                                        Operation("watch"+namespaced+kind+strings.Title(subresource)+"List"+operationSuffix).
-                                                                        Produces(allMediaTypes...).
-                                                                        Returns(http.StatusOK, "OK", versionedWatchEvent).
-                                                                        Writes(versionedWatchEvent)
-                                                                    if err := AddObjectParams(ws, route, versionedListOptions); err != nil {
-                                                                        return nil, nil, err
-                                                                    }
-                                                                    addParams(route, action.Params)
-                                                                    routes = append(routes, route)
-                                                                case "CONNECT":
-                                                                    for _, method := range connecter.ConnectMethods() {
-                                                                        connectProducedObject := storageMeta.ProducesObject(method)
-                                                                        if connectProducedObject == nil {
-                                                                            connectProducedObject = "string"
-                                                                        }
-                                                                        doc := "connect " + method + " requests to " + kind
-                                                                        if isSubresource {
-                                                                            doc = "connect " + method + " requests to " + subresource + " of " + kind
-                                                                        }
-                                                                        handler := metrics.InstrumentRouteFunc(action.Verb, group, version, resource, subresource, requestScope, metrics.APIServerComponent, deprecated, removedRelease, restfulConnectResource(connecter, reqScope, admit, path, isSubresource))
-                                                                        handler = utilwarning.AddWarningsHandler(handler, warnings)
-                                                                        route := ws.Method(method).Path(action.Path).
-                                                                            To(handler).
-                                                                            Doc(doc).
-                                                                            Operation("connect" + strings.Title(strings.ToLower(method)) + namespaced + kind + strings.Title(subresource) + operationSuffix).
-                                                                            Produces("*/*").
-                                                                            Consumes("*/*").
-                                                                            Writes(connectProducedObject)
-                                                                        if versionedConnectOptions != nil {
-                                                                            if err := AddObjectParams(ws, route, versionedConnectOptions); err != nil {
-                                                                                return nil, nil, err
-                                                                            }
-                                                                        }
-                                                                        addParams(route, action.Params)
-                                                                        routes = append(routes, route)
-
-                                                                        // transform ConnectMethods to kube verbs
-                                                                        if kubeVerb, found := toDiscoveryKubeVerb[method]; found {
-                                                                            if len(kubeVerb) != 0 {
-                                                                                kubeVerbs[kubeVerb] = struct{}{}
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                default:
-                                                                    return nil, nil, fmt.Errorf("unrecognized action verb: %s", action.Verb)
-                                                                }
-                                                                for _, route := range routes {
-                                                                    route.Metadata(ROUTE_META_GVK, metav1.GroupVersionKind{
-                                                                        Group:   reqScope.Kind.Group,
-                                                                        Version: reqScope.Kind.Version,
-                                                                        Kind:    reqScope.Kind.Kind,
-                                                                    })
-                                                                    route.Metadata(ROUTE_META_ACTION, strings.ToLower(action.Verb))
-                                                                    ws.Route(route)
-                                                                }
-                                                            }
-                                                        }
                                                     }
                                                 }
+
+                                                container.Add(ws)
                                             }
                                         }
                                     }
                                 }
                             }
 
+                            // 注册非核心api
                             restStorageProviders := []RESTStorageProvider{
                                 apiserverinternalrest.StorageProvider{},
                                 authenticationrest.RESTStorageProvider{...},
                                 authorizationrest.RESTStorageProvider{...},
                                 autoscalingrest.RESTStorageProvider{},
-                                batchrest.RESTStorageProvider{},
-                                certificatesrest.RESTStorageProvider{},
-                                coordinationrest.RESTStorageProvider{},
-                                discoveryrest.StorageProvider{},
-                                networkingrest.RESTStorageProvider{},
-                                noderest.RESTStorageProvider{},
-                                policyrest.RESTStorageProvider{},
-                                rbacrest.RESTStorageProvider{...},
                                 schedulingrest.RESTStorageProvider{},
                                 storagerest.RESTStorageProvider{},
-                                flowcontrolrest.RESTStorageProvider{...},
-                                appsrest.StorageProvider{},
-                                admissionregistrationrest.RESTStorageProvider{...},
-                                eventsrest.RESTStorageProvider{...},
-                                resourcerest.RESTStorageProvider{},
                             }
 
                             m.InstallAPIs(..., restStorageProviders...)
                             {
                                 for _, restStorageBuilder := range restStorageProviders {
-                                    apiGroupInfo, err := restStorageBuilder.NewRESTStorage(apiResourceConfigSource, restOptionsGetter)
+                                    apiGroupInfo := restStorageBuilder.NewRESTStorage(...)
                                     apiGroupsInfo = append(apiGroupsInfo, &apiGroupInfo)
                                 }
 
                                 m.GenericAPIServer.InstallAPIGroups(apiGroupsInfo...)
                                 {
                                     for _, apiGroupInfo := range apiGroupInfos {
-                                        s.installAPIResources(APIGroupPrefix, apiGroupInfo, openAPIModels)
+                                        s.installAPIResources(APIGroupPrefix, apiGroupInfo, ...)
                                     }
                                 }
                             }
@@ -1084,14 +874,39 @@ func NewAPIServerCommand() *cobra.Command {
                 prepared := server.PrepareRun()
                 {
                     prepared := s.GenericAPIServer.PrepareRun()
+                    {
+                        // 注册非restful的api
+                        s.installHealthz()
+                        s.installLivez()
+                        s.installReadyz()
+
+                        return preparedGenericAPIServer{s}
+                    }
+
                     return preparedAPIAggregator{APIAggregator: s, runnable: prepared}, nil
                 }
 
                 return prepared.Run(stopCh)
                 {
-                    s.installHealthz()
-	                s.installLivez()
-                    s.installReadyz()
+                    s.NonBlockingRun(...)
+                    {
+                        s.SecureServingInfo.Serve(s.Handler, ...)
+                        {
+                            secureServer := &http.Server{
+                                Addr:           s.Listener.Addr().String(),
+                                Handler:        handler,
+                                MaxHeaderBytes: 1 << 20,
+                                TLSConfig:      tlsConfig,
+                                IdleTimeout:       90 * time.Second, 
+                                ReadHeaderTimeout: 32 * time.Second, 
+                            }
+
+                            RunServer(secureServer, s.Listener, ...)
+                            {
+                                server.Serve(listener)
+                            }
+                        }
+                    }
                 }
             }
 		},
@@ -1108,6 +923,784 @@ func NewAPIServerCommand() *cobra.Command {
 	}
 
 	return cmd
+}
+
+```
+
+以`/pods`为例分析其存储和处理机制
+
+```go
+
+// Storage is a generic interface for RESTful storage services.
+// Resources which are exported to the RESTful API of apiserver need to implement this interface. It is expected
+// that objects may implement any of the below interfaces.
+type Storage interface {
+	// New returns an empty object that can be used with Create and Update after request data has been put into it.
+	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
+	New() runtime.Object
+
+	// Destroy cleans up its resources on shutdown.
+	// Destroy has to be implemented in thread-safe way and be prepared
+	// for being called more than once.
+	Destroy()
+}
+
+// 根据rest.Storage实现的接口自动生成handler
+func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storage, ws *restful.WebService) (*metav1.APIResource, *storageversion.ResourceInfo, error) {
+
+    resource, subresource := splitSubresource(path)
+
+    group, version := a.group.GroupVersion.Group, a.group.GroupVersion.Version
+
+    // If there is a subresource, namespace scoping is defined by the parent resource
+	var namespaceScoped bool
+	if isSubresource {
+		parentStorage, ok := a.group.Storage[resource]
+		scoper, ok := parentStorage.(rest.Scoper)
+		namespaceScoped = scoper.NamespaceScoped()
+
+	} else {
+		scoper, ok := storage.(rest.Scoper)
+		namespaceScoped = scoper.NamespaceScoped()
+    }
+
+    // what verbs are supported by the storage, used to know what verbs we support per path
+	// POST: New()/Create()
+	creater, isCreater := storage.(rest.Creater)
+	namedCreater, isNamedCreater := storage.(rest.NamedCreater)
+	// LIST: NewList()/List()
+	lister, isLister := storage.(rest.Lister)
+	// GET: Get()
+	getter, isGetter := storage.(rest.Getter)
+	getterWithOptions, isGetterWithOptions := storage.(rest.GetterWithOptions)
+	// DELETE: Delete()
+	gracefulDeleter, isGracefulDeleter := storage.(rest.GracefulDeleter)
+	collectionDeleter, isCollectionDeleter := storage.(rest.CollectionDeleter)
+	// PUT: New()/Update()
+	updater, isUpdater := storage.(rest.Updater)
+	// PATCH: Getter/Updater
+	patcher, isPatcher := storage.(rest.Patcher)
+	// WATCH: Watch()
+	watcher, isWatcher := storage.(rest.Watcher)
+	// CONNECT: Connect()
+	connecter, isConnecter := storage.(rest.Connecter)
+
+    nameParam := ws.PathParameter("name", "name of the "+kind).DataType("string")
+	pathParam := ws.PathParameter("path", "path to the resource").DataType("string")
+
+    // Handle non-namespace scoped resources like nodes.
+    resourcePath := resource
+    resourceParams := params
+    itemPath := resourcePath + "/{name}"
+    nameParams := append(params, nameParam)
+    proxyParams := append(nameParams, pathParam)
+    suffix := ""
+    if isSubresource {
+        suffix = "/" + subresource
+        itemPath = itemPath + suffix
+        resourcePath = itemPath
+        resourceParams = nameParams
+    }
+    apiResource.Name = path
+    apiResource.Namespaced = false
+    apiResource.Kind = resourceKind
+    namer := handlers.ContextBasedNaming{
+        Namer:         a.group.Namer,
+        ClusterScoped: true,
+    }
+
+    // Handler for standard REST verbs (GET, PUT, POST and DELETE).
+    // Add actions at the resource path: /api/apiVersion/resource
+    actions = appendIf(actions, action{"LIST", resourcePath, resourceParams, namer, false}, isLister)
+    actions = appendIf(actions, action{"POST", resourcePath, resourceParams, namer, false}, isCreater)
+    actions = appendIf(actions, action{"DELETECOLLECTION", resourcePath, resourceParams, namer, false}, isCollectionDeleter)
+    // DEPRECATED in 1.11
+    actions = appendIf(actions, action{"WATCHLIST", "watch/" + resourcePath, resourceParams, namer, false}, allowWatchList)
+
+    // Add actions at the item path: /api/apiVersion/resource/{name}
+    actions = appendIf(actions, action{"GET", itemPath, nameParams, namer, false}, isGetter)
+    if getSubpath {
+        actions = appendIf(actions, action{"GET", itemPath + "/{path:*}", proxyParams, namer, false}, isGetter)
+    }
+    actions = appendIf(actions, action{"PUT", itemPath, nameParams, namer, false}, isUpdater)
+    actions = appendIf(actions, action{"PATCH", itemPath, nameParams, namer, false}, isPatcher)
+    actions = appendIf(actions, action{"DELETE", itemPath, nameParams, namer, false}, isGracefulDeleter)
+    // DEPRECATED in 1.11
+    actions = appendIf(actions, action{"WATCH", "watch/" + itemPath, nameParams, namer, false}, isWatcher)
+    actions = appendIf(actions, action{"CONNECT", itemPath, nameParams, namer, false}, isConnecter)
+    actions = appendIf(actions, action{"CONNECT", itemPath + "/{path:*}", proxyParams, namer, false}, isConnecter && connectSubpath)
+
+    // 为每个action生成handler
+    for _, action := range actions {
+        // 示例数据
+		producedObject := storageMeta.ProducesObject(action.Verb)
+
+		switch action.Verb {
+		case "GET": // Get a resource.
+			var handler restful.RouteFunction
+			if isGetterWithOptions {
+				handler = restfulGetResourceWithOptions(getterWithOptions, reqScope, isSubresource)
+			} else {
+				handler = restfulGetResource(getter, reqScope)
+			}
+
+			doc := "read the specified " + kind
+			if isSubresource {
+				doc = "read " + subresource + " of the specified " + kind
+			}
+			route := ws.GET(action.Path).To(handler).Doc(doc)
+			
+			addParams(route, action.Params)
+			routes = append(routes, route)
+		case "LIST": // List all resources of a kind.
+			doc := "list objects of kind " + kind
+			if isSubresource {
+				doc = "list " + subresource + " of objects of kind " + kind
+			}
+			handler := metrics.InstrumentRouteFunc(..., restfulListResource(lister, watcher, ...))
+			route := ws.GET(action.Path).To(handler).Doc(doc)
+            
+			AddObjectParams(ws, route, versionedListOptions)
+
+			switch {
+			case isLister && isWatcher:
+				doc := "list or watch objects of kind " + kind
+				if isSubresource {
+					doc = "list or watch " + subresource + " of objects of kind " + kind
+				}
+				route.Doc(doc)
+			case isWatcher:
+				doc := "watch objects of kind " + kind
+				if isSubresource {
+					doc = "watch " + subresource + "of objects of kind " + kind
+				}
+				route.Doc(doc)
+			}
+
+			addParams(route, action.Params)
+			routes = append(routes, route)
+		case "PUT": // Update a resource.
+			doc := "replace the specified " + kind
+			if isSubresource {
+				doc = "replace " + subresource + " of the specified " + kind
+			}
+			handler := metrics.InstrumentRouteFunc(..., restfulUpdateResource(updater, ...))
+			route := ws.PUT(action.Path).To(handler).Doc(doc)
+
+			addParams(route, action.Params)
+			routes = append(routes, route)
+		case "PATCH": // Partially update a resource
+			doc := "partially update the specified " + kind
+			if isSubresource {
+				doc = "partially update " + subresource + " of the specified " + kind
+			}
+			handler := metrics.InstrumentRouteFunc(..., restfulPatchResource(patcher, ...))
+			route := ws.PATCH(action.Path).To(handler).Doc(doc)
+			
+			addParams(route, action.Params)
+			routes = append(routes, route)
+		case "POST": // Create a resource.
+			var handler restful.RouteFunction
+			if isNamedCreater {
+				handler = restfulCreateNamedResource(namedCreater, reqScope, admit)
+			} else {
+				handler = restfulCreateResource(creater, reqScope, admit)
+			}
+			handler = metrics.InstrumentRouteFunc(..., handler)
+			doc := "create" + article + kind
+			if isSubresource {
+				doc = "create " + subresource + " of" + article + kind
+			}
+			route := ws.POST(action.Path).To(handler).Doc(doc)
+
+			addParams(route, action.Params)
+			routes = append(routes, route)
+		case "DELETE": // Delete a resource.
+			article := GetArticleForNoun(kind, " ")
+			doc := "delete" + article + kind
+			if isSubresource {
+				doc = "delete " + subresource + " of" + article + kind
+			}
+			deleteReturnType := versionedStatus
+			if deleteReturnsDeletedObject {
+				deleteReturnType = producedObject
+			}
+			handler := metrics.InstrumentRouteFunc(..., restfulDeleteResource(gracefulDeleter, isGracefulDeleter, ...))
+			route := ws.DELETE(action.Path).To(handler).Doc(doc)
+			
+			addParams(route, action.Params)
+			routes = append(routes, route)
+		case "DELETECOLLECTION":
+			doc := "delete collection of " + kind
+			if isSubresource {
+				doc = "delete collection of " + subresource + " of a " + kind
+			}
+			handler := metrics.InstrumentRouteFunc(..., restfulDeleteCollection(collectionDeleter, isCollectionDeleter, ...))
+			route := ws.DELETE(action.Path).To(handler).Doc(doc)
+
+			addParams(route, action.Params)
+			routes = append(routes, route)
+		// deprecated in 1.11
+        // WATCH替换为LIST watch --fieldSelector=xxx
+		case "WATCH": // Watch a resource.
+			doc := "watch changes to an object of kind " + kind
+			if isSubresource {
+				doc = "watch changes to " + subresource + " of an object of kind " + kind
+			}
+			doc += ". deprecated: use the 'watch' parameter with a list operation instead, filtered to a single item with the 'fieldSelector' parameter."
+			
+			routes = append(routes, route)
+		// deprecated in 1.11
+        // WATCH替换为LIST watch
+		case "WATCHLIST": // Watch all resources of a kind.
+			doc := "watch individual changes to a list of " + kind
+			if isSubresource {
+				doc = "watch individual changes to a list of " + subresource + " of " + kind
+			}
+			doc += ". deprecated: use the 'watch' parameter with a list operation instead."
+			
+			routes = append(routes, route)
+		case "CONNECT":
+			for _, method := range connecter.ConnectMethods() {
+				connectProducedObject := storageMeta.ProducesObject(method)
+				if connectProducedObject == nil {
+					connectProducedObject = "string"
+				}
+				doc := "connect " + method + " requests to " + kind
+				if isSubresource {
+					doc = "connect " + method + " requests to " + subresource + " of " + kind
+				}
+				handler := metrics.InstrumentRouteFunc(..., restfulConnectResource(connecter, ...))
+				route := ws.Method(method).Path(action.Path).To(handler).Doc(doc)
+
+				addParams(route, action.Params)
+				routes = append(routes, route)
+			}
+		default:
+			return nil, nil, fmt.Errorf("unrecognized action verb: %s", action.Verb)
+		}
+
+		for _, route := range routes {
+			route.Metadata(ROUTE_META_GVK, metav1.GroupVersionKind{
+				Group:   reqScope.Kind.Group,
+				Version: reqScope.Kind.Version,
+				Kind:    reqScope.Kind.Kind,
+			})
+			route.Metadata(ROUTE_META_ACTION, strings.ToLower(action.Verb))
+			ws.Route(route)
+		}
+	}
+}
+
+// 以pods为例分析其存储结构
+storage := map[string]rest.Storage{}
+if resource := "pods"; ResourceEnabled(resource) {
+    storage[resource] = podStorage.Pod
+    storage[resource+"/attach"] = podStorage.Attach
+    storage[resource+"/status"] = podStorage.Status
+    storage[resource+"/log"] = podStorage.Log
+    storage[resource+"/exec"] = podStorage.Exec
+    storage[resource+"/portforward"] = podStorage.PortForward
+    storage[resource+"/proxy"] = podStorage.Proxy
+    storage[resource+"/binding"] = podStorage.Binding
+    if podStorage.Eviction != nil {
+        storage[resource+"/eviction"] = podStorage.Eviction
+    }
+    storage[resource+"/ephemeralcontainers"] = podStorage.EphemeralContainers
+}
+
+
+type Store struct {
+	// KeyRootFunc returns the root etcd key for this resource; should not
+	// include trailing "/".  This is used for operations that work on the
+	// entire collection (listing and watching).
+	KeyRootFunc func(ctx context.Context) string
+
+	// KeyFunc returns the key for a specific object in the collection.
+	// KeyFunc is called for Create/Update/Get/Delete.
+	KeyFunc func(ctx context.Context, name string) (string, error)
+
+	// ObjectNameFunc returns the name of an object or an error.
+	ObjectNameFunc func(obj runtime.Object) (string, error)
+
+	// TTLFunc returns the TTL (time to live) that objects should be persisted
+	// with. The existing parameter is the current TTL or the default for this
+	// operation. The update parameter indicates whether this is an operation
+	// against an existing object.
+	//
+	// Objects that are persisted with a TTL are evicted once the TTL expires.
+	TTLFunc func(obj runtime.Object, existing uint64, update bool) (uint64, error)
+
+	// PredicateFunc returns a matcher corresponding to the provided labels
+	// and fields. The SelectionPredicate returned should return true if the
+	// object matches the given field and label selectors.
+	PredicateFunc func(label labels.Selector, field fields.Selector) storage.SelectionPredicate
+
+	// CreateStrategy implements resource-specific behavior during creation.
+	CreateStrategy rest.RESTCreateStrategy
+	// BeginCreate is an optional hook that returns a "transaction-like"
+	// commit/revert function which will be called at the end of the operation,
+	// but before AfterCreate and Decorator, indicating via the argument
+	// whether the operation succeeded.  If this returns an error, the function
+	// is not called.  Almost nobody should use this hook.
+	BeginCreate BeginCreateFunc
+	// AfterCreate implements a further operation to run after a resource is
+	// created and before it is decorated, optional.
+	AfterCreate AfterCreateFunc
+
+	// UpdateStrategy implements resource-specific behavior during updates.
+	UpdateStrategy rest.RESTUpdateStrategy
+	// BeginUpdate is an optional hook that returns a "transaction-like"
+	// commit/revert function which will be called at the end of the operation,
+	// but before AfterUpdate and Decorator, indicating via the argument
+	// whether the operation succeeded.  If this returns an error, the function
+	// is not called.  Almost nobody should use this hook.
+	BeginUpdate BeginUpdateFunc
+	// AfterUpdate implements a further operation to run after a resource is
+	// updated and before it is decorated, optional.
+	AfterUpdate AfterUpdateFunc
+
+	// DeleteStrategy implements resource-specific behavior during deletion.
+	DeleteStrategy rest.RESTDeleteStrategy
+	// AfterDelete implements a further operation to run after a resource is
+	// deleted and before it is decorated, optional.
+	AfterDelete AfterDeleteFunc
+	// ReturnDeletedObject determines whether the Store returns the object
+	// that was deleted. Otherwise, return a generic success status response.
+	ReturnDeletedObject bool
+	// ShouldDeleteDuringUpdate is an optional function to determine whether
+	// an update from existing to obj should result in a delete.
+	// If specified, this is checked in addition to standard finalizer,
+	// deletionTimestamp, and deletionGracePeriodSeconds checks.
+	ShouldDeleteDuringUpdate func(ctx context.Context, key string, obj, existing runtime.Object) bool
+}
+
+// Get retrieves the item from storage.
+func (e *Store) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	obj := e.NewFunc()
+	key, err := e.KeyFunc(ctx, name)
+	
+    // 查询etcd
+	e.Storage.Get(ctx, key, storage.GetOptions{ResourceVersion: options.ResourceVersion}, obj);
+
+	if e.Decorator != nil {
+		e.Decorator(obj)
+	}
+	return obj, nil
+}
+
+// 列表查询
+// List returns a list of items matching labels and field according to the store's PredicateFunc.
+func (e *Store) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
+	label := labels.Everything()
+	if options != nil && options.LabelSelector != nil {
+		label = options.LabelSelector
+	}
+	field := fields.Everything()
+	if options != nil && options.FieldSelector != nil {
+		field = options.FieldSelector
+	}
+	out := e.ListPredicate(ctx, e.PredicateFunc(label, field), options)
+	
+	if e.Decorator != nil {
+		e.Decorator(out)
+	}
+	return out, nil
+}
+
+// Create inserts a new item according to the unique key from the object.
+func (e *Store) Create(ctx context.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
+	
+	if e.BeginCreate != nil {
+		fn, err := e.BeginCreate(ctx, obj, options)
+		
+		finishCreate = fn
+		defer func() {
+			finishCreate(ctx, false)
+		}()
+	}
+
+	rest.BeforeCreate(e.CreateStrategy, ctx, obj);
+
+	name, err := e.ObjectNameFunc(obj)
+	key, err := e.KeyFunc(ctx, name)
+	qualifiedResource := e.qualifiedResourceFromContext(ctx)
+	ttl, err := e.calculateTTL(obj, 0, false)
+	
+	out := e.NewFunc()
+
+    // 插入etcd
+	e.Storage.Create(ctx, key, obj, out, ttl, dryrun.IsDryRun(options.DryRun));
+
+	// The operation has succeeded.  Call the finish function if there is one,
+	// and then make sure the defer doesn't call it again.
+	fn := finishCreate
+	finishCreate = finishNothing
+	fn(ctx, true)
+
+	if e.AfterCreate != nil {
+		e.AfterCreate(out, options)
+	}
+	if e.Decorator != nil {
+		e.Decorator(out)
+	}
+	return out, nil
+}
+
+func (e *Store) Update(ctx context.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc, forceAllowCreate bool, options *metav1.UpdateOptions) (runtime.Object, bool, error) {
+	key, err := e.KeyFunc(ctx, name)
+
+	out := e.NewFunc()
+	// deleteObj is only used in case a deletion is carried out
+	var deleteObj runtime.Object
+
+	e.Storage.GuaranteedUpdate(ctx, key, out, true, storagePreconditions, func(existing runtime.Object, res storage.ResponseMeta) (runtime.Object, *uint64, error) {
+		existingResourceVersion, err := e.Storage.Versioner().ObjectResourceVersion(existing)
+		
+		// Given the existing object, get the new object
+		obj, err := objInfo.UpdatedObject(ctx, existing)
+
+        newResourceVersion, err := e.Storage.Versioner().ObjectResourceVersion(obj)
+        doUnconditionalUpdate := newResourceVersion == 0 && e.UpdateStrategy.AllowUnconditionalUpdate()
+
+        // 不存在则插入
+		if existingResourceVersion == 0 {
+			if e.BeginCreate != nil {
+				fn, err := e.BeginCreate(ctx, obj, newCreateOptionsFromUpdateOptions(options))
+				finishCreate = fn
+				defer func() {
+					finishCreate(ctx, false)
+				}()
+			}
+
+			creating = true
+			creatingObj = obj
+			rest.BeforeCreate(e.CreateStrategy, ctx, obj);
+		
+			ttl, err := e.calculateTTL(obj, 0, false)
+
+			fn := finishCreate
+			finishCreate = finishNothing
+			fn(ctx, true)
+
+			return obj, &ttl, nil
+		}
+
+		creating = false
+		creatingObj = nil
+		if doUnconditionalUpdate {
+            // 无条件更新
+			// Update the object's resource version to match the latest
+			// storage object's resource version.
+			err = e.Storage.Versioner().UpdateObject(obj, res.ResourceVersion)
+		} else {
+            // 对比版本号: 乐观锁
+			if newResourceVersion != existingResourceVersion {
+				return nil, nil, apierrors.NewConflict(qualifiedResource, name, fmt.Errorf(OptimisticLockErrorMsg))
+			}
+		}
+
+		var finishUpdate FinishFunc = finishNothing
+
+		if e.BeginUpdate != nil {
+			fn, err := e.BeginUpdate(ctx, obj, existing, options)
+			
+			finishUpdate = fn
+			defer func() {
+				finishUpdate(ctx, false)
+			}()
+		}
+
+		rest.BeforeUpdate(e.UpdateStrategy, ctx, obj, existing); 
+		
+		ttl, err := e.calculateTTL(obj, res.TTL, true)
+
+		fn := finishUpdate
+		finishUpdate = finishNothing
+		fn(ctx, true)
+
+		if int64(ttl) != res.TTL {
+			return obj, &ttl, nil
+		}
+		return obj, nil, nil
+	}, dryrun.IsDryRun(options.DryRun), nil)
+
+	if creating {
+		if e.AfterCreate != nil {
+			e.AfterCreate(out, newCreateOptionsFromUpdateOptions(options))
+		}
+	} else {
+		if e.AfterUpdate != nil {
+			e.AfterUpdate(out, options)
+		}
+	}
+	if e.Decorator != nil {
+		e.Decorator(out)
+	}
+	return out, creating, nil
+}
+
+// Delete removes the item from storage.
+// options can be mutated by rest.BeforeDelete due to a graceful deletion strategy.
+func (e *Store) Delete(ctx context.Context, name string, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
+	key, err := e.KeyFunc(ctx, name)
+	obj := e.NewFunc()
+
+    // 先查询
+	e.Storage.Get(ctx, key, storage.GetOptions{}, obj)
+
+	// support older consumers of delete by treating "nil" as delete immediately
+	if options == nil {
+		options = metav1.NewDeleteOptions(0)
+	}
+	var preconditions storage.Preconditions
+	if options.Preconditions != nil {
+		preconditions.UID = options.Preconditions.UID
+		preconditions.ResourceVersion = options.Preconditions.ResourceVersion
+	}
+	graceful, pendingGraceful, err := rest.BeforeDelete(e.DeleteStrategy, ctx, obj, options)
+	
+	// this means finalizers cannot be updated via DeleteOptions if a deletion is already pending
+	if pendingGraceful {
+		out, err := e.finalizeDelete(ctx, obj, false, options)
+		return out, false, err
+	}
+
+    // 再删除
+	// delete immediately, or no graceful deletion supported
+	out = e.NewFunc()
+	e.Storage.Delete(ctx, key, out, &preconditions, storage.ValidateObjectFunc(deleteValidation), dryrun.IsDryRun(options.DryRun), nil)
+
+	out, err = e.finalizeDelete(ctx, out, true, options)
+	return out, true, err
+}
+
+func (e *Store) Watch(ctx context.Context, options *metainternalversion.ListOptions) (watch.Interface, error) {
+	label := labels.Everything()
+	if options != nil && options.LabelSelector != nil {
+		label = options.LabelSelector
+	}
+	field := fields.Everything()
+	if options != nil && options.FieldSelector != nil {
+		field = options.FieldSelector
+	}
+	predicate := e.PredicateFunc(label, field)
+
+	resourceVersion := ""
+	if options != nil {
+		resourceVersion = options.ResourceVersion
+		predicate.AllowWatchBookmarks = options.AllowWatchBookmarks
+	}
+	return e.WatchPredicate(ctx, predicate, resourceVersion)
+}
+
+// WatchPredicate starts a watch for the items that matches.
+func (e *Store) WatchPredicate(ctx context.Context, p storage.SelectionPredicate, resourceVersion string) (watch.Interface, error) {
+	storageOpts := storage.ListOptions{ResourceVersion: resourceVersion, Predicate: p, Recursive: true}
+
+	key := e.KeyRootFunc(ctx)
+	if name, ok := p.MatchesSingle(); ok {
+		if k, err := e.KeyFunc(ctx, name); err == nil {
+			key = k
+			storageOpts.Recursive = false
+		}
+		// if we cannot extract a key based on the current context, the
+		// optimization is skipped
+	}
+
+    // 持续监听变更
+	w, err := e.Storage.Watch(ctx, key, storageOpts)
+    {
+        return s.watcher.Watch(...)
+        {
+            wc := w.createWatchChan(...)
+            {
+                wc := &watchChan{
+                    watcher:           w,
+                    transformer:       transformer,
+                    key:               key,
+                    initialRev:        rev,
+                    recursive:         recursive,
+                    progressNotify:    progressNotify,
+                    internalPred:      pred,
+                    incomingEventChan: make(chan *event, incomingBufSize),
+                    // 调用方可以通过resultChan接收数据
+                    resultChan:        make(chan watch.Event, outgoingBufSize),
+                    errChan:           make(chan error, 1),
+                }
+            }
+
+            go wc.run()
+            {
+                watchClosedCh := make(chan struct{})
+                go wc.startWatching(watchClosedCh)
+                {
+                    wch := wc.watcher.client.Watch(wc.ctx, wc.key, opts...)
+                    for wres := range wch {
+                        for _, e := range wres.Events {
+                            parsedEvent, err := parseEvent(e)
+                            wc.sendEvent(parsedEvent)
+                            {
+                                wc.incomingEventChan <- e:
+                            }
+                        }
+                    }
+                }
+
+                var resultChanWG sync.WaitGroup
+                resultChanWG.Add(1)
+                go wc.processEvent(&resultChanWG)
+                {
+                    for {
+                        select {
+                        case e := <-wc.incomingEventChan:
+                            res := wc.transform(e)
+                            if res == nil {
+                                continue
+                            }
+
+                            // buf满了
+                            if len(wc.resultChan) == outgoingBufSize {
+                                klog.V(3).InfoS("Fast watcher, slow processing. Probably caused by slow dispatching events to watchers", "outgoingEvents", outgoingBufSize, "objectType", wc.watcher.objectType, "groupResource", wc.watcher.groupResource)
+                            }
+                            // If user couldn't receive results fast enough, we also block incoming events from watcher.
+                            // Because storing events in local will cause more memory usage.
+                            // The worst case would be closing the fast watcher.
+                            select {
+                            case wc.resultChan <- *res:
+                            case <-wc.ctx.Done():
+                                return
+                            }
+                        case <-wc.ctx.Done():
+                            return
+                        }
+                    }
+                }
+            }
+
+            return wc
+        }
+    }
+	
+	if e.Decorator != nil {
+		return newDecoratedWatcher(ctx, w, e.Decorator), nil
+	}
+	return w, nil
+}
+
+
+// PodStorage includes storage for pods and all sub resources
+type PodStorage struct {
+	Pod                 *REST
+	Binding             *BindingREST
+	LegacyBinding       *LegacyBindingREST
+	Eviction            *EvictionREST
+	Status              *StatusREST
+	EphemeralContainers *EphemeralContainersREST
+	Log                 *podrest.LogREST
+	Proxy               *podrest.ProxyREST
+	Exec                *podrest.ExecREST
+	Attach              *podrest.AttachREST
+	PortForward         *podrest.PortForwardREST
+}
+
+// REST implements a RESTStorage for pods
+// REST继承genericregistry.Store
+type REST struct {
+	*genericregistry.Store
+	proxyTransport http.RoundTripper
+}
+
+// NewStorage returns a RESTStorage object that will work against pods.
+func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGetter, proxyTransport http.RoundTripper, podDisruptionBudgetClient policyclient.PodDisruptionBudgetsGetter) (PodStorage, error) {
+
+	store := &genericregistry.Store{
+		NewFunc:                  func() runtime.Object { return &api.Pod{} },
+		NewListFunc:              func() runtime.Object { return &api.PodList{} },
+		PredicateFunc:            registrypod.MatchPod,
+		DefaultQualifiedResource: api.Resource("pods"),
+
+		CreateStrategy:      registrypod.Strategy,
+		UpdateStrategy:      registrypod.Strategy,
+		DeleteStrategy:      registrypod.Strategy,
+		ResetFieldsStrategy: registrypod.Strategy,
+		ReturnDeletedObject: true,
+
+		TableConvertor: printerstorage.TableConvertor{TableGenerator: printers.NewTableGenerator().With(printersinternal.AddHandlers)},
+	}
+	options := &generic.StoreOptions{
+		RESTOptions: optsGetter,
+		AttrFunc:    registrypod.GetAttrs,
+		TriggerFunc: map[string]storage.IndexerFunc{"spec.nodeName": registrypod.NodeNameTriggerFunc},
+		Indexers:    registrypod.Indexers(),
+	}
+	store.CompleteWithOptions(options);
+    {
+        if e.Storage.Storage == nil {
+            e.Storage.Codec = opts.StorageConfig.Codec
+            
+            // 创建基于etcd的存储
+            e.Storage.Storage, e.DestroyFunc = opts.Decorator(
+                opts.StorageConfig,
+                prefix,
+                keyFunc,
+                e.NewFunc,
+                e.NewListFunc,
+                attrFunc,
+                options.TriggerFunc,
+                options.Indexers,
+            )
+            {
+                return NewRawStorage(config, newFunc)
+                {
+                    return factory.Create(*config, newFunc)
+                    {
+                        return newETCD3Storage(config, newFunc)
+                        {
+                            client := newETCD3Client(c.Transport)
+                            return etcd3.New(client, c.Codec, newFunc, ...), destroyFunc, nil
+                            {
+                                return newStore(c, codec, newFunc, ...)
+                                {
+                                    result := &store{
+                                        client:              c,
+                                        codec:               codec,
+                                        versioner:           versioner,
+                                        watcher:             newWatcher(c, codec, groupResource, newFunc, versioner),
+                                        leaseManager:        newDefaultLeaseManager(c, leaseManagerConfig),
+                                    }
+                                    return result
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            e.StorageVersioner = opts.StorageConfig.EncodeVersioner
+        }
+    }
+
+	statusStore := *store
+	statusStore.UpdateStrategy = registrypod.StatusStrategy
+	statusStore.ResetFieldsStrategy = registrypod.StatusStrategy
+	ephemeralContainersStore := *store
+	ephemeralContainersStore.UpdateStrategy = registrypod.EphemeralContainersStrategy
+
+	bindingREST := &BindingREST{store: store}
+	return PodStorage{
+		Pod:                 &REST{store, proxyTransport},
+		Binding:             &BindingREST{store: store},
+		LegacyBinding:       &LegacyBindingREST{bindingREST},
+		Eviction:            newEvictionStorage(&statusStore, podDisruptionBudgetClient),
+		Status:              &StatusREST{store: &statusStore},
+		EphemeralContainers: &EphemeralContainersREST{store: &ephemeralContainersStore},
+		Log:                 &podrest.LogREST{Store: store, KubeletConn: k},
+		Proxy:               &podrest.ProxyREST{Store: store, ProxyTransport: proxyTransport},
+		Exec:                &podrest.ExecREST{Store: store, KubeletConn: k},
+		Attach:              &podrest.AttachREST{Store: store, KubeletConn: k},
+		PortForward:         &podrest.PortForwardREST{Store: store, KubeletConn: k},
+	}, nil
 }
 
 ```
