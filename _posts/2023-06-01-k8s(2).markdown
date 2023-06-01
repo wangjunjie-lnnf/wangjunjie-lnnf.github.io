@@ -1,0 +1,764 @@
+---
+layout: post
+title:  "k8s"
+date:   2023-06-01 10:22:07 +0000
+categories: jekyll
+tags: k8s
+---
+
+# k8s
+
+内容太多了，拆成2块，参考[上篇](/jekyll/2023/05/04/k8s.html)
+
+## informer
+
+`k8s`的核心机制是`apiserver`通过etcd对各种资源做增删改查，其他组件基于`watch`机制做出相应变化。实现一套高效率且不丢失事件的`watch`机制至关重要。
+
+![informer](/assets/images/2023-06-01/informer.png)
+
+```go
+
+// 创建informer
+// defaultEventHandlerResyncPeriod: 定时全量同步以确保不丢失event
+func NewSharedInformer(lw ListerWatcher, exampleObject runtime.Object, defaultEventHandlerResyncPeriod time.Duration) SharedInformer {
+    return NewSharedIndexInformer(lw, exampleObject, defaultEventHandlerResyncPeriod, Indexers{})
+    {
+        sharedIndexInformer := &sharedIndexInformer{
+            processor:                       &sharedProcessor{clock: realClock},
+            indexer:                         NewIndexer(DeletionHandlingMetaNamespaceKeyFunc, indexers),
+            listerWatcher:                   lw,
+            objectType:                      exampleObject,
+            resyncCheckPeriod:               defaultEventHandlerResyncPeriod,
+            defaultEventHandlerResyncPeriod: defaultEventHandlerResyncPeriod,
+            cacheMutationDetector:           NewCacheMutationDetector(fmt.Sprintf("%T", exampleObject)),
+            clock:                           realClock,
+        }
+        return sharedIndexInformer
+    }
+}
+
+// 注册handler
+func (s *sharedIndexInformer) AddEventHandler(handler ResourceEventHandler) (ResourceEventHandlerRegistration, error) {
+    return s.AddEventHandlerWithResyncPeriod(handler, s.defaultEventHandlerResyncPeriod)
+    {
+        listener := newProcessListener(handler, resyncPeriod, ...)
+        {
+            return &processorListener{
+                nextCh:                make(chan interface{}),
+                addCh:                 make(chan interface{}),
+                handler:               handler,
+                pendingNotifications:  *buffer.NewRingGrowing(bufferSize),
+                requestedResyncPeriod: requestedResyncPeriod,
+                resyncPeriod:          resyncPeriod,
+            }
+        }
+
+        handle := s.processor.addListener(listener)
+        {
+            p.listeners[listener] = true
+
+            // 中途加入直接启动
+            if p.listenersStarted {
+                p.wg.Start(listener.run)
+                p.wg.Start(listener.pop)
+            }
+        }
+
+        // 处理存量
+        for _, item := range s.indexer.List() {
+            listener.add(addNotification{newObj: item})
+            {
+                p.addCh <- notification
+            }
+        }
+    }
+}
+
+// 启动informer
+func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
+
+    // event队列
+    fifo := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
+        KnownObjects:          s.indexer,
+        EmitDeltaTypeReplaced: true,
+        Transformer:           s.transform,
+    })
+
+    cfg := &Config{
+        Queue:            fifo,
+        ListerWatcher:    s.listerWatcher,
+        ObjectType:       s.objectType,
+        FullResyncPeriod: s.resyncCheckPeriod,
+        RetryOnError:     false,
+        ShouldResync:     s.processor.shouldResync,
+
+        Process:           s.HandleDeltas,
+        WatchErrorHandler: s.watchErrorHandler,
+    }
+
+    wg.StartWithChannel(processorStopCh, s.processor.run)
+    {
+        for listener := range p.listeners {
+            p.wg.Start(listener.run)
+            {
+                // 处理新增事件
+                for next := range p.nextCh {
+                    switch notification := next.(type) {
+                    case updateNotification:
+                        p.handler.OnUpdate(notification.oldObj, notification.newObj)
+                    case addNotification:
+                        p.handler.OnAdd(notification.newObj)
+                    case deleteNotification:
+                        p.handler.OnDelete(notification.oldObj)
+                    default:
+                        utilruntime.HandleError(fmt.Errorf("unrecognized notification: %T", next))
+                    }
+                }
+            }
+
+            p.wg.Start(listener.pop)
+            {
+                var nextCh chan<- interface{}
+                var notification interface{}
+                for {
+                    select {
+                    case nextCh <- notification:
+                        // Notification dispatched
+                        var ok bool
+                        notification, ok = p.pendingNotifications.ReadOne()
+                        if !ok { // Nothing to pop
+                            nextCh = nil // Disable this select case
+                        }
+                    
+                    // 处理全量和漏掉的event
+                    case notificationToAdd, ok := <-p.addCh:
+                        if notification == nil { 
+                            notification = notificationToAdd
+                            nextCh = p.nextCh
+                        } else { // There is already a notification waiting to be dispatched
+                            p.pendingNotifications.WriteOne(notificationToAdd)
+                        }
+                    }
+                }
+            }
+        }
+        p.listenersStarted = true
+    }
+
+    s.controller = New(cfg)
+    s.controller.Run(stopCh)
+    {
+        r := NewReflector(
+            c.config.ListerWatcher,
+            c.config.ObjectType,
+            c.config.Queue,
+            c.config.FullResyncPeriod,
+        )
+
+        wg.StartWithChannel(stopCh, r.Run)
+        {
+            r.ListAndWatch(stopCh)
+            {
+                // 初始全量同步
+                r.list(stopCh)
+                {
+                    
+                    // 分页查询
+                    pager := pager.New(pager.SimplePageFunc(func(opts metav1.ListOptions) (runtime.Object, error) {
+                        return r.listerWatcher.List(opts)
+                    }))
+
+                    list, paginatedResult = pager.List(context.Background(), options)
+
+                    r.syncWith(items, resourceVersion)
+                    {
+                        found := make([]interface{}, 0, len(items))
+                        for _, item := range items {
+                            found = append(found, item)
+                        }
+                        return r.store.Replace(found, resourceVersion)
+                    }
+                }
+
+                // 重新检查队列中每个对象
+                go func() {                    
+                    for {
+                        select {
+                        case <-resyncCh:
+                        case <-stopCh:
+                            return
+                        case <-cancelCh:
+                            return
+                        }
+
+                        if r.ShouldResync == nil || r.ShouldResync() {
+                            r.store.Resync()
+                            {
+                                keys := f.knownObjects.ListKeys()
+                                for _, k := range keys {
+                                    f.syncKeyLocked(k)
+                                    {
+                                        obj, exists := f.knownObjects.GetByKey(key)
+                                        f.queueActionLocked(Sync, obj)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }()
+
+                for {
+                    // etcd的watch机制
+                    w := r.listerWatcher.Watch(options)
+                    watchHandler(start, w, r.store, ...)
+                    {
+                        for {
+                            select {
+                            case event, ok := <-w.ResultChan():
+                                switch event.Type {
+                                case watch.Added:
+                                    store.Add(event.Object)
+                                    {
+                                        f.queueActionLocked(Added, obj)
+                                    }
+                                case watch.Modified:
+                                    store.Update(event.Object)
+                                    {
+                                        f.queueActionLocked(Updated, obj)
+                                    }
+                                case watch.Deleted:
+                                    store.Delete(event.Object)
+                                    {
+                                        f.queueActionLocked(Deleted, obj)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 定时查缺补漏
+        wait.Until(c.processLoop, time.Second, stopCh)
+        {
+            for {
+                obj, err := c.config.Queue.Pop(PopProcessFunc(c.config.Process))
+                {
+                    processDeltas(s, s.indexer, deltas)
+                    {
+                        for _, d := range deltas {
+                            obj := d.Object
+
+                            // ListAndWatch的list会定时全量同步数据到delta，类型为Replace
+                            switch d.Type {
+                            case Sync, Replaced, Added, Updated:
+                                if old, exists, err := clientState.Get(obj); err == nil && exists {
+                                    if err := clientState.Update(obj); err != nil {
+                                        return err
+                                    }
+                                    handler.OnUpdate(old, obj)
+                                } else {
+                                    if err := clientState.Add(obj); err != nil {
+                                        return err
+                                    }
+                                    handler.OnAdd(obj)
+                                }
+                            case Deleted:
+                                if err := clientState.Delete(obj); err != nil {
+                                    return err
+                                }
+                                handler.OnDelete(obj)
+                            }
+                        }
+                    }
+                }
+
+                if err != nil {
+                    if err == ErrFIFOClosed {
+                        return
+                    }
+                    if c.config.RetryOnError {
+                        // This is the safe way to re-enqueue.
+                        c.config.Queue.AddIfNotPresent(obj)
+                    }
+                }
+            }
+        }
+    }
+}
+
+```
+
+## kube-controller-manager
+
+```go
+
+func NewControllerManagerCommand() *cobra.Command {
+    cmd := &cobra.Command{
+        Use: "kube-controller-manager",
+
+        RunE: func(cmd *cobra.Command, args []string) error {
+
+            c, err := s.Config(KnownControllers(), ControllersDisabledByDefault.List())
+            
+            return Run(c.Complete(), wait.NeverStop)
+            {
+                // 监控服务
+                handler := genericcontrollermanager.BuildHandlerChain(...)
+                c.SecureServing.Serve(handler, 0, stopCh)
+
+                run := func(ctx context.Context, startSATokenController InitFunc, initializersFunc ControllerInitializersFunc) {
+                    controllerContext, err := CreateControllerContext(...)
+
+                    // controller列表
+                    controllerInitializers := initializersFunc(...)
+                    {
+                        register("endpoint", startEndpointController)
+                        register("endpointslice", startEndpointSliceController)
+                        register("endpointslicemirroring", startEndpointSliceMirroringController)
+                        register("replicationcontroller", startReplicationController)
+                        register("podgc", startPodGCController)
+                        register("resourcequota", startResourceQuotaController)
+                        register("namespace", startNamespaceController)
+                        register("serviceaccount", startServiceAccountController)
+                        register("garbagecollector", startGarbageCollectorController)
+                        register("daemonset", startDaemonSetController)
+                        register("job", startJobController)
+                        register("deployment", startDeploymentController)
+                        register("replicaset", startReplicaSetController)
+                        register("horizontalpodautoscaling", startHPAController)
+                        register("disruption", startDisruptionController)
+                        register("statefulset", startStatefulSetController)
+                        register("cronjob", startCronJobController)
+                        register("csrsigning", startCSRSigningController)
+                        register("csrapproving", startCSRApprovingController)
+                        register("csrcleaner", startCSRCleanerController)
+                        register("ttl", startTTLController)
+                        register("bootstrapsigner", startBootstrapSignerController)
+                        register("tokencleaner", startTokenCleanerController)
+                        register("nodeipam", startNodeIpamController)
+                        register("nodelifecycle", startNodeLifecycleController)
+                        if loopMode == IncludeCloudLoops {
+                            register("service", startServiceController)
+                            register("route", startRouteController)
+                            register("cloud-node-lifecycle", startCloudNodeLifecycleController)
+                        }
+                        register("persistentvolume-binder", startPersistentVolumeBinderController)
+                        register("attachdetach", startAttachDetachController)
+                        register("persistentvolume-expander", startVolumeExpandController)
+                        register("clusterrole-aggregation", startClusterRoleAggregrationController)
+                        register("pvc-protection", startPVCProtectionController)
+                        register("pv-protection", startPVProtectionController)
+                        register("ttl-after-finished", startTTLAfterFinishedController)
+                        register("root-ca-cert-publisher", startRootCACertPublisher)
+                        register("ephemeral-volume", startEphemeralVolumeController)
+                    }
+
+                    StartControllers(...)
+                    {
+                        for controllerName, initFn := range controllers {
+                            if !controllerCtx.IsControllerEnabled(controllerName) {
+                                klog.Warningf("%q is disabled", controllerName)
+                                continue
+                            }
+
+                            ctrl, started := initFn(ctx, controllerCtx)
+
+                            check := controllerhealthz.NamedPingChecker(controllerName)
+                            if ctrl != nil {
+                                if healthCheckable, ok := ctrl.(controller.HealthCheckable); ok {
+                                    if realCheck := healthCheckable.HealthChecker(); realCheck != nil {
+                                        check = controllerhealthz.NamedHealthChecker(controllerName, realCheck)
+                                    }
+                                }
+                            }
+                            controllerChecks = append(controllerChecks, check)
+                        }
+
+                        // 监控controller
+                        healthzHandler.AddHealthChecker(controllerChecks...)
+                    }
+
+                    // 启动informer
+                    controllerContext.InformerFactory.Start(stopCh)
+                    controllerContext.ObjectOrMetadataInformerFactory.Start(stopCh)
+                    close(controllerContext.InformersStarted)
+
+                    <-ctx.Done()
+                }
+
+                // leader选举
+                go leaderElectAndRun(c, id, electionChecker,
+                    c.ComponentConfig.Generic.LeaderElection.ResourceLock,
+                    c.ComponentConfig.Generic.LeaderElection.ResourceName,
+                    leaderelection.LeaderCallbacks{
+                        OnStartedLeading: func(ctx context.Context) {
+                            initializersFunc := NewControllerInitializers
+                            run(ctx, startSATokenController, initializersFunc)
+                        },
+                        OnStoppedLeading: func() {
+                            klog.ErrorS(nil, "leaderelection lost")
+                            klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+                        },
+                    })
+            }
+        },
+    }
+
+    fs := cmd.Flags()
+    // 命令行参数
+    namedFlagSets := s.Flags(KnownControllers(), ControllersDisabledByDefault.List())
+    verflag.AddFlags(namedFlagSets.FlagSet("global"))
+    globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
+    registerLegacyGlobalFlags(namedFlagSets)
+    for _, f := range namedFlagSets.FlagSets {
+        fs.AddFlagSet(f)
+    }
+}
+
+```
+
+以典型的`replicaset`为例分析controller的机制
+
+```go
+
+func startReplicaSetController(ctx context.Context, controllerContext ControllerContext) (controller.Interface, bool, error) {
+    rsc := replicaset.NewReplicaSetController(
+        controllerContext.InformerFactory.Apps().V1().ReplicaSets(),
+        controllerContext.InformerFactory.Core().V1().Pods(),
+        controllerContext.ClientBuilder.ClientOrDie("replicaset-controller"),
+        replicaset.BurstReplicas,
+    )
+    {
+        NewBaseController(rsInformer, podInformer, kubeClient, ...)
+        {
+            rsc := &ReplicaSetController{
+                GroupVersionKind: gvk,
+                kubeClient:       kubeClient,
+                podControl:       podControl,
+                eventBroadcaster: eventBroadcaster,
+                burstReplicas:    burstReplicas,
+                expectations:     controller.NewUIDTrackingControllerExpectations(controller.NewControllerExpectations()),
+                queue:            workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), queueName),
+            }
+
+            // 监听ReplicaSet的变更
+            rsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+                AddFunc:    rsc.addRS,
+                UpdateFunc: rsc.updateRS,
+                DeleteFunc: rsc.deleteRS,
+            })
+
+            // 监听Pod的变更：把其关联的ReplicaSet加入queue
+            podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+                AddFunc: rsc.addPod,
+                UpdateFunc: rsc.updatePod,
+                DeleteFunc: rsc.deletePod,
+            })
+
+            rsc.syncHandler = rsc.syncReplicaSet
+        }
+    }
+    
+    rsc.Run(ctx, int(controllerContext.ComponentConfig.ReplicaSetController.ConcurrentRSSyncs) /*workers*/)
+    {
+        for i := 0; i < workers; i++ {
+            go wait.UntilWithContext(ctx, rsc.worker, time.Second)
+            {
+                for {
+                    rsc.processNextWorkItem(ctx)
+                    {
+                        // 处理每个变更的ReplicaSet
+                        key := rsc.queue.Get()
+                        rsc.syncHandler(ctx, key.(string))
+                        {
+                            namespace, name := cache.SplitMetaNamespaceKey(key)
+                            // 从cache中查找rs
+                            rs := rsc.rsLister.ReplicaSets(namespace).Get(name)
+
+                            // 状态是否满足要求
+                            rsNeedsSync := rsc.expectations.SatisfiedExpectations(key)
+
+                            // 属于此rs的pod
+                            selector := metav1.LabelSelectorAsSelector(rs.Spec.Selector)
+
+                            // 本地缓存的所有pod
+                            allPods := rsc.podLister.Pods(rs.Namespace).List(labels.Everything())
+
+                            // Ignore inactive pods.
+                            filteredPods := controller.FilterActivePods(allPods)
+
+                            // 筛选属于此rs的pod
+                            filteredPods = rsc.claimPods(ctx, rs, selector, filteredPods)
+
+                            if rsNeedsSync && rs.DeletionTimestamp == nil {
+                                rsc.manageReplicas(ctx, filteredPods, rs)
+                                {
+                                    diff := len(filteredPods) - int(*(rs.Spec.Replicas))
+                                    rsKey := controller.KeyFunc(rs)
+
+                                    if diff < 0 {
+                                        diff *= -1
+                                        // 小批量变动
+                                        if diff > rsc.burstReplicas {
+                                            diff = rsc.burstReplicas
+                                        }
+
+                                        slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
+                                            // 通过apiserver创建pod
+                                            rsc.podControl.CreatePods(ctx, rs.Namespace, &rs.Spec.Template, rs, ...)
+                                        })
+                                    } else if diff > 0 {
+                                        podsToDelete := getPodsToDelete(filteredPods, relatedPods, diff)
+
+                                        for _, pod := range podsToDelete {
+                                            go func(targetPod *v1.Pod) {
+                                                // 通过apiserver删除pod
+                                                rsc.podControl.DeletePod(ctx, rs.Namespace, targetPod.Name, rs)
+                                            }(pod)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 更新rs的状态
+                            newStatus := calculateStatus(rs, filteredPods, manageReplicasErr)
+                            updateReplicaSetStatus(rsc.kubeClient.AppsV1().ReplicaSets(rs.Namespace), rs, newStatus)
+
+                            // 未到达目标状态重新放回队列
+                            if manageReplicasErr == nil && updatedRS.Spec.MinReadySeconds > 0 &&
+                                updatedRS.Status.ReadyReplicas == *(updatedRS.Spec.Replicas) &&
+                                updatedRS.Status.AvailableReplicas != *(updatedRS.Spec.Replicas) {
+                                rsc.queue.AddAfter(key, time.Duration(updatedRS.Spec.MinReadySeconds)*time.Second)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        <-ctx.Done()
+    }
+}
+
+```
+
+## kube-scheduler
+
+![scheduler](/assets/images/2023-06-01/scheduler.png)
+
+```go
+
+func NewSchedulerCommand(registryOptions ...Option) *cobra.Command {
+
+    opts := options.NewOptions()
+    cmd := &cobra.Command{
+        Use: "kube-scheduler",
+        RunE: func(cmd *cobra.Command, args []string) error {
+            return runCommand(cmd, opts, registryOptions...)
+            {
+                cc, sched := Setup(ctx, opts, registryOptions...)
+                {
+                    c := opts.Config()
+                    // Get the completed config
+                    cc := c.Complete()
+
+                    sched, err := scheduler.New(cc.Client,
+                        cc.InformerFactory,
+                        cc.DynInformerFactory,
+                        ...
+                    ) {
+                        // 优先级队列
+                        podQueue := internalqueue.NewSchedulingQueue(
+                            // 优先级队列的排序函数
+                            profiles[options.profiles[0].SchedulerName].QueueSortFunc(),
+                            informerFactory,
+                            ...
+                        )
+
+                        sched := &Scheduler{
+                            Cache:                    schedulerCache,
+                            client:                   client,
+                            nodeInfoSnapshot:         snapshot,
+                            percentageOfNodesToScore: options.percentageOfNodesToScore,
+                            Extenders:                extenders,
+                            NextPod:                  internalqueue.MakeNextPodFunc(podQueue),
+                            StopEverything:           stopEverything,
+                            SchedulingQueue:          podQueue,
+                            Profiles:                 profiles,
+                        }
+
+                        sched.applyDefaultHandlers()
+                        {
+                            s.SchedulePod = s.schedulePod
+                            s.FailureHandler = s.handleSchedulingFailure
+                        }
+
+                        addAllEventHandlers(sched, informerFactory, ...)
+                        {
+                            // 监听pod
+                            informerFactory.Core().V1().Pods().Informer().AddEventHandler(
+                                cache.FilteringResourceEventHandler{
+                                    FilterFunc: func(obj interface{}) bool {
+                                        switch t := obj.(type) {
+                                        case *v1.Pod:
+                                            // 重新调度
+                                            return assignedPod(t)
+                                    },
+                                    Handler: cache.ResourceEventHandlerFuncs{
+                                        AddFunc:    sched.addPodToCache,
+                                        UpdateFunc: sched.updatePodInCache,
+                                        DeleteFunc: sched.deletePodFromCache,
+                                    },
+                                },
+                            )
+
+                            // 监听pod
+                            informerFactory.Core().V1().Pods().Informer().AddEventHandler(
+                                cache.FilteringResourceEventHandler{
+                                    FilterFunc: func(obj interface{}) bool {
+                                        switch t := obj.(type) {
+                                        case *v1.Pod:
+                                            // 首次调度
+                                            return !assignedPod(t) && responsibleForPod(t, sched.Profiles)
+                                    },
+                                    Handler: cache.ResourceEventHandlerFuncs{
+                                        AddFunc:    sched.addPodToSchedulingQueue,
+                                        UpdateFunc: sched.updatePodInSchedulingQueue,
+                                        DeleteFunc: sched.deletePodFromSchedulingQueue,
+                                    },
+                                },
+                            )
+
+                            // 监听node
+                            informerFactory.Core().V1().Nodes().Informer().AddEventHandler(
+                                cache.ResourceEventHandlerFuncs{
+                                    AddFunc:    sched.addNodeToCache,
+                                    UpdateFunc: sched.updateNodeInCache,
+                                    DeleteFunc: sched.deleteNodeFromCache,
+                                },
+                            )
+                        }
+                    }
+                    
+                    return &cc, sched
+                }
+
+                return Run(ctx, cc, sched)
+                {
+                    // 监控服务
+                    handler := buildHandlerChain(newHealthzAndMetricsHandler(...))
+                    cc.SecureServing.Serve(handler, 0, ctx.Done())
+
+                    // informer启动
+                    cc.InformerFactory.Start(ctx.Done())
+
+                    // Wait for all caches to sync before scheduling.
+                    cc.InformerFactory.WaitForCacheSync(ctx.Done())
+
+                    cc.LeaderElection.Callbacks = leaderelection.LeaderCallbacks{
+                        OnStartedLeading: func(ctx context.Context) {
+                            close(waitingForLeader)
+                            sched.Run(ctx)
+                            {
+                                sched.SchedulingQueue.Run()
+                                {
+                                    // 调度失败后间隔一段事件重新调度 backoffQ -> activeQ
+                                    go wait.Until(p.flushBackoffQCompleted, 1.0*time.Second, p.stop)
+                                    // 处理未调度的pod
+                                    go wait.Until(p.flushUnschedulablePodsLeftover, 30*time.Second, p.stop)
+                                }
+
+                                go wait.UntilWithContext(ctx, sched.scheduleOne, 0)
+                                {
+                                    podInfo := sched.NextPod()
+                                    pod := podInfo.Pod
+                                    fwk := sched.frameworkForPod(pod)
+                                    {
+                                        fwk := sched.Profiles[pod.Spec.SchedulerName]
+                                    }
+
+                                    if sched.skipPodSchedule(fwk, pod) {
+                                        return
+                                    }
+
+                                    // tries to schedule a single Pod.
+                                    scheduleResult, assumedPodInfo := sched.schedulingCycle(...)
+                                    {
+                                        pod := podInfo.Pod
+                                        scheduleResult := sched.SchedulePod(ctx, fwk, state, pod)
+                                        {
+                                            // 通过plugin过滤node: 硬性条件必须满足
+                                            feasibleNodes, diagnosis := sched.findNodesThatFitPod(ctx, fwk, state, pod)
+
+                                            // When only one node after predicate, just use it.
+                                            if len(feasibleNodes) == 1 {
+                                                return ScheduleResult{
+                                                    SuggestedHost:  feasibleNodes[0].Name,
+                                                    EvaluatedNodes: 1 + len(diagnosis.NodeToStatusMap),
+                                                    FeasibleNodes:  1,
+                                                }, nil
+                                            }
+
+                                            // 计算node优先级: 择优
+                                            priorityList, err := prioritizeNodes(..., fwk, state, pod, feasibleNodes)
+
+                                            host := selectHost(priorityList)
+
+                                            return ScheduleResult{
+                                                SuggestedHost:  host,
+                                                EvaluatedNodes: len(feasibleNodes) + len(diagnosis.NodeToStatusMap),
+                                                FeasibleNodes:  len(feasibleNodes),
+                                            }, err
+                                        }
+
+                                        // Run "permit" plugins.
+                                        runPermitStatus := fwk.RunPermitPlugins(..., assumedPod, scheduleResult.SuggestedHost)
+                                    }
+
+                                    // bind the pod to its host asynchronously
+                                    go func() {
+                                        // 更新调度结果
+                                        sched.bindingCycle(..., scheduleResult, assumedPodInfo, ...)
+                                    }()
+                                }
+                            }
+                        },
+                        OnStoppedLeading: func() {
+                            select {
+                            case <-ctx.Done():
+                                // We were asked to terminate. Exit 0.
+                                klog.InfoS("Requested to terminate, exiting")
+                                os.Exit(0)
+                            default:
+                                // We lost the lock.
+                                klog.ErrorS(nil, "Leaderelection lost")
+                                klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+                            }
+                        },
+                    }
+
+                    // leader选举
+                    leaderElector := leaderelection.NewLeaderElector(*cc.LeaderElection)
+                    leaderElector.Run(ctx)
+                }
+            }
+        },
+    }
+
+    // 命令行参数
+    nfs := opts.Flags
+    verflag.AddFlags(nfs.FlagSet("global"))
+    globalflag.AddGlobalFlags(nfs.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
+    fs := cmd.Flags()
+    for _, f := range nfs.FlagSets {
+        fs.AddFlagSet(f)
+    }
+}
+
+```
+
+## kubelet
+
+## kube-proxy

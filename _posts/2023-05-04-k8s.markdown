@@ -1705,13 +1705,6 @@ func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGet
 
 ```
 
-## kube-controller-manager
-
-## kube-scheduler
-
-## kubelet
-
-## kube-proxy
 
 
 
