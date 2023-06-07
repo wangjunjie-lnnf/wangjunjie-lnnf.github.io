@@ -1,0 +1,431 @@
+---
+layout: post
+title:  "hdfs"
+date:   2023-06-08 00:22:07 +0000
+categories: jekyll
+tags: hadoop hdfs
+---
+
+# hdfs
+
+## 存储结构
+
+### format
+
+```java
+private static boolean format(Configuration conf, boolean force, boolean isInteractive) {
+    // dfs.namenode.name.dir
+    Collection<URI> nameDirsToFormat = FSNamesystem.getNamespaceDirs(conf);
+    // dfs.namenode.shared.edits.dir: 用于active/standby同步
+    List<URI> sharedDirs = FSNamesystem.getSharedEditsDirs(conf);
+    // dfs.namenode.edits.dir, 默认同dfs.namenode.name.dir
+    List<URI> editDirsToFormat = FSNamesystem.getNamespaceEditsDirs(conf);
+
+    FSImage fsImage = new FSImage(conf, nameDirsToFormat /*imageDirs*/, editDirsToFormat /*editsDirs*/);
+    {
+        this.storage = new NNStorage(conf, imageDirs, editsDirs);
+        this.editLog = FSEditLog.newInstance(conf, storage, editsDirs);
+        archivalManager = new NNStorageRetentionManager(conf, storage, editLog);
+    }
+
+    FSNamesystem fsn = new FSNamesystem(conf, fsImage);
+    {
+        this.dtSecretManager = createDelegationTokenSecretManager(conf);
+        // root根目录
+        this.dir = new FSDirectory(this, conf);
+        {
+            this.inodeId = new INodeId();
+            this.rootDir = createRoot(ns);
+            this.inodeMap = INodeMap.newInstance(rootDir);
+        }
+
+        this.snapshotManager = new SnapshotManager(conf, dir);
+        this.cacheManager = new CacheManager(this, conf, blockManager);
+    }
+
+    fsImage.getEditLog().initJournalsForWrite();
+    {
+        initJournals(this.editsDirs);
+        {
+            journalSet = new JournalSet(minimumRedundantJournals);
+
+            for (URI u : dirs) {
+                // 被${dfs.namenode.edits.dir.required}指定的dir和sharedEditDir都视为required
+                // 标记为required的每个dir每个log必须都写入成功，否则namenode会抛异常退出
+                boolean required = FSNamesystem.getRequiredNamespaceEditsDirs(conf).contains(u);
+
+                if (u.getScheme().equals(NNStorage.LOCAL_URI_SCHEME)) {
+                    // 基于file://的editDirs
+                    StorageDirectory sd = storage.getStorageDirectory(u);
+                    journalSet.add(new FileJournalManager(conf, sd, storage), required, ...);
+                } else {
+                    // 创建远程journal，基于shcema可扩展，默认支持qjournal://
+                    journalSet.add(createJournal(u), required, sharedEditsDirs.contains(u));
+                }
+            }
+        }
+    }
+
+    fsImage.format(fsn, clusterId, force);
+    {
+        storage.format(ns);
+        {
+            for (Iterator<StorageDirectory> it = dirIterator(); it.hasNext();) {
+                StorageDirectory sd = it.next();
+                // format nameDirs & sharedEditDir & editDirs
+                format(sd);
+                {
+                    // 清空或创建current目录
+                    sd.clearDirectory();
+                    // 元数据写入current/VERSION
+                    writeProperties(sd);
+                    // 把0写入current/seen_txid
+                    writeTransactionIdFile(sd, 0);
+                }
+            }
+        }
+
+        editLog.formatNonFileJournals(ns, force);
+        {
+            for (JournalManager jm : journalSet.getJournalManagers()) {
+                if (!(jm instanceof FileJournalManager)) {
+                    // 通知每个非file://协议的journal格式化
+                    jm.format(nsInfo, force);
+                }
+            }
+        }
+
+        saveFSImageInAllDirs(fsn /*source*/, 0 /*txid*/);
+        {
+            saveFSImageInAllDirs(source, NameNodeFile.IMAGE, txid, null);
+            {
+                // 每个nameDir启动一个线程保存当前内存中的FSNamesystem
+                for (Iterator<StorageDirectory> it = storage.dirIterator(NameNodeDirType.IMAGE); it.hasNext();) {
+                    StorageDirectory sd = it.next();
+                    FSImageSaver saver = new FSImageSaver(ctx, sd, nnf);
+                    {
+                        FSImageFormatProtobuf.Saver saver = new FSImageFormatProtobuf.Saver(context);
+                        FSImageCompression compression = FSImageCompression.createCompression(conf);
+                        // 以Protobuf格式保存fsimage
+                        saver.save(newFile, compression);
+                        {
+                            underlyingOutputStream = new DigestOutputStream(new BufferedOutputStream(fout), digester);
+                            // 写入魔数HDFSIMG1
+                            underlyingOutputStream.write(FSImageUtil.MAGIC_HEADER);
+
+                            // FileSummary保存在fsimage的末尾
+                            // 格式: 版本号 + 压缩算法 + n个section(name + length + offset)
+                            FileSummary.Builder b = FileSummary.newBuilder()
+                                .setOndiskVersion(FSImageUtil.FILE_VERSION)
+                                .setLayoutVersion(...);
+
+                            // 压缩FsImage
+                            codec = compression.getImageCodec();
+                            if (codec != null) {
+                                b.setCodec(codec.getClass().getCanonicalName());
+                                sectionOutputStream = codec.createOutputStream(underlyingOutputStream);
+                            } else {
+                                sectionOutputStream = underlyingOutputStream;
+                            }
+
+                            // 写入fsimage.proto#NameSystemSection
+                            saveNameSystemSection(b);
+
+                            // 写入fsimage.proto#ErasureCodingSection
+                            saveErasureCodingSection(b);
+
+                            saveInodes(b);
+                            {
+                                FSImageFormatPBINode.Saver saver = new FSImageFormatPBINode.Saver(this, summary);
+
+                                // 保存inodemap到INodeSection，不包含dir的children信息！！！
+                                saver.serializeINodeSection(sectionOutputStream);
+                                // 保存每个dir及其children的关系到INodeDirectorySection
+                                saver.serializeINodeDirectorySection(sectionOutputStream);
+                                // 保存正在创建的文件到FilesUnderConstructionSection
+                                saver.serializeFilesUCSection(sectionOutputStream);
+                            }
+
+                            // 镜像保存创建时的信息，后续变更基于镜像保存差异信息
+                            saveSnapshots(b);
+                            {
+                                FSImageFormatPBSnapshot.Saver snapshotSaver = new FSImageFormatPBSnapshot.Saver(...);
+
+                                snapshotSaver.serializeSnapshotSection(sectionOutputStream);
+                                snapshotSaver.serializeSnapshotDiffSection(sectionOutputStream);
+                                snapshotSaver.serializeINodeReferenceSection(sectionOutputStream);
+                            }
+
+                            saveSecretManagerSection(b);
+
+                            saveCacheManagerSection(b);
+
+                            saveStringTableSection(b);
+
+                            flushSectionOutputStream();
+
+                            // 保存`格式版本 + 编码格式 + section索引`到FileSummary
+                            FileSummary summary = b.build();
+                            saveFileSummary(underlyingOutputStream, summary);
+                        }
+
+                        // 生成md5文件
+                        MD5FileUtils.saveMD5File(dstFile, saver.getSavedDigest());
+                    }
+
+                    Thread saveThread = new Thread(saver, saver.toString());
+                    saveThreads.add(saveThread);
+                    saveThread.start();
+                }
+
+                // rename /current/fsimage.ckpt_{txid} 为 /current/fsimage_{txid}
+                renameCheckpoint(txid, NameNodeFile.IMAGE_NEW, nnf, false);
+            }
+        }
+    }
+}
+```
+
+### fsimage
+
+```protobuf
+
+// 魔数HDFSIMG1
+
+// 写入NameSystemSection
+message NameSystemSection {
+  optional uint32 namespaceId = 1;
+  optional uint64 genstampV1 = 2; // legacy generation stamp
+  optional uint64 genstampV2 = 3; // generation stamp of latest version
+  optional uint64 genstampV1Limit = 4;
+  optional uint64 lastAllocatedBlockId = 5;
+  optional uint64 transactionId = 6;
+  optional uint64 rollingUpgradeStartTime = 7;
+  optional uint64 lastAllocatedStripedBlockId = 8;
+}
+
+// 写入ErasureCodingSection
+message ErasureCodingSection {
+  repeated ErasureCodingPolicyProto policies = 1;
+}
+
+// INodeSection: 文件系统的每个节点
+message INodeSection {
+  message FileUnderConstructionFeature {
+    optional string clientName = 1;
+    optional string clientMachine = 2;
+  }
+
+  // 表示一个文件
+  message INodeFile {
+    optional uint32 replication = 1;
+    optional uint64 modificationTime = 2;
+    optional uint64 accessTime = 3;
+    optional uint64 preferredBlockSize = 4;
+    optional fixed64 permission = 5;
+    // 只保存blockId、创建时间、block大小，其他信息从nm的heartbeat中获得
+    repeated BlockProto blocks = 6;
+    optional FileUnderConstructionFeature fileUC = 7;
+    optional AclFeatureProto acl = 8;
+    optional XAttrFeatureProto xAttrs = 9;
+    optional uint32 storagePolicyID = 10;
+    optional BlockTypeProto blockType = 11;
+    optional uint32 erasureCodingPolicyID = 12;
+  }
+
+  // 表示一个目录
+  message INodeDirectory {
+    optional uint64 modificationTime = 1;
+    // namespace quota
+    optional uint64 nsQuota = 2;
+    // diskspace quota
+    optional uint64 dsQuota = 3;
+    optional fixed64 permission = 4;
+    optional AclFeatureProto acl = 5;
+    optional XAttrFeatureProto xAttrs = 6;
+    optional QuotaByStorageTypeFeatureProto typeQuotas = 7;
+  }
+
+  // 表示软连接
+  message INodeSymlink {
+    optional fixed64 permission = 1;
+    optional bytes target = 2;
+    optional uint64 modificationTime = 3;
+    optional uint64 accessTime = 4;
+  }
+
+  message INode {
+    enum Type {
+      FILE = 1;
+      DIRECTORY = 2;
+      SYMLINK = 3;
+    };
+    required Type type = 1;
+    required uint64 id = 2;
+    optional bytes name = 3;
+
+    optional INodeFile file = 4;
+    optional INodeDirectory directory = 5;
+    optional INodeSymlink symlink = 6;
+  }
+
+  optional uint64 lastInodeId = 1;
+  optional uint64 numInodes = 2;
+  // repeated INodes..
+}
+
+// INodeDirectorySection: 表示每个dir的children
+message INodeDirectorySection {
+  message DirEntry {
+    optional uint64 parent = 1;
+    // children that are not reference nodes
+    repeated uint64 children = 2 [packed = true];
+    // children that are reference nodes, each element is a reference node id
+    repeated uint32 refChildren = 3 [packed = true];
+  }
+  // repeated DirEntry, ended at the boundary of the section.
+}
+
+// SnapshotSection: 表示某个目录的历史版本
+message SnapshotSection {
+  message Snapshot {
+    optional uint32 snapshotId = 1;
+    // Snapshot root
+    optional INodeSection.INode root = 2;
+  }
+
+  optional uint32 snapshotCounter = 1;
+  repeated uint64 snapshottableDir = 2 [packed = true];
+  // total number of snapshots
+  optional uint32 numSnapshots = 3;
+  // repeated Snapshot...
+}
+
+// ...
+
+// 字符串表
+message StringTableSection {
+  message Entry {
+    optional uint32 id = 1;
+    optional string str = 2;
+  }
+  optional uint32 numEntry = 1;
+  optional uint32 maskBits = 2 [default = 0];
+  // repeated Entry
+}
+
+// FileSummary: 存储在末尾，表示section的索引
+message FileSummary {
+  // The version of the above EBNF grammars.
+  required uint32 ondiskVersion = 1;
+  // layoutVersion describes which features are available in the FSImage.
+  required uint32 layoutVersion = 2;
+  optional string codec         = 3;
+  // index for each section
+  message Section {
+    optional string name = 1;
+    optional uint64 length = 2;
+    optional uint64 offset = 3;
+  }
+  repeated Section sections = 4;
+}
+
+```
+
+### FSNamesystem
+
+```java
+
+public interface Namesystem {
+    // 获取root目录, 进而可以遍历整个文件系统
+    FSDirectory getFSDirectory();
+}
+
+public class FSNamesystem implements Namesystem {
+    FSDirectory dir;
+}
+
+public class FSDirectory {
+    // 存储dir包含的inode
+    INodeDirectory rootDir;
+    // 存储扁平化的inode清单
+    INodeMap inodeMap;
+}
+
+public class INodeDirectory {
+    static final byte[] ROOT_NAME = DFSUtil.string2Bytes("");
+    private List<INode> children
+}
+
+public class INodeMap {
+    GSet<INode, INodeWithAdditionalFields> map;
+}
+
+// 存储普通文件的块信息
+public class INodeFile extends INodeWithAdditionalFields {
+    BlockInfo[] blocks;
+}
+
+// 单个块的元数据
+public class Block {
+    private long blockId;
+    private long numBytes;
+    private long generationStamp;
+}
+
+public abstract class BlockInfo extends Block {
+    // 重复因子
+    private short replication;
+
+    // Block collection ID.
+    private volatile long bcId;
+
+    // Storages this block is replicated on
+    protected DatanodeStorageInfo[] storages;
+}
+
+public class DatanodeStorageInfo {
+    // block所在datanode
+    private final DatanodeDescriptor dn;
+
+    private final String storageID;
+    private StorageType storageType;
+    private State state;
+
+    private long capacity;
+    private long dfsUsed;
+    private long nonDfsUsed;
+    private volatile long remaining;
+    private long blockPoolUsed;
+
+    /** The number of block reports received */
+    private int blockReportCount = 0;
+}
+
+// datanode的地址
+public class DatanodeID {
+    private String ipAddr;     // IP address
+    private ByteString ipAddrBytes; // ipAddr ByteString to save on PB serde
+    private String hostName;   // hostname claimed by datanode
+    private ByteString hostNameBytes; // hostName ByteString to save on PB serde
+    private String peerHostName; // hostname from the actual connection
+    private int xferPort;      // data streaming port
+    private int infoPort;      // info server port
+    private int infoSecurePort; // info server port
+    private int ipcPort;       // IPC server port
+    private String xferAddr;
+}
+
+public class DatanodeInfo extends DatanodeID {
+
+}
+
+public class DatanodeDescriptor extends DatanodeInfo {
+
+}
+
+```
+
+## 读文件
+
+## 写文件
