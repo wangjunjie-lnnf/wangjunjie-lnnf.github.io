@@ -47,6 +47,7 @@ private static boolean format(Configuration conf, boolean force, boolean isInter
     {
         initJournals(this.editsDirs);
         {
+            // journalSet通过冗余避免editLog丢失，避免频繁fsync
             journalSet = new JournalSet(minimumRedundantJournals);
 
             for (URI u : dirs) {
@@ -384,6 +385,8 @@ public abstract class BlockInfo extends Block {
     protected DatanodeStorageInfo[] storages;
 }
 
+// 最关键的信息: 数据块的存储位置
+// 不需要持久化存储，系统启动后通过DN->NN的heartbeat动态收集
 public class DatanodeStorageInfo {
     // block所在datanode
     private final DatanodeDescriptor dn;
@@ -426,6 +429,760 @@ public class DatanodeDescriptor extends DatanodeInfo {
 
 ```
 
+## 客户端
+
+```java
+
+Configuration conf = new HdfsConfiguration();
+URI namenodeUri = new URI("hdfs://localhost:9000");
+FileSystem fs = FileSystem.get(namenodeUri, conf);
+{
+    createFileSystem(uri, conf);
+    {
+        // 通过conf[fs.hdfs.impl]指定或通过ServiceLoader获取
+        // 默认org.apache.hadoop.hdfs.DistributedFileSystem
+        Class<?> clazz = getFileSystemClass(uri.getScheme(), conf);
+        // 使用client指定的conf重新创建FS实例
+        FileSystem fs = (FileSystem)ReflectionUtils.newInstance(clazz, conf);
+        fs.initialize(uri, conf);
+        {
+            this.dfs = new DFSClient(uri, conf, statistics);
+            {
+                // HA模式下根据conf[dfs.namenode.rpc-address.{nnId}.{nnName}]创建namenode client
+                // conf[dfs.client.failover.proxy.provider.{nnId}]指定的类通过逻辑的nnId找到物理的域名和端口
+                // 非HA模式下直接连接namenode uri
+                proxyInfo = NameNodeProxiesClient.createProxyWithClientProtocol(conf, nameNodeUri, nnFallbackToSimpleAuth);
+                // 生成ClientProtocol的代理
+                this.namenode = proxyInfo.getProxy();
+            }
+
+            this.workingDir = getHomeDirectory();
+        }
+    }
+}
+
+```
+
+## 元数据变更: 创建文件流程
+
+```java
+
+fs.createNewFile(new Path("/test/data2.txt"));
+{
+    create(f, overwrite, bufferSize, getDefaultReplication(f), getDefaultBlockSize(f));
+    {
+        DFSOutputStream dfsos = dfs.create(getPathName(p), ..., replication, blockSize, ...);
+        {
+            DFSOutputStream result = DFSOutputStream.newStreamForCreate(this, src, ...);
+            {
+                HdfsFileStatus stat = dfsClient.namenode.create(src, ...);
+                {
+                    // NameNodeRpcServe.java
+                    stat = namesystem.startFile(src, perm, ...);
+                    {
+                        // 从root开始查找指定路径经过的inode
+                        INodesInPath iip = FSDirWriteFileOp.resolvePathForStartFile(dir, ...);
+                        {
+                            iip = dir.resolvePath(pc, src, DirOp.CREATE);
+                            {
+                                // 按路径分隔符分割
+                                byte[][] components = INode.getPathComponents(src);
+                                iip = INodesInPath.resolve(rootDir, components, isRaw);
+                                {
+                                    INode[] inodes = new INode[components.length];
+                                    INode curNode = rootDir;
+                                    while (count < components.length && curNode != null) {
+                                        inodes[inodeNum++] = curNode;
+                                        curNode = dir.getChild(childName, ...);
+                                    }
+                                }
+                            }
+                        }
+
+                        stat = FSDirWriteFileOp.startFile(this, iip, ...);
+                        {
+                            // root目录
+                            FSDirectory fsd = fsn.getFSDirectory();
+                            // 创建父目录
+                            INodesInPath parent = FSDirMkdirOp.createAncestorDirectories(fsd, iip, ...);
+                            {
+                                INodesInPath existing = iip.getExistingINodes();
+                                // create all the missing directories.
+                                final int last = iip.length() - 2;
+                                for (int i = existing.length(); existing != null && i <= last; i++) {
+                                    byte[] component = iip.getPathComponent(i);
+                                    // 级联创建缺失目录
+                                    existing = createSingleDirectory(fsd, existing, component, perm);
+                                    {
+                                        // 创建目录
+                                        unprotectedMkdir(fsd, fsd.allocateNewInodeId(), ...);
+                                        // 记录editLog
+                                        fsd.getEditLog().logMkDir(cur, newNode);
+                                    }
+                                }
+                            }
+
+                            // 创建文件
+                            iip = addFile(fsd, parent, iip.getLastLocalName(), ...);
+                            {
+                                newNode = newINodeFile(fsd.allocateNewInodeId(), ...);
+                                return fsd.addINode(existing, newNode, ...);
+                            }
+
+                            // 记录editLog
+                            fsd.getEditLog().logOpenFile(src, newNode, ...);
+                            {
+                                logEdit(op);
+                                {
+                                    synchronized (this) {
+                                        needsSync = doEditTransaction(op);
+                                        {
+                                            txid++;
+                                            op.setTransactionId(txid);
+
+                                            editLogStream.write(op);
+                                            {
+                                                for (JournalAndStream jas : journals) {
+                                                    try {
+                                                        // JournalSet把操作转发给每个JournalManager！！！
+                                                        if (jas.isActive()) {
+                                                            jas.getCurrentStream().write(op);
+                                                        }
+                                                    } catch (Throwable t) {
+                                                        // 标记为required的journal如果失败则退出namenode
+                                                        if (jas.isRequired()) {
+                                                            abortAllJournals();
+                                                            terminate(1, msg);
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // 询问底层的stream是否flush
+                                            // 基于文件的editLog默认有512k的buf，buf满了就flush
+                                            // 为了保证log不丢失应该同时配置远程的qjournal
+                                            // 通过写多份分布在不同节点的数据来保证数据安全，同时避免频繁flush
+                                            return editLogStream.shouldForceSync();
+                                        }
+                                    }
+                                }
+
+                                if (needsSync) {
+                                    logSync(txid);
+                                    {
+                                        // 处理并行flush
+                                        if (txid <= synctxid) {
+                                            return;
+                                        }
+
+                                        synctxid = txid;
+
+                                        editLogStream.setReadyToFlush();
+                                        editLogStream.flush();
+                                    }
+                                }
+                            }
+                        }
+
+                        // 默认创建文件后会flush
+                        getEditLog().logSync();
+                    }
+                }
+
+                if(stat.getErasureCodingPolicy() != null) {
+                    out = new DFSStripedOutputStream(dfsClient, src, stat, ...);
+                } else {
+                    out = new DFSOutputStream(dfsClient, src, stat, ...);
+                }
+                out.start();
+            }
+
+            // lease相当于会自动续期的分布式锁
+            beginFileLease(result.getFileId(), result);
+            {
+                getLeaseRenewer().put(this);
+                {
+                    daemon = new Daemon(() -> LeaseRenewer.this.run(++currentId));
+                    daemon.start();
+                    {
+                        // 定时检查租期: 只要没挂一直续期
+                        for(long lastRenewed = Time.monotonicNow(); !Thread.interrupted(); Thread.sleep(getSleepPeriod())) {
+                            final long elapsed = Time.monotonicNow() - lastRenewed;
+                            if (elapsed >= getRenewalTime()) {
+                                renew();
+                                {
+                                    for (final DFSClient c : dfsclients) {
+                                        c.renewLease();
+                                        {
+                                            // NameNodeRpcServe.java
+                                            namenode.renewLease(clientName);
+                                            {
+                                                namesystem.renewLease(clientName /*holder*/);
+                                                {
+                                                    leaseManager.renewLease(holder);
+                                                    {
+                                                        renewLease(getLease(holder));
+                                                        {
+                                                            lease.renew();
+                                                            {
+                                                                // 最底层只是记录一个日期而已
+                                                                this.lastUpdate = monotonicNow();
+                                                            }
+                                                        }
+                                                    }
+                                                } 
+                                            }
+
+                                            updateLastLeaseRenewal();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return dfs.createWrappedOutputStream(dfsos, statistics);
+    }
+}
+
+```
+
 ## 读文件
 
+```java
+
+FSDataInputStream fis = fs.open(new Path("/test/data2.txt"));
+{
+    // 相对路径转绝对路径
+    Path absF = fixRelativePart(f);
+    {
+        if (p.isUriPathAbsolute()) {
+            return p;
+        } else {
+            // workingDir固定是/user/xxx，没有cwd的概念
+            return new Path(getWorkingDirectory(), p);
+        }
+    }
+
+    DFSInputStream dfsis = dfs.open(getPathName(p), ...);
+    {
+        // 默认返回前10个block的位置信息
+        LocatedBlocks locatedBlocks = getLocatedBlocks(src, 0 /*start*/);
+        {
+            return namenode.getBlockLocations(src, start, length);
+            {
+                locatedBlocks = namesystem.getBlockLocations(getClientMachine(), src, offset, length);
+                {
+                    GetBlockLocationsResult res = FSDirStatAndListingOp.getBlockLocations(dir, ..., srcArg, offset, length, ...);
+                    {
+                        final INodesInPath iip = fsd.resolvePath(pc, src, DirOp.READ);
+                        String src = iip.getPath();
+                        final INodeFile inode = INodeFile.valueOf(iip.getLastINode(), src);
+                        // 根据内存中inode中的block列表以及offset和length构造
+                        LocatedBlocks blocks = bm.createLocatedBlocks(inode.getBlocks(...), ..., offset, length, ...);
+
+                        // 禁用accessTime可以提高效率
+                        boolean updateAccessTime = fsd.isAccessTimeSupported() && ...;
+                        return new GetBlockLocationsResult(updateAccessTime, blocks, iip);
+                    }
+
+                    inode = res.getIIp().getLastINode();
+                    if (res.updateAccessTime()) {
+                        // 默认3.6秒内只更新一次accessTime
+                        boolean updateAccessTime = now > inode.getAccessTime() + dir.getAccessTimePrecision();
+                        if (updateAccessTime) {
+                            src = inode.getFullPathName();
+                            final INodesInPath iip = dir.resolvePath(pc, src, DirOp.READ);
+                            // 修改内存
+                            boolean changed = FSDirAttrOp.setTimes(dir, iip, -1, now, false);
+                            if (changed) {
+                                // 记录editLog
+                                getEditLog().logTimes(src, -1, now);
+                            }
+                        }
+                    }
+
+                    LocatedBlocks blocks = res.blocks;
+
+                    // 给block排序
+                    sortLocatedBlocks(clientMachine, blocks);
+                    {
+                        List<LocatedBlock> blkList = blocks.getLocatedBlocks();
+                        blockManager.getDatanodeManager().sortLocatedBlocks(clientMachine, blkList);
+                        {
+                            Comparator<DatanodeInfo> comparator = new DFSUtil.ServiceComparator();
+                            for (LocatedBlock lb : locatedBlocks) {
+                                if (lb.isStriped()) {
+                                    sortLocatedStripedBlock(lb, comparator);
+                                } else {
+                                    sortLocatedBlock(lb, targetHost, comparator);
+                                    {
+                                        Node client = getDatanodeByHost(targetHost);
+                                        if (client == null) {
+                                            // client不在datanode上
+                                            nonDatanodeReader = true;
+                                            client = new NodeBase(...);
+                                        }
+
+                                        // 按网络拓扑排序
+                                        networktopology.sortByDistanceUsingNetworkLocation(client, lb.getLocations(), ...);
+                                        {
+                                            sortByDistance(reader, nodes, ...);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        LocatedBlock lastBlock = blocks.getLastLocatedBlock();
+                        if (lastBlock != null) {
+                            ArrayList<LocatedBlock> lastBlockList = Lists.newArrayList(lastBlock);
+                            blockManager.getDatanodeManager().sortLocatedBlocks(clientMachine, lastBlockList);
+                        }
+                    }
+
+                    return blocks;
+                }
+            }
+        }
+
+        return openInternal(locatedBlocks, src, ...);
+        {
+            ErasureCodingPolicy ecPolicy = locatedBlocks.getErasureCodingPolicy();
+            if (ecPolicy != null) {
+                return new DFSStripedInputStream(this, src, ..., ecPolicy, locatedBlocks);
+            }
+            return new DFSInputStream(this, src, ..., locatedBlocks);
+        }
+    }
+
+    return dfs.createWrappedInputStream(dfsis);
+}
+
+// 定位: DFSInputStream
+fis.seek(6);
+{
+    // 在当前block内seek
+    if (pos <= targetPos && targetPos <= blockEnd) {
+        pos += blockReader.skip(diff);
+        done = true;
+    }
+
+    // 跨block，read时处理
+    if (!done) {
+        pos = targetPos;
+        blockEnd = -1;
+    }
+}
+
+// 读取: DFSInputStream
+fis.read(buf);
+{
+    ReaderStrategy byteArrayReader = new ByteArrayStrategy(buf, off, len, ..., dfsClient);
+    return readWithStrategy(byteArrayReader);
+    {
+        if (pos > blockEnd || currentNode == null) {
+            // 执行seek
+            currentNode = blockSeekTo(pos /*target*/);
+            {
+                closeCurrentBlockReaders();
+                while (true) {
+                    // Re-fetch the locatedBlocks from NN if the timestamp has expired.
+                    updateBlockLocationsStamp();
+
+                    // 参考open, 获取namenode中inode的元数据
+                    LocatedBlock targetBlock = getBlockAt(target);
+
+                    // update current position
+                    this.pos = target;
+                    this.blockEnd = targetBlock.getStartOffset() + targetBlock.getBlockSize() - 1;
+                    this.currentLocatedBlock = targetBlock;
+
+                    // 排除已知的deadNode
+                    DNAddrPair retval = chooseDataNode(targetBlock, ...);
+                    chosenNode = retval.info;
+
+                    // 与datanode建立连接
+                    blockReader = getBlockReader(targetBlock, offsetIntoBlock, ..., chosenNode);
+                    {
+                        // 使用dfs.client.replica.accessor.builder.classes指定的类构造，默认为空
+                        BlockReader reader = tryToCreateExternalBlockReader();
+                        if (reader != null) {
+                            return reader;
+                        }
+
+                        final ShortCircuitConf scConf = conf.getShortCircuitConf();
+                        // 优先尝试读local: BlockReaderLocal
+                        if (scConf.isShortCircuitLocalReads() && allowShortCircuitLocalReads) {
+                            reader = getBlockReaderLocal();
+                            if (reader != null) {
+                                return reader;
+                            }
+                        }
+
+                        // 其次尝试unix domain: BlockReaderRemote
+                        if (scConf.isDomainSocketDataTraffic()) {
+                            reader = getRemoteBlockReaderFromDomain();
+                            if (reader != null) {
+                                return reader;
+                            }
+                        }
+
+                        // 最后尝试tcp: BlockReaderRemote
+                        // 默认基于tcp读取数据
+                        return getRemoteBlockReaderFromTcp();
+                        {
+                            Peer peer = remotePeerFactory.newConnectedPeer(inetSocketAddress, token, datanode);
+                            return getRemoteBlockReader(peer);
+                            {
+                                return BlockReaderRemote.newBlockReader(...);
+                                {
+                                    final DataOutputStream out = new DataOutputStream(new BufferedOutputStream(peer.getOutputStream()));
+                                    // 发送读请求: 包括位点信息
+                                    new Sender(out).readBlock(block, blockToken, clientName, startOffset, len, ...);
+
+                                    return new BlockReaderRemote(...);
+                                    {
+                                        this.peer = peer;
+                                        this.datanodeID = datanodeID;
+                                        this.in = peer.getInputStreamChannel();
+                                        this.blockId = blockId;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return chosenNode;
+                }
+            }
+        }
+
+        int realLen = (int) Math.min(len, (blockEnd - pos + 1L));
+        int result = readBuffer(strategy, realLen, corruptedBlocks);
+        {
+            while (true) {
+                try {
+                    return reader.readFromBlock(blockReader, len);
+                    {
+                        // 读取数据到buf
+                        int nRead = blockReader.read(readBuf, offset, length);
+                        {
+                            // 读取下一个packet
+                            if (curDataSlice == null ||
+                                curDataSlice.remaining() == 0 && bytesNeededToFinish > 0) {
+                                readNextPacket();
+                                {
+                                    // Each packet looks like:
+                                    //   PLEN    HLEN      HEADER     CHECKSUMS  DATA
+                                    //   32-bit  16-bit   <protobuf>  <variable length>
+                                    //
+                                    // PLEN:      Payload length
+                                    //            = length(PLEN) + length(CHECKSUMS) + length(DATA)
+                                    //            This length includes its own encoded length in
+                                    //            the sum for historical reasons.
+                                    //
+                                    // HLEN:      Header length
+                                    //            = length(HEADER)
+                                    //
+                                    // HEADER:    the actual packet header fields, encoded in protobuf
+                                    // CHECKSUMS: the crcs for the data chunk. May be missing if
+                                    //            checksums were not requested
+                                    packetReceiver.receiveNextPacket(in);
+                                    {
+                                        // 先读取6字节
+                                        curPacketBuf.clear();
+                                        curPacketBuf.limit(PacketHeader.PKT_LENGTHS_LEN);
+                                        doReadFully(ch, in, curPacketBuf);
+                                        curPacketBuf.flip();
+                                        int payloadLen = curPacketBuf.getInt();
+                                        int dataPlusChecksumLen = payloadLen - Ints.BYTES;
+                                        int headerLen = curPacketBuf.getShort();
+
+                                        int totalLen = payloadLen + headerLen;
+
+                                        // Make sure we have space for the whole packet, and read it.
+                                        reallocPacketBuf(PacketHeader.PKT_LENGTHS_LEN + dataPlusChecksumLen + headerLen);
+                                        curPacketBuf.clear();
+                                        curPacketBuf.position(PacketHeader.PKT_LENGTHS_LEN);
+                                        curPacketBuf.limit(PacketHeader.PKT_LENGTHS_LEN + dataPlusChecksumLen + headerLen);
+                                        doReadFully(ch, in, curPacketBuf);
+                                        curPacketBuf.flip();
+                                        curPacketBuf.position(PacketHeader.PKT_LENGTHS_LEN);
+
+                                        // Extract the header from the front of the buffer (after the length prefixes)
+                                        byte[] headerBuf = new byte[headerLen];
+                                        curPacketBuf.get(headerBuf);
+                                        if (curHeader == null) {
+                                            curHeader = new PacketHeader();
+                                        }
+                                        curHeader.setFieldsFromData(payloadLen, headerBuf);
+
+                                        // Compute the sub-slices of the packet
+                                        int checksumLen = dataPlusChecksumLen - curHeader.getDataLen();
+
+                                        // 剔除checksum，只保留纯数据
+                                        reslicePacket(headerLen, checksumLen, curHeader.getDataLen());
+                                    }
+                                }
+                            }
+
+                            if (curDataSlice.remaining() == 0) {
+                                // we're at EOF now
+                                return -1;
+                            }
+
+                            // 有多少算多少
+                            int nRead = Math.min(curDataSlice.remaining(), len);
+                            curDataSlice.get(buf, off, nRead);
+
+                            return nRead;
+                        }
+
+                        if (nRead > 0) {
+                            offset += nRead;
+                        }
+                        return nRead;
+                    }
+                } catch (ChecksumException ce) {
+                    retryCurrentNode = false;
+                    ioe = e;
+                } catch (IOException e) {
+                    ioe = e;
+                }
+
+                if (retryCurrentNode) {
+                    sourceFound = seekToBlockSource(pos);
+                } else {
+                    // 排除当前节点重新seek
+                    addToDeadNodes(currentNode);
+                    sourceFound = seekToNewSource(pos);
+                }
+
+                if (!sourceFound) {
+                    throw ioe;
+                }
+                retryCurrentNode = false;
+            }
+        }
+
+        pos += result;
+
+        return result;
+    }
+}
+
+```
+
 ## 写文件
+
+```java
+
+FSDataOutputStream fos = fs.append(new Path("/test/data2.txt"));
+{
+    Path p = fixRelativePart(f);
+    return dfs.append(getPathName(p), ...);
+    {
+        final DFSOutputStream out = append(src, ...);
+        {
+            final LastBlockWithStatus blkWithStatus = namenode.append(src, clientName, flag);
+            out = DFSOutputStream.newStreamForAppend(this, src, ...);
+            beginFileLease(result.getFileId(), result);
+        }
+        return new HdfsDataOutputStream(out, ..., out.getInitialLen());
+    }
+}
+
+fos.write(...);
+{
+    // copy user data to local buffer
+    int bytesToCopy = buf.length-count;
+    bytesToCopy = (len<bytesToCopy) ? len : bytesToCopy;
+    System.arraycopy(b, off, buf, count, bytesToCopy);
+    count += bytesToCopy;
+    if (count == buf.length) {
+        // local buffer is full
+        flushBuffer();
+        {
+            writeChecksumChunks(buf, 0, lenToFlush);
+            {
+                // 计算checksum
+                sum.calculateChunkedSums(b, off, len, checksum, 0);
+                for (int i = 0; i < len; i += sum.getBytesPerChecksum()) {
+                    int chunkLen = Math.min(sum.getBytesPerChecksum(), len - i);
+                    int ckOffset = i / sum.getBytesPerChecksum() * getChecksumSize();
+                    writeChunk(b, off + i, chunkLen, checksum, ckOffset, getChecksumSize());
+                    {
+                        currentPacket.writeChecksum(checksum, ckoff, cklen);
+                        currentPacket.writeData(b, offset, len);
+                        currentPacket.incNumChunks();
+                        getStreamer().incBytesCurBlock(len);
+
+                        // If packet is full, enqueue it for transmission
+                        if (currentPacket.getNumChunks() == currentPacket.getMaxChunks() ||
+                            getStreamer().getBytesCurBlock() == blockSize) {
+                            enqueueCurrentPacketFull();
+                            {
+                                // 插入队列等待异步发送
+                                getStreamer().waitAndQueuePacket(currentPacket);
+                                {
+                                    dataQueue.addLast(packet);
+                                }
+                                currentPacket = null;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } 
+    return bytesToCopy;
+}
+
+fos.flush();
+
+```
+
+异步发送线程`DataStreamer`
+
+```java
+
+public void run() {
+    while (!streamerClosed && dfsClient.clientRunning) {
+        // get packet to be sent.
+        if (dataQueue.isEmpty()) {
+            one = createHeartbeatPacket();
+        } else {
+            one = dataQueue.getFirst();
+        }
+
+        if (stage == BlockConstructionStage.PIPELINE_SETUP_CREATE) {
+            // 产生新的block
+            LocatedBlock lb = nextBlockOutputStream();
+            {
+                lb = dfsClient.namenode.addBlock(src, dfsClient.clientName, ...);
+                {
+                    lb = namesystem.getAdditionalBlock(src, ...);
+                    {
+                        FSDirWriteFileOp.ValidateAddBlockResult r = FSDirWriteFileOp.validateAddBlock(this, ...);
+                        // 根据策略选择block所在的datanode
+                        DatanodeStorageInfo[] targets = FSDirWriteFileOp.chooseTargetForNewBlock(...);
+                        lb = FSDirWriteFileOp.storeAllocatedBlock(...);
+                        getEditLog().logSync();
+                    }
+                }
+
+                // Connect to first DataNode in the list.
+                createBlockOutputStream(nodes, ...);
+                {
+                    s = createSocketForPipeline(nodes[0], nodes.length, dfsClient);
+
+                    OutputStream unbufOut = NetUtils.getOutputStream(s, writeTimeout);
+                    InputStream unbufIn = NetUtils.getInputStream(s, readTimeout);
+
+                    // 发送数据
+                    out = new DataOutputStream(new BufferedOutputStream(unbufOut, ...));
+                    // 接收ack
+                    blockReplyStream = new DataInputStream(unbufIn);
+
+                    // send the request: nodes从索引1开始
+                    new Sender(out).writeBlock(blockCopy, ..., nodes, ...);
+                    {
+                        switch (op) {
+                        case WRITE_BLOCK:
+                            opWriteBlock(in);
+                            {
+                                // 跟下游的target建立连接
+                                mirrorNode = targets[0].getXferAddr(connectToDnViaHostname);
+                                mirrorTarget = NetUtils.createSocketAddr(mirrorNode);
+                                mirrorSock = datanode.newSocket();
+                                NetUtils.connect(mirrorSock, mirrorTarget, timeoutValue);
+
+                                OutputStream unbufMirrorOut = NetUtils.getOutputStream(mirrorSock, writeTimeout);
+                                InputStream unbufMirrorIn = NetUtils.getInputStream(mirrorSock);
+
+                                IOStreamPair saslStreams = datanode.saslClient.socketSend(...);
+                                unbufMirrorOut = saslStreams.out;
+                                unbufMirrorIn = saslStreams.in;
+                                mirrorOut = new DataOutputStream(new BufferedOutputStream(unbufMirrorOut, ...));
+                                mirrorIn = new DataInputStream(unbufMirrorIn);
+
+                                // 递归建立pipeline
+                                new Sender(mirrorOut).writeBlock(originalBlock, ...);
+
+                                // receive the block and mirror to the next target
+                                blockReceiver.receiveBlock(mirrorOut, mirrorIn, ...);
+                                {
+                                    while (receivePacket() >= 0) { /* Receive until the last packet */ }
+                                    {
+                                        // read the next packet
+                                        packetReceiver.receiveNextPacket(in);
+
+                                        // 向下游传递
+                                        packetReceiver.mirrorPacketTo(mirrorOut);
+                                        mirrorOut.flush();
+                                    }
+                                }
+                            }
+                            break; 
+                        }
+                    }
+
+                    blockStream = out;
+                }
+            }
+
+            setPipeline(lb);
+            initDataStreaming();
+            {
+                response = new ResponseProcessor(nodes);
+                response.start();
+                stage = BlockConstructionStage.DATA_STREAMING;
+            }
+        } else if (stage == BlockConstructionStage.PIPELINE_SETUP_APPEND) {
+            setupPipelineForAppendOrRecovery();
+            {
+                createBlockOutputStream(nodes, ...);
+            }
+
+            initDataStreaming();
+        }
+
+        if (one.isLastPacketInBlock()) {
+            stage = BlockConstructionStage.PIPELINE_CLOSE;
+        }
+
+        // move packet from dataQueue to ackQueue
+        if (!one.isHeartbeatPacket()) {
+            dataQueue.removeFirst();
+            ackQueue.addLast(one);
+        }
+
+        // Write the full packet, including the header
+        one.writeTo(blockStream);
+        blockStream.flush();
+
+        // Is this block full?
+        if (one.isLastPacketInBlock()) {
+            synchronized (dataQueue) {
+                while (!shouldStop() && ackQueue.size() != 0) {
+                    dataQueue.wait(1000);// wait for acks to arrive from datanodes
+                }
+            }
+
+            endBlock();
+            {
+                closeResponder();
+                closeStream();
+                setPipeline(null, null, null);
+                stage = BlockConstructionStage.PIPELINE_SETUP_CREATE;
+            }
+        }
+    }
+}
+
+
+```
