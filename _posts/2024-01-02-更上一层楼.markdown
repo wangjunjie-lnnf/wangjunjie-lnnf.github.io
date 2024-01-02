@@ -1,0 +1,47 @@
+---
+layout: post
+title:  "更上一层楼"
+date:   2024-01-02 13:00:00 +0000
+categories: jekyll
+tags: riscv
+---
+
+# 背景
+
+> 一直对各种底层技术比较感兴趣，多底才算底层？工作4年时我认为`jvm`和`mysql`算底层，于是似懂非懂的阅读了部分源码；工作7年后，我认为`kernel`、`gcc`、`binutils`、`qemu/kvm`才算底层，于是又阅读了部分源码；工作10年后，想`更上一层楼`，自然就到了`kernel`下面那一层了，越底层越好。首先想到的是`qemu`，它可以运行`kernel`，应该很底层了，阅读了部分实现之后发现那并不是我想要的，机缘巧合之下看到了`riscv`相关的信息，它是一个完全开源的指令集，不仅有成熟的开源实现，而且有很多商用的案例，于是看懂`riscv`的开源实现`rocket-chip`成了我最近4个多月的业余消遣。
+
+## 历程
+
+### 准备源码环境
+
+![准备源码环境](/assets/images/2024-01-02/checkout-rocket-chip.png)
+
+2023年8月份开始准备阅读`rocket-chip`，对于从没接触过的人来说那是相当困难的，`rocket-chip`的源码竟然是`scala`写的，之前阅读过同样源码也是`scala`的`spark`和`kafka`，看懂`scala`源码应该不是问题。事实用一句话形容非常形象：每个字都任务，组合成一句话却不知道是什么意思。
+
+### hello-world
+
+> 万事开头难，干就完了。第一步老规矩先整个`hello-word`。查找`rocket-chip`的相关文档时总会遇到一个叫`chipyard`的项目，它以`rocket-chip`为根基，集合了几十个包括`rocket-chip`在内的相关的开源项目，有着完善的文档。最吸引我的是`chipyard`的文档中写着它可以成功的`boot` `kernel`，在自己编译的`cpu`上运行自己编译的`kernel`，想想就很激动。  
+
+> 经过一番准备，先编译好`chipyard`的上游依赖，包括`verilator`, `pk`等，最终在`2023-09-11`看到了最慢的`hello-word`。
+
+![hello-world](/assets/images/2024-01-02/hello-world.png)
+
+第一次看到的`hello-word`是用的`rocket-chip`，大概执行了`45分钟`，当时尝试了很多次，不敢相信一个`hello-word`等了几分钟竟然还没出来，于是在一个周末睡觉之前开始跑程序，等第二天看到大概执行了`45分钟`之后终于看到了`hello-word`，时间特别久的另一个原因是把默认的编译优化等级从`-Os`改成了`-O0 -g`，主要是为了方便debug以搞明白原理。上图的`hello-word`是`chipyard`打印的，竟然耗时`129分钟`，也是`-O0 -g`编译的，简直不可思议，截了个图纪念以下。
+
+### uart乱码
+
+看到`hello-word`之后，花了一段时间搞明白大致的原理，然后开始为`boot kernel`做准备，第一件事是准备`stdout`，`kernel`运行过程中会打印log，
+
+### boot kernel
+
+![boot-kernel](/assets/images/2024-01-02/boot-kernel.png)
+
+在努力了4个多月之后的`2023-12-30`，搞了2个通宵，终于排除了所有技术问题，看到了`kernel`启动过程打印的log
+
+# 目录
+
+## 电子电路基础
+
+## rocket-chip实现
+
+
