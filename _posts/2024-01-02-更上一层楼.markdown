@@ -8,7 +8,9 @@ tags: riscv
 
 # 背景
 
-> 一直对各种底层技术比较感兴趣，多底才算底层？工作4年时我认为`jvm`和`mysql`算底层，于是似懂非懂的阅读了部分源码；工作7年后，我认为`kernel`、`gcc`、`binutils`、`qemu/kvm`才算底层，于是又阅读了部分源码；工作10年后，想`更上一层楼`，自然就到了`kernel`下面那一层了，越底层越好。首先想到的是`qemu`，它可以运行`kernel`，应该很底层了，阅读了部分实现之后发现那并不是我想要的，机缘巧合之下看到了`riscv`相关的信息，它是一个完全开源的指令集，不仅有成熟的开源实现，而且有很多商用的案例，于是看懂`riscv`的开源实现`rocket-chip`成了我最近4个多月的业余消遣。
+> 一直对各种底层技术比较感兴趣，什么才算底层？工作4年时我认为`jvm`和`mysql`算底层，于是似懂非懂的阅读了部分源码；工作7年后，我认为`kernel`、`gcc`、`binutils`、`qemu/kvm`才算底层，于是又阅读了部分源码；工作10年后，想`更上一层楼`，自然就到了`kernel`下面那一层了。首先想到的是`qemu`，它可以运行`kernel`，应该很底层了，阅读了部分实现之后发现那并不是我想要的。
+
+> 机缘巧合之下看到了`riscv`相关的信息，它是一个完全开源的指令集，不仅有成熟的开源实现，而且有很多商用的案例，于是看懂`riscv`的开源实现`rocket-chip`成了我最近4个多月的业余消遣。
 
 ## 历程
 
@@ -16,32 +18,62 @@ tags: riscv
 
 ![准备源码环境](/assets/images/2024-01-02/checkout-rocket-chip.png)
 
-2023年8月份开始准备阅读`rocket-chip`，对于从没接触过的人来说那是相当困难的，`rocket-chip`的源码竟然是`scala`写的，之前阅读过同样源码也是`scala`的`spark`和`kafka`，看懂`scala`源码应该不是问题。事实用一句话形容非常形象：每个字都任务，组合成一句话却不知道是什么意思。
+2023年8月份开始准备阅读`rocket-chip`，对于从没接触过的人来说那是相当困难的，`rocket-chip`的源码竟然是`scala`写的，之前阅读过同样源码也是`scala`的`spark`和`kafka`，看懂`scala`源码应该不是问题。事实用一句话形容非常形象：每个字都认识，组合成一句话却不知道是什么意思。
 
 ### hello-world
 
-> 万事开头难，干就完了。第一步老规矩先整个`hello-word`。查找`rocket-chip`的相关文档时总会遇到一个叫`chipyard`的项目，它以`rocket-chip`为根基，集合了几十个包括`rocket-chip`在内的相关的开源项目，有着完善的文档。最吸引我的是`chipyard`的文档中写着它可以成功的`boot` `kernel`，在自己编译的`cpu`上运行自己编译的`kernel`，想想就很激动。  
+> 万事开头难，干就完了。第一步老规矩先整个`hello-word`。查找`rocket-chip`的相关文档时总会遇到一个叫`chipyard`的项目，它以`rocket-chip`为根基，集合了几十个包括`rocket-chip`在内的相关的开源项目，有着完善的文档。最吸引我的是`chipyard`的文档中写着它可以成功的`boot` `kernel`，在自己编译的`cpu`上运行自己编译的`kernel`，想想就很刺激。  
 
 > 经过一番准备，先编译好`chipyard`的上游依赖，包括`verilator`, `pk`等，最终在`2023-09-11`看到了最慢的`hello-word`。
 
 ![hello-world](/assets/images/2024-01-02/hello-world.png)
 
-第一次看到的`hello-word`是用的`rocket-chip`，大概执行了`45分钟`，当时尝试了很多次，不敢相信一个`hello-word`等了几分钟竟然还没出来，于是在一个周末睡觉之前开始跑程序，等第二天看到大概执行了`45分钟`之后终于看到了`hello-word`，时间特别久的另一个原因是把默认的编译优化等级从`-Os`改成了`-O0 -g`，主要是为了方便debug以搞明白原理。上图的`hello-word`是`chipyard`打印的，竟然耗时`129分钟`，也是`-O0 -g`编译的，简直不可思议，截了个图纪念以下。
+> 第一次看到的`hello-word`是用的`rocket-chip`，大概执行了`45分钟`，当时尝试了很多次，不敢相信一个`hello-word`等了几分钟竟然还没出来，于是在一个周末睡觉之前开始跑程序，等第二天看到大概执行了`45分钟`之后终于看到了`hello-word`，时间特别久的另一个原因是把默认的编译优化等级从`-Os`改成了`-O0 -g`，主要是为了方便debug以搞明白原理。上图的`hello-word`是`chipyard`打印的，竟然耗时`129分钟`，也是`-O0 -g`编译的，简直不可思议，截了个图纪念以下。
 
 ### uart乱码
 
-看到`hello-word`之后，花了一段时间搞明白大致的原理，然后开始为`boot kernel`做准备，第一件事是准备`stdout`，`kernel`运行过程中会打印log，
+> 看到`hello-word`之后，花了一段时间搞明白大致的原理，然后开始为`boot kernel`做准备，第一件事是怎么看到`kernel`启动过程中打印的log。`chiyard`的默认配置使用了`sifive-blocks`项目的`uart`组件。从上图的`hello-world`也能看出来`h`前面明显有个乱码字符。然后就是漫长的排查乱码的过程。
+
+> 首先想到的就是debug，这也是修改默认编译优化级别的原因。`verilator`生成的代码太抽象了，一头雾水。
+
+> 然后就是万能的`printf`，通过在`uart`的发送者和接收者两端分别打印log，果然发现了端倪
+
+![uart-hz-error-log](/assets/images/2024-01-02/uart-hz-error-log.png)
+
+> 根据接收者的实现机制分析，发送者每发送一个bit，接收者需要取样16次。分析上图log，接收者明显慢了接近5倍。分析源码，采样频率是根据波特率计算的，而且log里也打印了发送者和接收者的波特率，值是一样的。卡了很久，还是没找到原因，最后只能硬着头皮`debug` `verilator`生成的乱码一样的`c++`代码了。
+
+![uart-hz-verilator-2](/assets/images/2024-01-02/uart-hz-verilator-2.png)
+
+> 无数次的尝试后发现tx和tx打印log的频率是受此变量控制的。
+
+![uart-hz-verilator-1](/assets/images/2024-01-02/uart-hz-verilator-1.png)
+
+> 进而发现此变量是受clock影响的。
+
+![uart-hz-error-code](/assets/images/2024-01-02/uart-hz-error-code.png)
+
+> 再看代码，发现pbus频率从默认的`100M`改成了`500M`，又经过多次尝试，所有的频率相关的参数都改成`100M`之后乱码终于解决。后续会详细的分析`uart`的实现逻辑以及此问题的根源。
+
 
 ### boot kernel
 
-![boot-kernel](/assets/images/2024-01-02/boot-kernel.png)
+> 首先编译最新的的lts版本的`kernel`，后续详细描述如何用`-O0 -g`编译一个方便调试的内核
 
-在努力了4个多月之后的`2023-12-30`，搞了2个通宵，终于排除了所有技术问题，看到了`kernel`启动过程打印的log
+> 另外一个要解决的大问题是`chipyard`是通过运行`bbl`进而跳转到`bbl`内嵌的`kernel`的，`chipyard`运行`bbl`之前首先要把`bbl`加载到内存，这个过程难以想象的慢，`bbl`嵌入kernel之后大小大概是`30M`，按默认的加载速度，大概需要几个月。通过分析`chipyard`仿真时的内存的实现机制发现，是可以实现预先加载kernel到内存的。
 
-# 目录
+![boot-kernel-1](/assets/images/2024-01-02/boot-kernel-1.png)
 
-## 电子电路基础
+> 下一步是如何把预加载的kernel的地址告知`bbl`，分析`bbl`跳转到kernel的过程，可以通过`dts`传递参数。
 
-## rocket-chip实现
+![boot-kernel-2](/assets/images/2024-01-02/boot-kernel-2.png)
+
+> 首次尝试时未指定`kernel-end`的值，导致总是`boot`失败，经过一个月的各种分析和尝试，在每次内存读写以及bbl的每个语句执行结束后都打印kernel镜像的前4个字节的值，最终发现了问题所在，bbl在跳转到kernel之前有一个操作是把`chipyard`传递过来的dtb写入内存，然后在boot时把内存地址告知kernel。dts未指定`kernel-end`和bbl未嵌入kernel两者叠加之后导致bbl误把dtb复制到了kernel镜像所在的内存，破坏了kernel镜像，进而导致启动失败。
+
+![boot-kernel-3](/assets/images/2024-01-02/boot-kernel-3.png)
+
+> 在努力了4个多月之后的`2023-12-30`元旦来临之际，此事应该做个了断了，搞了2个通宵，终于排除了所有的问题，看到了`kernel`正常启动打印的log。
+
+![boot-kernel-0](/assets/images/2024-01-02/boot-kernel-0.png)
+
 
 
