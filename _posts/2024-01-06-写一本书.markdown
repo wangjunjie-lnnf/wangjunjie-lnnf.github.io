@@ -6,6 +6,43 @@ categories: jekyll
 tags: index
 ---
 
+# 背景
+
+> 机缘巧合之下看到了一本书，书名叫`The Elements of Computing Systems`。此书的目录是这样的。
+
+![contents](/assets/images/2024-01-06/contents.png)
+
+> 摘抄书中部分内容
+
+> It is commonly argued that enlightened people of the twentyfirst century ought to familiarize themselves with the key ideas underlying BANG: Bits, Atoms, Neurons, and Genes. Although science has been remarkably successful in uncovering their basic operating systems, it is quite possible that we will never fully grasp how atoms, neurons, and genes actually work. Bits, however, and computing systems at large, entail a consoling exception: in spite of their fantastic complexity, one can completely understand how modern computers work, and how they are built. So, as we gaze with awe at the BANG around us, it is a pleasing thought that at least one field in this quartet can be fully laid bare to human comprehension. (page-14)
+
+> 21世纪的热点是: 比特、原子、神经、基因，这4者只有比特在当前是可以彻底搞清楚的。
+
+> We wrote this book because we felt that many computer science students are missing the forest for the trees. The typical learner is marshaled through a series of courses in programming, theory, and engineering, without pausing to appreciate the beauty of the picture at large. And the picture at large is such that hardware, software, and application systems are tightly interrelated through a hidden web of abstractions, interfaces, and contract-based implementations. (page-15)
+
+> 很多人在学习计算机时都是只见树木不见森林，只能看到一个点，看不到整个网络。
+
+> 事实上这也是我一直最想突破的。
+
+> We believe that the best way to understand how computers work is to build one from scratch. With that in mind, we came up with the following idea: Let’s specify a simple but sufficiently powerful computer system, and invite learners to build its hardware platform and software hierarchy from the ground up. And while we are at it, let’s do it right. We are saying this because building a general-purpose computer from first principles is a huge enterprise. (page-15)
+
+> 彻底理解整个计算机体系最好的方式是从头构建一个完整的体系。
+
+> 我是非常的赞同这段话，所以才花了4个多月的时间深入了解从晶体管构造cpu的过程。
+
+> You may be thinking: “On my computer, compiling and running programs is much easier—all I have to do is click this icon or write that command!” Indeed, a modern computer system is like a submerged iceberg: most people get to see only the top, and their knowledge of computing systems is sketchy and superficial. If, however, you wish to explore beneath the surface, then Lucky You! There’s a fascinating world down there, made of some of the most beautiful stuff in computer science. An intimate understanding of this underworld is what separates naïve programmers from sophisticated developers—people who can create complex hardware and software technologies. And the best way to understand how these technologies work—and we mean understand them in the marrow of your bones—is to build a complete computer system from the ground up. (page-28)
+
+> 计算机体系好比是一个冰山，大部分人只能看到水面上那一角，区分小白和专家是看他是否能看到冰山下面的部分。
+
+![figure-1.1](/assets/images/2024-01-06/figure-1.1.png)
+
+> Starting at the bottom tier of the figure, any general-purpose computer has an architecture that includes a ALU (Arithmetic Logic Unit) and a RAM (Random Access Memory). All ALU and RAM devices are made of elementary logic gates. And, surprisingly and fortunately, as we will soon see, all logic gates can be made from Nand gates alone. Focusing on the software hierarchy, all high-level languages rely on a suite of translators (compiler/interpreter, virtual machine, assembler) for reducing high-level code all the way down to machine-level instructions. Some high-level languages are interpreted rather than compiled, and some don’t use a virtual machine, but the big picture is essentially the same. This observation is a manifestation of a fundamental computer science principle, known as the Church-Turing conjecture: at bottom, all computers are essentially equivalent. (page-29)
+
+> 上图描述了从晶体管到逻辑门，再到cpu，然后到操作系统、编译器、虚拟机、高级语言的过程
+
+
+
+
 
 # 目录
 
