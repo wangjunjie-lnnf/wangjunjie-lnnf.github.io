@@ -7,9 +7,7 @@
 		{%- if site.posts.size > 0 -%}
 		<ul class="post-list">
 			{%- for post in site.posts -%}
-				<!-- TODO 优化categories -->
-				{%- for categorie in post.categories -%}
-			<li class="post-list-item post-category-{{categorie}}">
+			<li class="post-list-item {{post.categories}}">
 				<!-- {%- assign date_format = site.date_format | default: "%b %-d, %Y" -%} -->
 				{%- assign date_format = "%Y/%m/%d" -%}
 				<span class="post-date">{{ post.date | date: date_format }}</span>
@@ -18,7 +16,6 @@
 				</a>
 				{%- if site.show_excerpts -%}{{ post.excerpt }}{%- endif -%}
 			</li>
-				{%- endfor -%}
 		  	{%- endfor -%}
 		</ul>
 	  	{%- endif -%}
@@ -31,9 +28,8 @@
 		if (window.location.hash) {
 			let hash = window.location.hash.substring(1);
 			$('#category-name').text(hash.substring(0, 1).toUpperCase() + hash.substring(1));
-			let category_class = '.post-category-' + hash;
 			let items = $('.post-list-item').each((i, e) => {
-				if (!$(e).hasClass('post-category-' + hash)) {
+				if (!$(e).hasClass(hash)) {
 					$(e).hide();
 				} else {
 					$(e).show();
